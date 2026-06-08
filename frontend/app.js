@@ -140,6 +140,7 @@ const pickerHint = document.getElementById("pickerHint");
 let currentSeg = "OPTION";
 let currentUnderlying = null;
 let ulTimer = null, ltpTimer = null;
+let chainData = [], chainScrolled = false;
 const HINTS = { OPTION: "— search an index/stock, then pick a strike",
                 FUTURES: "— search an index/stock future",
                 EQUITY: "— search a stock or index" };
@@ -219,12 +220,14 @@ expirySelect.onchange = () => { if (currentUnderlying) loadChain(currentUnderlyi
 
 async function loadChain(underlying, expiry) {
   const data = await api.get(`/api/optionchain?underlying=${encodeURIComponent(underlying)}&expiry=${encodeURIComponent(expiry)}`);
-  chainBody.innerHTML = data.strikes.map((row) => {
-    const ce = row.ce, pe = row.pe;
+  chainData = data.strikes;
+  chainScrolled = false;
+  chainBody.innerHTML = data.strikes.map((row, i) => {
     const cell = (c, cls) => c
       ? `<div class="chain-cell ${cls}" data-c='${JSON.stringify(c)}'><span class="ltp dim" data-ltp="${c.security_id}">tap to pick</span></div>`
       : `<div class="chain-cell ${cls}"><span class="ltp dim">-</span></div>`;
-    return `<div class="chain-row">${cell(ce, "ce")}<div class="chain-strike">${row.strike}</div>${cell(pe, "pe")}</div>`;
+    return `<div class="chain-row" data-row="${i}">${cell(row.ce, "ce")}
+      <div class="chain-strike" data-strike="${i}">${row.strike}</div>${cell(row.pe, "pe")}</div>`;
   }).join("");
   chainWrap.style.display = "block";
   chainBody.querySelectorAll(".chain-cell[data-c]").forEach((el) => {
@@ -251,6 +254,40 @@ async function refreshChainLtp() {
     const p = prices[sp.dataset.ltp];
     if (p != null) { sp.textContent = "₹" + p; sp.classList.remove("dim"); }
   });
+  classifyChain(prices);
+}
+
+// Mark each strike ITM / ATM / OTM and scroll to ATM.
+// ATM = the strike where Call and Put premiums are closest (at-the-money).
+function classifyChain(prices) {
+  let atm = -1, best = Infinity;
+  chainData.forEach((row, i) => {
+    if (!row.ce || !row.pe) return;
+    const ce = prices[row.ce.security_id], pe = prices[row.pe.security_id];
+    if (ce == null || pe == null || ce <= 0 || pe <= 0) return;
+    const diff = Math.abs(ce - pe);
+    if (diff < best) { best = diff; atm = i; }
+  });
+  if (atm < 0) return;                       // no live prices yet
+  const atmStrike = chainData[atm].strike;
+  chainData.forEach((row, i) => {
+    const el = chainBody.querySelector(`.chain-row[data-row="${i}"]`);
+    if (!el) return;
+    const ceCell = el.querySelector(".chain-cell.ce");
+    const peCell = el.querySelector(".chain-cell.pe");
+    el.classList.toggle("atm", i === atm);
+    // CALL: in-the-money when strike is below spot; PUT: opposite.
+    if (ceCell) { ceCell.classList.toggle("itm", row.strike < atmStrike);
+                  ceCell.classList.toggle("otm", row.strike > atmStrike); }
+    if (peCell) { peCell.classList.toggle("itm", row.strike > atmStrike);
+                  peCell.classList.toggle("otm", row.strike < atmStrike); }
+    const sCell = el.querySelector(".chain-strike");
+    if (sCell) sCell.innerHTML = row.strike + (i === atm ? ' <span class="atm-badge">ATM</span>' : "");
+  });
+  if (!chainScrolled) {
+    const atmEl = chainBody.querySelector(`.chain-row[data-row="${atm}"]`);
+    if (atmEl) { atmEl.scrollIntoView({ block: "center" }); chainScrolled = true; }
+  }
 }
 
 function renderFutures(futs) {

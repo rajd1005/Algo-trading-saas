@@ -98,7 +98,15 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .chain-cell:hover { background: #1a2129; }
 .chain-cell.ce:hover { background: rgba(46,160,67,.12); }
 .chain-cell.pe:hover { background: rgba(248,81,73,.12); }
+.chain-cell.ce.itm { background: rgba(46,160,67,.13); }   /* in-the-money calls */
+.chain-cell.pe.itm { background: rgba(248,81,73,.13); }   /* in-the-money puts  */
+.chain-row.atm { outline: 1px solid rgba(210,153,34,.7); outline-offset: -1px;
+  background: rgba(210,153,34,.10); }
+.atm-badge { display: inline-block; margin-left: 6px; font-size: 9px; font-weight: 700;
+  background: var(--yellow); color: #000; padding: 1px 5px; border-radius: 4px; vertical-align: middle; }
 .chain-cell.sel { background: var(--accent) !important; color: #fff; }
+.chain-legend { font-size: 11px; color: var(--muted); padding: 6px 12px; }
+.chain-legend b { color: var(--text); font-weight: 600; }
 .chain-cell .ltp { color: var(--text); font-weight: 600; }
 .chain-cell .ltp.dim { color: var(--muted); font-weight: 400; }
 .chain-strike { padding: 8px 12px; text-align: center; font-weight: 600;
