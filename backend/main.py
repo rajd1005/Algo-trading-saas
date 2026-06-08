@@ -5,6 +5,7 @@ Run it with:   uvicorn main:app --host 0.0.0.0 --port 8000
 (or just:      python main.py )
 """
 import os
+import json
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -14,8 +15,8 @@ from sqlalchemy.orm import Session
 import config
 from database import init_db, get_db, SessionLocal
 from models import Trade, LogEntry, Setting
-from schemas import TradeCreate, TradeOut, BrokerConfigIn, SettingsIn
-from engine import engine
+from schemas import TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn
+from engine import engine, level_price
 from instruments import store as instruments
 from market_data import DhanMarketData, demo_market
 from brokers import verify_dhan_credentials
@@ -72,12 +73,48 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
     if not payload.security_id:
         raise HTTPException(400, "Please search and select a symbol from the list "
                                  "(so we know its Security ID for live prices).")
-    t = Trade(**payload.model_dump())
+    data = payload.model_dump()
+    raw_targets = data.pop("targets", [])
+    targets = [{"points": float(x["points"]), "qty": int(x["qty"]), "hit": False}
+               for x in raw_targets if float(x.get("points", 0)) > 0 and int(x.get("qty", 0)) > 0]
+    t = Trade(**data)
+    t.name = data.get("name") or data["symbol"]
+    t.targets_json = json.dumps(targets) if targets else ""
+    # Provisional SL/target prices for display before entry (final ones computed at fill).
+    ref = payload.entry_price if payload.entry_type == "LIMIT" else 0.0
+    if ref > 0:
+        t.stop_loss = level_price(t.side, ref, t.sl_points, False)
+        t.target = level_price(t.side, ref, targets[0]["points"] if targets else t.target_points, True)
     db.add(t)
     db.commit()
     db.refresh(t)
     db.add(LogEntry(message=f"Trade created: {t.symbol} [{t.mode}]", trade_id=t.id))
     db.commit()
+    return t
+
+
+@app.post("/api/trades/{trade_id}/modify", response_model=TradeOut)
+def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)):
+    """Change stop-loss / target (in points) on a PENDING or OPEN trade."""
+    t = db.get(Trade, trade_id)
+    if not t:
+        raise HTTPException(404, "Trade not found")
+    if t.status not in ("PENDING", "OPEN"):
+        raise HTTPException(400, "Only pending or open trades can be modified.")
+    if payload.sl_points is not None:
+        t.sl_points = payload.sl_points
+    if payload.target_points is not None:
+        t.target_points = payload.target_points
+        t.targets_json = ""        # switching to a single target via modify
+    # recompute absolute prices from the best reference we have
+    ref = t.entry_fill_price if (t.status == "OPEN" and t.entry_fill_price > 0) else t.entry_price
+    if ref > 0:
+        t.stop_loss = level_price(t.side, ref, t.sl_points, False)
+        t.target = level_price(t.side, ref, t.target_points, True)
+    db.add(LogEntry(message=f"Modified {t.symbol}: SL {t.sl_points}pt / Target {t.target_points}pt",
+                    trade_id=t.id))
+    db.commit()
+    db.refresh(t)
     return t
 
 
@@ -90,12 +127,15 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
     if t.status != "OPEN":
         raise HTTPException(400, "Only OPEN trades can be closed.")
     price = t.last_price or t.entry_fill_price
+    direction = 1 if t.side == "BUY" else -1
+    remaining = t.quantity - (t.exited_qty or 0)
+    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+    t.exited_qty = t.quantity
     t.exit_fill_price = price
     t.status = "CLOSED"
     t.exit_reason = "MANUAL"
-    direction = 1 if t.side == "BUY" else -1
-    t.pnl = round((price - t.entry_fill_price) * direction * t.quantity, 2)
-    db.add(LogEntry(message=f"Manual close {t.symbol} @ {price} P&L={t.pnl}", trade_id=t.id))
+    t.pnl = round(t.realized_pnl, 2)
+    db.add(LogEntry(message=f"Manual close {t.symbol} x{remaining} @ {price} P&L={t.pnl}", trade_id=t.id))
     db.commit()
     db.refresh(t)
     return t

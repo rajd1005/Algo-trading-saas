@@ -50,10 +50,9 @@
   <section id="tab-new" class="tab-panel">
     <form id="tradeForm" class="form">
       <div class="row">
-        <label>Label <input name="name" placeholder="My Nifty trade" /></label>
-        <label>Mode
+        <label style="max-width:280px;">Mode
           <select name="mode">
-            <option value="TEST">TEST (paper — real prices, no real order)</option>
+            <option value="TEST">TEST (paper — no real order)</option>
             <option value="LIVE">LIVE (real money)</option>
           </select>
         </label>
@@ -91,23 +90,53 @@
       <input type="hidden" name="symbol" /><input type="hidden" name="security_id" />
       <input type="hidden" name="exchange_segment" /><input type="hidden" name="instrument_type" />
 
+      <div class="field">
+        <div class="field-label">Side</div>
+        <div class="btn-group">
+          <button type="button" class="opt buy active" data-side="BUY">BUY</button>
+          <button type="button" class="opt sell" data-side="SELL">SELL</button>
+        </div>
+        <input type="hidden" name="side" value="BUY" />
+      </div>
+
       <div class="row">
-        <label>Side
-          <select name="side"><option>BUY</option><option>SELL</option></select>
-        </label>
-        <label>Lots <input id="lotsInput" type="number" value="1" min="1" />
-          <span id="qtyComputed" class="muted" style="font-size:11px;">= 1 qty (lot size 1)</span>
-        </label>
-        <input type="hidden" name="quantity" value="1" />
-        <label>Entry type
-          <select name="entry_type"><option>MARKET</option><option>LIMIT</option></select>
+        <div class="field">
+          <div class="field-label">Lots</div>
+          <div class="stepper">
+            <button type="button" class="step" id="lotMinus">−</button>
+            <input id="lotsInput" type="number" value="1" min="1" />
+            <button type="button" class="step" id="lotPlus">+</button>
+          </div>
+          <div id="qtyComputed" class="muted" style="font-size:11px; margin-top:4px;">= 1 qty (lot size 1)</div>
+          <input type="hidden" name="quantity" value="1" />
+        </div>
+        <div class="field">
+          <div class="field-label">Entry type</div>
+          <div class="btn-group">
+            <button type="button" class="opt active" data-et="MARKET">MARKET</button>
+            <button type="button" class="opt" data-et="LIMIT">LIMIT</button>
+          </div>
+          <input type="hidden" name="entry_type" value="MARKET" />
+        </div>
+        <label>Entry price
+          <input name="entry_price" id="entryPrice" type="number" step="0.05" value="0" disabled />
         </label>
       </div>
+
       <div class="row">
-        <label>Entry price <input name="entry_price" type="number" step="0.05" value="0" /></label>
-        <label>Stop-loss <input name="stop_loss" type="number" step="0.05" value="0" /></label>
-        <label>Target <input name="target" type="number" step="0.05" value="0" /></label>
+        <label>Stop-loss (points) <input name="sl_points" type="number" step="0.05" value="0" /></label>
+        <label id="targetField">Target (points) <input name="target_points" type="number" step="0.05" value="0" /></label>
       </div>
+
+      <div class="field">
+        <label class="check"><input type="checkbox" id="multiToggle" /> Use multiple targets (scale-out)</label>
+        <div id="multiWrap" style="display:none; margin-top:8px;">
+          <div id="targetRows"></div>
+          <button type="button" class="btn btn-sm" id="addTarget">+ Add target</button>
+          <div class="muted" style="font-size:11px; margin-top:6px;">Each target exits the given <b>lots</b> at that many <b>points</b> of profit. Remaining lots ride until stop-loss or manual close.</div>
+        </div>
+      </div>
+
       <button type="submit" class="btn btn-primary">Create Trade</button>
       <p id="formMsg" class="msg"></p>
     </form>
@@ -154,6 +183,23 @@
       <tbody id="logsBody"></tbody>
     </table>
   </section>
+
+  <!-- Modify SL/Target modal -->
+  <div id="modifyModal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+      <h3 style="margin-top:0;">Modify SL / Target</h3>
+      <p class="muted" id="modifyInfo" style="font-size:13px;"></p>
+      <div class="row">
+        <label>Stop-loss (points) <input id="modSl" type="number" step="0.05" value="0" /></label>
+        <label>Target (points) <input id="modTarget" type="number" step="0.05" value="0" /></label>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" id="modSave">Save</button>
+        <button class="btn" id="modCancel">Cancel</button>
+      </div>
+      <p id="modMsg" class="msg"></p>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

@@ -28,6 +28,30 @@ def get_db():
 
 
 def init_db():
-    """Create all tables on first run."""
+    """Create all tables on first run, then add any newly-introduced columns."""
     import models  # noqa: F401  (import registers the models)
     Base.metadata.create_all(bind=engine)
+    _migrate()
+
+
+# New columns added in later versions -> ensured on existing databases here,
+# so upgrades never lose your data (SQLite supports ADD COLUMN).
+_MIGRATIONS = {
+    "trades": {
+        "sl_points": "REAL DEFAULT 0",
+        "target_points": "REAL DEFAULT 0",
+        "targets_json": "TEXT DEFAULT ''",
+        "exited_qty": "INTEGER DEFAULT 0",
+        "realized_pnl": "REAL DEFAULT 0",
+    },
+}
+
+
+def _migrate():
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        for table, cols in _MIGRATIONS.items():
+            existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            for col, decl in cols.items():
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {decl}"))

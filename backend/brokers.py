@@ -26,11 +26,11 @@ class PaperBroker:
 
     name = "PAPER"
 
-    def place_entry(self, trade, current_price: float) -> OrderResult:
+    def place_entry(self, trade, current_price: float, qty=None) -> OrderResult:
         # Fill instantly at the current simulated price.
         return OrderResult(ok=True, fill_price=current_price, order_id=f"PAPER-E-{trade.id}")
 
-    def place_exit(self, trade, current_price: float) -> OrderResult:
+    def place_exit(self, trade, current_price: float, qty=None) -> OrderResult:
         return OrderResult(ok=True, fill_price=current_price, order_id=f"PAPER-X-{trade.id}")
 
 
@@ -50,7 +50,7 @@ class DhanBroker:
             "Content-Type": "application/json",
         }
 
-    def _place(self, trade, side: str, current_price: float) -> OrderResult:
+    def _place(self, trade, side: str, current_price: float, qty=None) -> OrderResult:
         """Send one order to Dhan. `side` is BUY or SELL."""
         url = f"{config.DHAN_API_BASE}/orders"
         order_type = "MARKET" if trade.entry_type == "MARKET" else "LIMIT"
@@ -62,7 +62,7 @@ class DhanBroker:
             "orderType": order_type,
             "validity": "DAY",
             "securityId": str(trade.security_id),
-            "quantity": int(trade.quantity),
+            "quantity": int(qty if qty else trade.quantity),
             "price": float(trade.entry_price) if order_type == "LIMIT" else 0,
         }
         try:
@@ -81,13 +81,13 @@ class DhanBroker:
                 pass
             return OrderResult(ok=False, error=f"{e} {detail}".strip())
 
-    def place_entry(self, trade, current_price: float) -> OrderResult:
-        return self._place(trade, trade.side, current_price)
+    def place_entry(self, trade, current_price: float, qty=None) -> OrderResult:
+        return self._place(trade, trade.side, current_price, qty)
 
-    def place_exit(self, trade, current_price: float) -> OrderResult:
+    def place_exit(self, trade, current_price: float, qty=None) -> OrderResult:
         # Exit is the opposite of the entry side.
         exit_side = "SELL" if trade.side == "BUY" else "BUY"
-        return self._place(trade, exit_side, current_price)
+        return self._place(trade, exit_side, current_price, qty)
 
 
 def verify_dhan_credentials(client_id: str, access_token: str) -> tuple[bool, str]:

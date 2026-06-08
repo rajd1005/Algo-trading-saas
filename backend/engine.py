@@ -15,6 +15,7 @@ BOTH test and live trades use real Dhan prices. The only difference:
 So Dhan must be connected for the engine to do anything (that's where LTP
 comes from).
 """
+import json
 import threading
 import time
 
@@ -24,6 +25,15 @@ from market_data import DhanMarketData, demo_market
 from live_feed import feed
 from brokers import PaperBroker, DhanBroker
 import config
+
+
+def level_price(side, ref, points, is_target):
+    """Convert a points distance into an absolute price, given the entry ref."""
+    if points <= 0 or ref <= 0:
+        return 0.0
+    if side == "BUY":
+        return round(ref + points, 2) if is_target else round(ref - points, 2)
+    return round(ref - points, 2) if is_target else round(ref + points, 2)
 
 
 class TradingEngine:
@@ -199,6 +209,7 @@ class TradingEngine:
             t.status = "OPEN"
             t.entry_fill_price = res.fill_price
             t.broker_order_id = res.order_id
+            self._apply_levels(t)        # compute SL/target prices from the fill
             self._log(db, f"ENTRY {t.side} {t.symbol} x{t.quantity} @ {res.fill_price} "
                           f"[{t.mode}/{broker.name}]", "INFO", t.id)
         else:
@@ -215,43 +226,109 @@ class TradingEngine:
             return price <= t.entry_price       # buy at/below entry
         return price >= t.entry_price           # short at/above entry
 
+    # ---------- levels / targets ----------
+    def _apply_levels(self, t):
+        """Compute absolute SL/target prices from points and the entry fill."""
+        t.stop_loss = level_price(t.side, t.entry_fill_price, t.sl_points, False)
+        targets = self._targets(t)
+        if targets:
+            t.target = level_price(t.side, t.entry_fill_price, targets[0]["points"], True)
+        else:
+            t.target = level_price(t.side, t.entry_fill_price, t.target_points, True)
+
+    def _targets(self, t):
+        if not t.targets_json:
+            return []
+        try:
+            return json.loads(t.targets_json)
+        except Exception:
+            return []
+
     # ---------- exit ----------
     def _handle_open(self, db, t, price, kill, live_broker):
-        reason = None
-        if kill:
-            reason = "KILL"
-        elif t.side == "BUY":
-            if t.stop_loss > 0 and price <= t.stop_loss:
-                reason = "STOPLOSS"
-            elif t.target > 0 and price >= t.target:
-                reason = "TARGET"
-        else:
-            if t.stop_loss > 0 and price >= t.stop_loss:
-                reason = "STOPLOSS"
-            elif t.target > 0 and price <= t.target:
-                reason = "TARGET"
+        direction = 1 if t.side == "BUY" else -1
+        remaining = t.quantity - (t.exited_qty or 0)
+        if remaining <= 0:
+            t.status = "CLOSED"
+            return
+        broker = self._broker_for(t, live_broker)
 
-        if reason is None:
+        # 1) Kill switch or stop-loss -> exit ALL remaining.
+        sl_hit = t.stop_loss > 0 and (price <= t.stop_loss if t.side == "BUY"
+                                      else price >= t.stop_loss)
+        if kill or sl_hit:
+            res = broker.place_exit(t, price, qty=remaining)
+            if res.ok:
+                t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+                t.exited_qty = t.quantity
+                t.exit_fill_price = res.fill_price
+                t.status = "CLOSED"
+                t.exit_reason = "KILL" if kill else "STOPLOSS"
+                t.pnl = round(t.realized_pnl, 2)
+                self._log(db, f"EXIT ({t.exit_reason}) {t.symbol} x{remaining} @ {res.fill_price} "
+                              f"P&L={t.pnl:.2f} [{t.mode}/{broker.name}]", "INFO", t.id)
+            else:
+                self._log(db, f"Exit failed for {t.symbol}: {res.error}", "ERROR", t.id)
             return
 
-        broker = self._broker_for(t, live_broker)
-        res = broker.place_exit(t, price)
-        if res.ok:
-            t.exit_fill_price = res.fill_price
-            t.status = "CLOSED"
-            t.exit_reason = reason
-            self._update_pnl(t, res.fill_price)
-            self._log(db, f"EXIT ({reason}) {t.symbol} @ {res.fill_price} "
-                          f"P&L={t.pnl:.2f} [{t.mode}/{broker.name}]", "INFO", t.id)
-        else:
-            self._log(db, f"Exit failed for {t.symbol}: {res.error}", "ERROR", t.id)
+        # 2) Targets.
+        targets = self._targets(t)
+        if targets:
+            changed = False
+            for tg in targets:
+                if tg.get("hit"):
+                    continue
+                tprice = level_price(t.side, t.entry_fill_price, tg["points"], True)
+                reached = price >= tprice if t.side == "BUY" else price <= tprice
+                if not reached:
+                    continue
+                exit_qty = min(int(tg.get("qty", 0)), t.quantity - t.exited_qty)
+                if exit_qty > 0:
+                    res = broker.place_exit(t, price, qty=exit_qty)
+                    if not res.ok:
+                        self._log(db, f"Target exit failed {t.symbol}: {res.error}", "ERROR", t.id)
+                        continue
+                    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * exit_qty
+                    t.exited_qty += exit_qty
+                    t.exit_fill_price = res.fill_price
+                    self._log(db, f"TARGET hit {t.symbol} x{exit_qty} @ {res.fill_price} "
+                                  f"(booked P&L={t.realized_pnl:.2f}) [{t.mode}/{broker.name}]", "INFO", t.id)
+                tg["hit"] = True
+                changed = True
+            if changed:
+                t.targets_json = json.dumps(targets)
+            if t.exited_qty >= t.quantity:
+                t.status = "CLOSED"
+                t.exit_reason = "TARGET"
+                t.pnl = round(t.realized_pnl, 2)
+            return
+
+        # 3) Single target -> exit all remaining.
+        if t.target > 0:
+            reached = price >= t.target if t.side == "BUY" else price <= t.target
+            if reached:
+                res = broker.place_exit(t, price, qty=remaining)
+                if res.ok:
+                    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+                    t.exited_qty = t.quantity
+                    t.exit_fill_price = res.fill_price
+                    t.status = "CLOSED"
+                    t.exit_reason = "TARGET"
+                    t.pnl = round(t.realized_pnl, 2)
+                    self._log(db, f"EXIT (TARGET) {t.symbol} x{remaining} @ {res.fill_price} "
+                                  f"P&L={t.pnl:.2f} [{t.mode}/{broker.name}]", "INFO", t.id)
+                else:
+                    self._log(db, f"Exit failed for {t.symbol}: {res.error}", "ERROR", t.id)
 
     def _update_pnl(self, t, price):
+        """Booked (realized) P&L plus unrealized on the remaining quantity."""
         if t.entry_fill_price <= 0:
             t.pnl = 0.0
             return
         direction = 1 if t.side == "BUY" else -1
-        t.pnl = round((price - t.entry_fill_price) * direction * t.quantity, 2)
+        remaining = t.quantity - (t.exited_qty or 0)
+        unrealized = (price - t.entry_fill_price) * direction * remaining
+        t.pnl = round((t.realized_pnl or 0) + unrealized, 2)
 
 
 engine = TradingEngine()

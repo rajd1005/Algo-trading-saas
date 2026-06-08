@@ -38,8 +38,17 @@ class Trade(Base):
     # --- Entry / Exit rules ---
     entry_type = Column(String, default="MARKET")  # MARKET or LIMIT
     entry_price = Column(Float, default=0.0)       # trigger/limit price for entry
-    stop_loss = Column(Float, default=0.0)         # absolute price (0 = none)
-    target = Column(Float, default=0.0)            # absolute price (0 = none)
+    stop_loss = Column(Float, default=0.0)         # absolute price (computed from points)
+    target = Column(Float, default=0.0)            # absolute price (computed from points)
+
+    # Stop-loss / target are entered as POINTS; the absolute prices above are
+    # computed from the actual entry fill price when the trade enters.
+    sl_points = Column(Float, default=0.0)
+    target_points = Column(Float, default=0.0)
+    # Optional multiple (scale-out) targets, JSON: [{"points":x,"qty":n,"hit":false}]
+    targets_json = Column(Text, default="")
+    exited_qty = Column(Integer, default=0)        # qty already booked via partial targets
+    realized_pnl = Column(Float, default=0.0)      # P&L locked in from partial exits
 
     mode = Column(String, default="TEST")          # TEST or LIVE
 

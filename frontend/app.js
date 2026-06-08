@@ -81,8 +81,8 @@ async function refreshTrades() {
       <td>${t.side}</td>
       <td>${t.quantity}</td>
       <td>${t.entry_fill_price || t.entry_price || "-"}</td>
-      <td>${t.stop_loss || "-"}</td>
-      <td>${t.target || "-"}</td>
+      <td>${t.stop_loss || (t.sl_points ? t.sl_points + "p" : "-")}</td>
+      <td>${targetCell(t)}</td>
       <td>${t.last_price || "-"}</td>
       <td class="${cls(t.pnl)}">${money(t.pnl)}</td>
       <td><span class="badge b-${t.status}">${t.status}</span></td>
@@ -91,14 +91,30 @@ async function refreshTrades() {
   }
   // wire action buttons
   body.querySelectorAll("[data-act]").forEach((b) => {
-    b.onclick = () => doAction(b.dataset.act, b.dataset.id, b.dataset.sym);
+    b.onclick = () => {
+      if (b.dataset.act === "modify") openModify(b.dataset.id, b.dataset.sl, b.dataset.tp);
+      else doAction(b.dataset.act, b.dataset.id);
+    };
   });
+}
+
+function targetCell(t) {
+  if (t.targets_json && t.targets_json !== "[]") {
+    try {
+      const ts = JSON.parse(t.targets_json);
+      const done = ts.filter((x) => x.hit).length;
+      return `multi ${done}/${ts.length}`;
+    } catch (e) { /* fall through */ }
+  }
+  return t.target || (t.target_points ? t.target_points + "p" : "-");
 }
 
 function actionsFor(t) {
   let h = "";
   if (t.status === "PENDING")
     h += `<button class="btn btn-sm" data-act="cancel" data-id="${t.id}">Cancel</button> `;
+  if (t.status === "OPEN" || t.status === "PENDING")
+    h += `<button class="btn btn-sm" data-act="modify" data-id="${t.id}" data-sl="${t.sl_points}" data-tp="${t.target_points}">SL/TP</button> `;
   if (t.status === "OPEN")
     h += `<button class="btn btn-sm" data-act="close" data-id="${t.id}">Close</button> `;
   if (t.status === "CLOSED" || t.status === "CANCELLED")
@@ -155,6 +171,58 @@ function updateQty() {
   document.getElementById("qtyComputed").textContent = `= ${qty} qty (lot size ${currentLotSize})`;
 }
 lotsInput.addEventListener("input", updateQty);
+
+// ---- order form controls (buttons / stepper / multi-targets) ----
+document.getElementById("lotMinus").onclick = () => { lotsInput.value = Math.max(1, (parseInt(lotsInput.value) || 1) - 1); updateQty(); };
+document.getElementById("lotPlus").onclick = () => { lotsInput.value = (parseInt(lotsInput.value) || 1) + 1; updateQty(); };
+
+document.querySelectorAll("[data-side]").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll("[data-side]").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active"); form.side.value = b.dataset.side;
+  };
+});
+
+const entryPrice = document.getElementById("entryPrice");
+document.querySelectorAll("[data-et]").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll("[data-et]").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active"); form.entry_type.value = b.dataset.et;
+    const isMarket = b.dataset.et === "MARKET";
+    entryPrice.disabled = isMarket;
+    if (isMarket) entryPrice.value = 0;
+  };
+});
+
+const multiToggle = document.getElementById("multiToggle");
+const multiWrap = document.getElementById("multiWrap");
+const targetField = document.getElementById("targetField");
+multiToggle.onchange = () => {
+  const on = multiToggle.checked;
+  multiWrap.style.display = on ? "block" : "none";
+  targetField.style.display = on ? "none" : "";
+  if (on && !document.querySelector("#targetRows .trow")) addTargetRow();
+};
+document.getElementById("addTarget").onclick = () => addTargetRow();
+function addTargetRow(points = "", lots = 1) {
+  const div = document.createElement("div");
+  div.className = "trow";
+  div.innerHTML = `<input class="tp" type="number" step="0.05" placeholder="points" value="${points}" />
+    <input class="tl" type="number" min="1" placeholder="lots" value="${lots}" />
+    <button type="button" class="step trm">×</button>`;
+  div.querySelector(".trm").onclick = () => div.remove();
+  document.getElementById("targetRows").appendChild(div);
+}
+
+function resetOrderForm() {
+  document.querySelectorAll("[data-side]").forEach((x) => x.classList.toggle("active", x.dataset.side === "BUY"));
+  form.side.value = "BUY";
+  document.querySelectorAll("[data-et]").forEach((x) => x.classList.toggle("active", x.dataset.et === "MARKET"));
+  form.entry_type.value = "MARKET"; entryPrice.disabled = true; entryPrice.value = 0;
+  multiToggle.checked = false; multiWrap.style.display = "none"; targetField.style.display = "";
+  document.getElementById("targetRows").innerHTML = "";
+  currentLotSize = 1; lotsInput.value = 1; updateQty();
+}
 const HINTS = { OPTION: "— search an index/stock, then pick a strike",
                 FUTURES: "— search an index/stock future",
                 EQUITY: "— search a stock or index" };
@@ -335,8 +403,17 @@ form.onsubmit = async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
   const payload = Object.fromEntries(fd.entries());
-  ["quantity", "entry_price", "stop_loss", "target"].forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
+  ["entry_price", "sl_points", "target_points"].forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
   payload.quantity = parseInt(payload.quantity) || 1;
+  if (multiToggle.checked) {
+    payload.targets = [...document.querySelectorAll("#targetRows .trow")].map((r) => ({
+      points: parseFloat(r.querySelector(".tp").value) || 0,
+      qty: (parseInt(r.querySelector(".tl").value) || 0) * currentLotSize,
+    })).filter((x) => x.points > 0 && x.qty > 0);
+    payload.target_points = 0;
+  } else {
+    payload.targets = [];
+  }
   const msg = document.getElementById("formMsg");
   if (!payload.security_id) {
     msg.textContent = "❌ Please search and select a symbol first.";
@@ -347,7 +424,7 @@ form.onsubmit = async (e) => {
     msg.textContent = `✅ Created trade #${t.id} (${t.symbol}).`; msg.className = "msg pos";
     e.target.reset();
     document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
-    ulSearch.value = ""; currentLotSize = 1; lotsInput.value = 1; updateQty(); resetPicker();
+    ulSearch.value = ""; resetOrderForm(); resetPicker();
     await refreshAll();
   } catch (err) { msg.textContent = "❌ " + err.message; msg.className = "msg neg"; }
 };
@@ -408,6 +485,33 @@ document.getElementById("connectBrokerBtn").onclick = async () => {
     msg.className = "msg " + (r.connected ? "pos" : "neg");
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
   await refreshBroker();
+};
+
+// ---- modify SL/Target modal ----
+const modifyModal = document.getElementById("modifyModal");
+let modifyId = null;
+function openModify(id, sl, tp) {
+  modifyId = id;
+  document.getElementById("modSl").value = sl && sl !== "0" ? sl : 0;
+  document.getElementById("modTarget").value = tp && tp !== "0" ? tp : 0;
+  document.getElementById("modMsg").textContent = "";
+  document.getElementById("modifyInfo").textContent =
+    `Trade #${id} — stop-loss and target are in points from your entry price.`;
+  modifyModal.style.display = "flex";
+}
+document.getElementById("modCancel").onclick = () => { modifyModal.style.display = "none"; };
+document.getElementById("modSave").onclick = async () => {
+  try {
+    await api.post(`/api/trades/${modifyId}/modify`, {
+      sl_points: parseFloat(document.getElementById("modSl").value) || 0,
+      target_points: parseFloat(document.getElementById("modTarget").value) || 0,
+    });
+    modifyModal.style.display = "none";
+    await refreshAll();
+  } catch (e) {
+    const mm = document.getElementById("modMsg");
+    mm.textContent = "❌ " + e.message; mm.className = "msg neg";
+  }
 };
 
 // ---- refresh symbols button ----
