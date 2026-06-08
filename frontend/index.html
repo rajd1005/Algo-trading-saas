@@ -174,16 +174,29 @@
       <p class="muted" id="modeDesc"></p>
 
       <div id="dhanFields">
-        <p class="muted">Enter your Dhan API credentials, then click <b>Connect</b> to authenticate.
-        Get these from the Dhan website → DhanHQ Trading APIs.</p>
+        <p class="muted"><b>Login with Dhan</b> — no daily token copy-paste. Set your App ID &amp; Secret
+        once (from Dhan → DhanHQ Trading APIs → create an app; valid ~12 months), then just click
+        <b>Login with Dhan</b> whenever the token expires. Tokens last 24h (SEBI rule) but the app auto-renews while running.</p>
         <div class="row">
           <label>Dhan Client ID <input id="dhanClientId" placeholder="1000000000" /></label>
-          <label>Access Token <input id="dhanToken" type="password" placeholder="paste token" /></label>
+          <label>App ID <input id="dhanAppId" placeholder="app id / api key" /></label>
+          <label>App Secret <input id="dhanAppSecret" type="password" placeholder="app secret" /></label>
         </div>
         <div class="row">
-          <button id="saveBrokerBtn" class="btn">Save</button>
-          <button id="connectBrokerBtn" class="btn btn-primary">Connect / Authenticate</button>
+          <button id="saveAppBtn" class="btn">Save app details</button>
+          <button id="loginDhanBtn" class="btn btn-primary">🔐 Login with Dhan</button>
+          <span id="tokenStatus" class="muted" style="font-size:12px;"></span>
         </div>
+        <details style="margin-top:12px;">
+          <summary class="muted" style="cursor:pointer;">Advanced: paste a 24h access token manually instead</summary>
+          <div class="row" style="margin-top:8px;">
+            <label>Access Token <input id="dhanToken" type="password" placeholder="paste token" /></label>
+          </div>
+          <div class="row">
+            <button id="saveBrokerBtn" class="btn">Save token</button>
+            <button id="connectBrokerBtn" class="btn">Connect / Verify</button>
+          </div>
+        </details>
       </div>
       <div class="row" style="margin-top:10px;">
         <span id="brokerState" class="pill pill-off">Not connected</span>

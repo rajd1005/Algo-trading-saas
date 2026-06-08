@@ -6,11 +6,16 @@ Run it with:   uvicorn main:app --host 0.0.0.0 --port 8000
 """
 import os
 import json
+import time
+import threading
+import datetime as dt
 
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+
+import dhan_auth
 
 import config
 from database import init_db, get_db, SessionLocal
@@ -70,6 +75,35 @@ def _startup():
     db.close()
     instruments.load_async()   # download Dhan's symbol list in the background
     engine.start()
+    threading.Thread(target=_auto_renew_loop, daemon=True).start()
+
+
+def _auto_renew_loop():
+    """Keep the Dhan token alive by renewing it ~4h before it expires."""
+    while True:
+        time.sleep(1800)   # check every 30 minutes
+        try:
+            db = SessionLocal()
+            connected = get_setting(db, "broker_mode", "DHAN") == "DHAN" and \
+                get_setting(db, "dhan_connected", "no") == "yes"
+            token_time = get_setting(db, "dhan_token_time", "")
+            tok = get_setting(db, "dhan_access_token", "")
+            cid = get_setting(db, "dhan_client_id", "")
+            if connected and token_time and tok and cid:
+                age = (dt.datetime.utcnow() - dt.datetime.fromisoformat(token_time)).total_seconds() / 3600
+                if age >= 20:
+                    new = dhan_auth.renew_token(tok, cid)
+                    if new:
+                        set_setting(db, "dhan_access_token", new)
+                        set_setting(db, "dhan_token_time", dt.datetime.utcnow().isoformat())
+                        db.add(LogEntry(message="Dhan token auto-renewed for another 24h.", level="INFO"))
+                    else:
+                        db.add(LogEntry(message="Dhan token auto-renew failed — please Login with Dhan again.",
+                                        level="WARN"))
+                    db.commit()
+            db.close()
+        except Exception:
+            pass
 
 
 # ---------- trades ----------
@@ -353,13 +387,82 @@ def get_broker(db: Session = Depends(get_db)):
     cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
     tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
     mode = get_setting(db, "broker_mode", "DHAN")
+    token_time = get_setting(db, "dhan_token_time", "")
+    hours_left = None
+    if token_time:
+        try:
+            age = (dt.datetime.utcnow() - dt.datetime.fromisoformat(token_time)).total_seconds() / 3600
+            hours_left = round(max(0, 24 - age), 1)
+        except Exception:
+            pass
     return {
         "dhan_client_id": cid,
         # Never send the full token back to the browser; just say if it's set.
         "has_access_token": bool(tok),
+        "has_app": bool(get_setting(db, "dhan_app_id", "")),
         "mode": mode,
         "connected": mode == "DEMO" or get_setting(db, "dhan_connected", "no") == "yes",
+        "token_hours_left": hours_left,
     }
+
+
+# ---------- "Login with Dhan" (app consent) ----------
+@app.post("/api/dhan/app")
+def save_dhan_app(payload: dict, db: Session = Depends(get_db)):
+    """Save the one-time App ID / App Secret / Client ID (valid ~12 months)."""
+    if payload.get("app_id"):
+        set_setting(db, "dhan_app_id", payload["app_id"].strip())
+    if payload.get("app_secret"):
+        set_setting(db, "dhan_app_secret", payload["app_secret"].strip())
+    if payload.get("client_id"):
+        set_setting(db, "dhan_client_id", payload["client_id"].strip())
+    return {"ok": True}
+
+
+@app.get("/api/dhan/login")
+def dhan_login(db: Session = Depends(get_db)):
+    """Start the Dhan login: returns the URL to send the user to."""
+    app_id = get_setting(db, "dhan_app_id", "")
+    app_secret = get_setting(db, "dhan_app_secret", "")
+    client_id = get_setting(db, "dhan_client_id", "")
+    if not app_id or not app_secret or not client_id:
+        raise HTTPException(400, "Enter your Dhan App ID, App Secret and Client ID first.")
+    try:
+        consent = dhan_auth.generate_consent(app_id, app_secret, client_id)
+        if not consent:
+            raise HTTPException(400, "Dhan did not return a consent id. Check your App ID/Secret.")
+        return {"login_url": dhan_auth.login_url(consent)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.add(LogEntry(message=f"Dhan login start failed: {e}", level="ERROR"))
+        db.commit()
+        raise HTTPException(400, f"Could not start Dhan login: {e}")
+
+
+@app.get("/api/dhan/callback")
+def dhan_callback(tokenId: str = "", db: Session = Depends(get_db)):
+    """Dhan redirects here after login with a tokenId; we fetch the access token."""
+    app_id = get_setting(db, "dhan_app_id", "")
+    app_secret = get_setting(db, "dhan_app_secret", "")
+    if not tokenId or not app_id:
+        return RedirectResponse(url="/?login=failed")
+    try:
+        token, client_id, _ = dhan_auth.consume_consent(app_id, app_secret, tokenId)
+        if not token:
+            raise RuntimeError("no access token returned")
+        set_setting(db, "dhan_access_token", token)
+        if client_id:
+            set_setting(db, "dhan_client_id", client_id)
+        set_setting(db, "dhan_connected", "yes")
+        set_setting(db, "dhan_token_time", dt.datetime.utcnow().isoformat())
+        db.add(LogEntry(message="Logged in to Dhan — access token received.", level="INFO"))
+        db.commit()
+        return RedirectResponse(url="/?login=ok")
+    except Exception as e:
+        db.add(LogEntry(message=f"Dhan login callback failed: {e}", level="ERROR"))
+        db.commit()
+        return RedirectResponse(url="/?login=failed")
 
 
 @app.post("/api/broker/mode")

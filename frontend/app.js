@@ -578,13 +578,52 @@ document.getElementById("demoReset").onclick = async () => {
 
 async function refreshBroker() {
   const b = await api.get("/api/broker");
-  document.getElementById("dhanClientId").value = b.dhan_client_id || "";
+  const cidEl = document.getElementById("dhanClientId");
+  if (document.activeElement !== cidEl) cidEl.value = b.dhan_client_id || "";
   applyBrokerMode(b.mode || "DHAN");
   const st = document.getElementById("brokerState");
   const label = b.mode === "DEMO" ? "Demo connected" : (b.connected ? "Dhan connected" : "Not connected");
   st.textContent = label;
   st.className = "pill " + (b.connected ? "pill-ok" : "pill-off");
+  const ts = document.getElementById("tokenStatus");
+  if (ts) {
+    if (b.mode === "DEMO") ts.textContent = "";
+    else if (b.token_hours_left != null) ts.textContent = `Token valid ~${b.token_hours_left}h more`;
+    else if (b.has_app) ts.textContent = "App saved — click Login with Dhan";
+    else ts.textContent = "Set App ID & Secret, then Login with Dhan";
+  }
 }
+
+// Save app details + start the Dhan login redirect
+document.getElementById("saveAppBtn").onclick = async () => {
+  await api.post("/api/dhan/app", {
+    client_id: document.getElementById("dhanClientId").value,
+    app_id: document.getElementById("dhanAppId").value,
+    app_secret: document.getElementById("dhanAppSecret").value,
+  });
+  document.getElementById("brokerMsg").textContent = "App details saved.";
+  await refreshBroker();
+};
+document.getElementById("loginDhanBtn").onclick = async () => {
+  const msg = document.getElementById("brokerMsg");
+  // make sure the latest app details are saved first
+  await api.post("/api/dhan/app", {
+    client_id: document.getElementById("dhanClientId").value,
+    app_id: document.getElementById("dhanAppId").value,
+    app_secret: document.getElementById("dhanAppSecret").value,
+  });
+  try {
+    const r = await api.get("/api/dhan/login");
+    window.location.href = r.login_url;   // send user to Dhan's login page
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+
+// Show a message after returning from the Dhan login redirect
+(function () {
+  const p = new URLSearchParams(location.search);
+  if (p.get("login") === "ok") { const m = document.getElementById("brokerMsg"); if (m) { m.textContent = "✅ Logged in to Dhan."; m.className = "msg pos"; } }
+  else if (p.get("login") === "failed") { const m = document.getElementById("brokerMsg"); if (m) { m.textContent = "❌ Dhan login failed — check App ID/Secret and try again."; m.className = "msg neg"; } }
+})();
 
 ["modeDemo", "modeDhan"].forEach((id) => {
   document.getElementById(id).onclick = async () => {
