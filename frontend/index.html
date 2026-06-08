@@ -125,6 +125,10 @@
 
       <div class="row">
         <label>Stop-loss (points) <input name="sl_points" type="number" step="0.05" value="0" /></label>
+        <label>Trailing SL (points)
+          <input name="trail_sl" type="number" step="0.05" value="0" />
+          <span class="muted" style="font-size:11px;">if set, overrides fixed SL</span>
+        </label>
         <label id="targetField">Target (points) <input name="target_points" type="number" step="0.05" value="0" /></label>
       </div>
 
@@ -201,7 +205,13 @@
     <div class="modal">
       <h3 style="margin-top:0;">Modify SL / Targets</h3>
       <p class="muted" id="modifyInfo" style="font-size:13px;"></p>
-      <label>Stop-loss (price) <input id="modSl" type="number" step="0.05" value="0" /></label>
+      <div class="row">
+        <label>Stop-loss (price) <input id="modSl" type="number" step="0.05" value="0" /></label>
+        <label>Trailing SL (points)
+          <input id="modTrail" type="number" step="0.05" value="0" />
+          <span class="muted" style="font-size:11px;">if set, overrides fixed SL</span>
+        </label>
+      </div>
       <div class="field" style="margin-top:12px;">
         <div class="field-label">Targets — direct price &amp; quantity (add more for scale-out)</div>
         <div id="modTargetRows"></div>

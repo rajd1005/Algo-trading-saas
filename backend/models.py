@@ -53,6 +53,8 @@ class Trade(Base):
     # computed from the actual entry fill price when the trade enters.
     sl_points = Column(Float, default=0.0)
     target_points = Column(Float, default=0.0)
+    trail_sl = Column(Float, default=0.0)          # trailing stop distance in points (0 = off)
+    hwm = Column(Float, default=0.0)               # high-water mark for trailing
     # Optional multiple (scale-out) targets, JSON: [{"points":x,"qty":n,"hit":false}]
     targets_json = Column(Text, default="")
     exited_qty = Column(Integer, default=0)        # qty already booked via partial targets

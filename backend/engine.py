@@ -277,7 +277,11 @@ class TradingEngine:
     def _apply_levels(self, t):
         """Once entered, convert points into absolute SL/target prices using the
         real fill price. Targets are stored with absolute prices from here on."""
-        if t.sl_points and t.sl_points > 0:
+        if t.trail_sl and t.trail_sl > 0:
+            # trailing stop: start the stop a trail-distance away and arm the high-water mark
+            t.hwm = t.entry_fill_price
+            t.stop_loss = level_price(t.side, t.entry_fill_price, t.trail_sl, False)
+        elif t.sl_points and t.sl_points > 0:
             t.stop_loss = level_price(t.side, t.entry_fill_price, t.sl_points, False)
         targets = self._targets(t)
         if targets:
@@ -309,9 +313,24 @@ class TradingEngine:
             return
         broker = self._broker_for(t, live_broker)
 
+        # 0) Trailing stop-loss: ratchet the stop in the favourable direction only.
+        if t.trail_sl and t.trail_sl > 0:
+            if t.side == "BUY":
+                if price > (t.hwm or 0):
+                    t.hwm = price
+                new_sl = round(t.hwm - t.trail_sl, 2)
+                if new_sl > (t.stop_loss or 0):
+                    t.stop_loss = new_sl
+            else:
+                if not t.hwm or price < t.hwm:
+                    t.hwm = price
+                new_sl = round(t.hwm + t.trail_sl, 2)
+                if not t.stop_loss or new_sl < t.stop_loss:
+                    t.stop_loss = new_sl
+
         # 1) Kill switch or stop-loss -> exit ALL remaining.
-        sl_hit = t.stop_loss > 0 and (price <= t.stop_loss if t.side == "BUY"
-                                      else price >= t.stop_loss)
+        sl_hit = (t.stop_loss or 0) > 0 and (price <= t.stop_loss if t.side == "BUY"
+                                             else price >= t.stop_loss)
         if kill or sl_hit:
             res = self._place_confirmed(db, t, broker, is_exit=True, qty=remaining)
             if res.ok:
@@ -360,7 +379,7 @@ class TradingEngine:
             return
 
         # 3) Single target -> exit all remaining.
-        if t.target > 0:
+        if (t.target or 0) > 0:
             reached = price >= t.target if t.side == "BUY" else price <= t.target
             if reached:
                 res = self._place_confirmed(db, t, broker, is_exit=True, qty=remaining)

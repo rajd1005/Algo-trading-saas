@@ -117,7 +117,15 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
     if t.status != "OPEN":
         raise HTTPException(400, "Only open trades can be modified.")
 
-    if payload.stop_loss is not None:
+    if payload.trail_sl is not None:
+        t.trail_sl = float(payload.trail_sl)
+        if t.trail_sl > 0:
+            # arm trailing from the current price
+            ref = t.last_price or t.entry_fill_price
+            t.hwm = ref
+            t.stop_loss = level_price(t.side, ref, t.trail_sl, False)
+
+    if payload.stop_loss is not None and not (payload.trail_sl and payload.trail_sl > 0):
         t.stop_loss = float(payload.stop_loss)
         # keep points in sync for reference
         if t.entry_fill_price > 0 and t.stop_loss > 0:

@@ -241,13 +241,18 @@ document.getElementById("addTarget").onclick = () => addTargetRow();
 
 function newTargetCount() { return document.querySelectorAll("#targetRows .trow").length; }
 
-// Spread the total lots evenly across the target rows (auto-distribute).
+// Spread the total lots evenly across the target rows and show the QUANTITY
+// (lots x lot size) for each, so lot size is clearly applied.
 function distributeNewTargets() {
   const rows = [...document.querySelectorAll("#targetRows .trow")];
   const N = parseInt(lotsInput.value) || 1, M = rows.length;
   if (!M) return;
   const base = Math.floor(N / M), rem = N % M;
-  rows.forEach((r, i) => { r.querySelector(".tl").value = base + (i < rem ? 1 : 0); });
+  rows.forEach((r, i) => {
+    const lots = base + (i < rem ? 1 : 0);
+    r.querySelector(".tl").value = lots * currentLotSize;       // quantity
+    r.querySelector(".tlots").textContent = `(${lots} lot${lots > 1 ? "s" : ""})`;
+  });
 }
 // If lots drop below the number of targets, trim extra targets, then redistribute.
 function trimAndDistribute() {
@@ -265,8 +270,8 @@ function addTargetRow(points = "") {
   const div = document.createElement("div");
   div.className = "trow";
   div.innerHTML = `<input class="tp" type="number" step="0.05" placeholder="points" value="${points}" />
-    <input class="tl" type="number" readonly title="lots (auto-distributed)" style="width:70px;" />
-    <span class="muted" style="font-size:11px;">lots</span>
+    <input class="tl" type="number" readonly title="quantity (auto-distributed)" style="width:80px;" />
+    <span class="muted" style="font-size:11px;">qty <span class="tlots"></span></span>
     <button type="button" class="step trm">×</button>`;
   div.querySelector(".trm").onclick = () => { div.remove(); distributeNewTargets(); };
   document.getElementById("targetRows").appendChild(div);
@@ -462,13 +467,13 @@ form.onsubmit = async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
   const payload = Object.fromEntries(fd.entries());
-  ["entry_price", "sl_points", "target_points"].forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
+  ["entry_price", "sl_points", "target_points", "trail_sl"].forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
   payload.quantity = parseInt(payload.quantity) || 1;
   payload.lot_size = currentLotSize;
   if (multiToggle.checked) {
     payload.targets = [...document.querySelectorAll("#targetRows .trow")].map((r) => ({
       points: parseFloat(r.querySelector(".tp").value) || 0,
-      qty: (parseInt(r.querySelector(".tl").value) || 0) * currentLotSize,
+      qty: parseInt(r.querySelector(".tl").value) || 0,     // .tl already holds quantity
     })).filter((x) => x.points > 0 && x.qty > 0);
     payload.target_points = 0;
   } else {
@@ -556,7 +561,11 @@ function modDistribute() {
   const N = modRemainingLots, M = rows.length;
   if (!M) return;
   const base = Math.floor(N / M), rem = N % M;
-  rows.forEach((r, i) => { r.querySelector(".mtl").value = base + (i < rem ? 1 : 0); });
+  rows.forEach((r, i) => {
+    const lots = base + (i < rem ? 1 : 0);
+    r.querySelector(".mtl").value = lots * modLotSize;     // quantity
+    r.querySelector(".mtlots").textContent = `(${lots} lot${lots > 1 ? "s" : ""})`;
+  });
 }
 function modAddTargetRow(price = "") {
   if ([...document.querySelectorAll("#modTargetRows .trow")].length >= modRemainingLots) {
@@ -566,8 +575,8 @@ function modAddTargetRow(price = "") {
   const div = document.createElement("div");
   div.className = "trow";
   div.innerHTML = `<input class="mtp" type="number" step="0.05" placeholder="price" value="${price}" />
-    <input class="mtl" type="number" readonly title="lots (auto-distributed)" style="width:70px;" />
-    <span class="muted" style="font-size:11px;">lots</span>
+    <input class="mtl" type="number" readonly title="quantity (auto-distributed)" style="width:80px;" />
+    <span class="muted" style="font-size:11px;">qty <span class="mtlots"></span></span>
     <button type="button" class="step trm">×</button>`;
   div.querySelector(".trm").onclick = () => { div.remove(); modDistribute(); };
   document.getElementById("modTargetRows").appendChild(div);
@@ -583,6 +592,7 @@ function openModify(id) {
   const remainingQty = t.quantity - (t.exited_qty || 0);
   modRemainingLots = Math.max(1, Math.floor(remainingQty / modLotSize));
   document.getElementById("modSl").value = t.stop_loss || 0;
+  document.getElementById("modTrail").value = t.trail_sl || 0;
   const rows = document.getElementById("modTargetRows");
   rows.innerHTML = "";
   let prices = [];
@@ -601,11 +611,12 @@ document.getElementById("modCancel").onclick = () => { modifyModal.style.display
 document.getElementById("modSave").onclick = async () => {
   const targets = [...document.querySelectorAll("#modTargetRows .trow")].map((r) => ({
     price: parseFloat(r.querySelector(".mtp").value) || 0,
-    qty: (parseInt(r.querySelector(".mtl").value) || 0) * modLotSize,
+    qty: parseInt(r.querySelector(".mtl").value) || 0,     // .mtl already holds quantity
   })).filter((x) => x.price > 0 && x.qty > 0);
   try {
     await api.post(`/api/trades/${modifyId}/modify`, {
       stop_loss: parseFloat(document.getElementById("modSl").value) || 0,
+      trail_sl: parseFloat(document.getElementById("modTrail").value) || 0,
       targets,
     });
     modifyModal.style.display = "none";

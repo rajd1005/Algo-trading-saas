@@ -44,6 +44,8 @@ _MIGRATIONS = {
         "exited_qty": "INTEGER DEFAULT 0",
         "realized_pnl": "REAL DEFAULT 0",
         "lot_size": "INTEGER DEFAULT 1",
+        "trail_sl": "REAL DEFAULT 0",
+        "hwm": "REAL DEFAULT 0",
     },
     "logs": {
         "day": "TEXT DEFAULT ''",
