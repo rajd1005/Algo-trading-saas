@@ -21,6 +21,7 @@ import time
 from database import SessionLocal
 from models import Trade, LogEntry, Setting
 from market_data import DhanMarketData
+from live_feed import feed
 from brokers import PaperBroker, DhanBroker
 import config
 
@@ -30,12 +31,15 @@ class TradingEngine:
         self._thread = None
         self._running = False
         self.paper = PaperBroker()
+        self._last_rest = 0.0          # last time we used the REST fallback
+        self._rest_cache = {}          # last REST prices (warmup / fallback)
 
     # ---------- lifecycle ----------
     def start(self):
         if self._running:
             return
         self._running = True
+        feed.start()                   # start the real-time WebSocket feed
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -50,7 +54,8 @@ class TradingEngine:
     def _set_setting(self, db, key, value):
         row = db.get(Setting, key)
         if row:
-            row.value = value
+            if row.value != value:        # avoid a DB write every tick
+                row.value = value
         else:
             db.add(Setting(key=key, value=value))
 
@@ -92,24 +97,19 @@ class TradingEngine:
         try:
             active = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
 
-            md = self._market_data(db)
-            if md is None:
+            cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
+            tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+            if not cid or not tok:
                 if active:
-                    self._set_setting(db, "md_status", "Dhan not connected — connect on the Broker tab to get prices.")
+                    self._set_setting(db, "md_status",
+                                      "Dhan not connected — connect on the Broker tab to get prices.")
                 db.commit()
                 return
 
-            # Group every active trade's security id by its exchange segment.
-            by_segment = {}
-            for t in active:
-                if t.security_id:
-                    by_segment.setdefault(t.exchange_segment, set()).add(str(t.security_id))
-            prices = md.get_ltp_batch({k: list(v) for k, v in by_segment.items()}) if by_segment else {}
+            instruments = list({(t.exchange_segment, str(t.security_id))
+                                for t in active if t.security_id})
 
-            if md.last_error:
-                self._set_setting(db, "md_status", f"Price feed error: {md.last_error[:200]}")
-            elif active:
-                self._set_setting(db, "md_status", "ok")
+            prices = self._collect_prices(db, cid, tok, instruments)
 
             kill = self._kill_switch_on(db)
             live_broker = self._live_broker(db)
@@ -131,6 +131,45 @@ class TradingEngine:
             db.commit()
         finally:
             db.close()
+
+    def _collect_prices(self, db, cid, tok, instruments):
+        """Prefer the real-time WebSocket feed; fall back to REST for anything
+        not yet streaming (and if the websocket isn't connected)."""
+        feed.configure(cid, tok)
+        feed.ensure_subscribed(instruments)
+
+        prices = {}
+        for it in instruments:
+            p = feed.get_ltp(it[0], it[1])
+            if p > 0:
+                prices[it] = p
+
+        missing = [it for it in instruments if it not in prices]
+        md = DhanMarketData(cid, tok)
+        # Only hit REST about once a second to respect rate limits.
+        if missing and (time.time() - self._last_rest) >= 1.0:
+            self._last_rest = time.time()
+            by_seg = {}
+            for seg, sid in missing:
+                by_seg.setdefault(seg, []).append(sid)
+            rest = md.get_ltp_batch(by_seg)
+            prices.update(rest)
+            self._rest_cache.update(rest)
+            if md.last_error and not prices:
+                self._set_setting(db, "md_status", f"Price feed error: {md.last_error[:200]}")
+        # use last known REST price for anything still missing
+        for it in missing:
+            if it not in prices and it in self._rest_cache:
+                prices[it] = self._rest_cache[it]
+
+        # status banner
+        if not instruments:
+            pass
+        elif feed.connected:
+            self._set_setting(db, "md_status", "ok:ws")
+        elif prices:
+            self._set_setting(db, "md_status", "ok:rest")
+        return prices
 
     def _broker_for(self, t, live_broker):
         return self.paper if t.mode == "TEST" else live_broker

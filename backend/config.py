@@ -19,8 +19,9 @@ DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 # --- Trading engine ---
 # How often the engine checks prices and acts, in milliseconds.
-# Lower = faster reaction (and more CPU). 1000ms is a safe default to start.
-ENGINE_INTERVAL_MS = int(os.getenv("ENGINE_INTERVAL_MS", "1000"))
+# With the WebSocket feed, price reads are instant (in-memory), so we can loop
+# fast for near-real-time stop-loss / target reaction. Lower = faster (more CPU).
+ENGINE_INTERVAL_MS = int(os.getenv("ENGINE_INTERVAL_MS", "300"))
 
 # --- Dhan broker (LIVE mode only). Leave blank until you are ready to go live. ---
 # You can also set these later from the web dashboard's "Broker" page.

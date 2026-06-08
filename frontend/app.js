@@ -46,12 +46,15 @@ async function refreshSummary() {
   // price-feed banner
   const banner = document.getElementById("mdBanner");
   const inst = s.instruments || {};
-  if (s.md_status && s.md_status !== "ok") {
-    banner.style.display = "block"; banner.className = "banner";
-    banner.textContent = "⚠️ " + s.md_status;
-  } else if (s.md_status === "ok") {
+  const m = s.md_status || "";
+  if (m.indexOf("ok") === 0) {
     banner.style.display = "block"; banner.className = "banner ok";
-    banner.textContent = "✅ Live prices flowing from Dhan.";
+    banner.textContent = m === "ok:ws"
+      ? "⚡ Real-time prices (WebSocket) flowing from Dhan."
+      : "✅ Live prices (1-second) flowing from Dhan.";
+  } else if (m) {
+    banner.style.display = "block"; banner.className = "banner";
+    banner.textContent = "⚠️ " + m;
   } else {
     banner.style.display = "none";
   }
