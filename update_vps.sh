@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  ALGO TRADING (India / Dhan) - One-shot VPS installer  (fresh install)
-#  Usage on VPS:   bash vps_install.sh
+#  ALGO TRADING - UPDATE script (for a VPS that already has it installed)
+#  Usage on VPS:   bash update_vps.sh
+#  It safely stops the app, drops in the new code, and restarts it.
 ###############################################################################
 set -e
-echo "==> Installing system packages (needs sudo)..."
-if command -v apt >/dev/null 2>&1; then
-  sudo apt update -y && sudo apt install -y python3 python3-venv git
-fi
 APP_DIR="${HOME}/algo-trading"
-echo "==> Unpacking app into ${APP_DIR} ..."
+echo "==> Stopping the running app (if it's a service)..."
+sudo systemctl stop algo 2>/dev/null || true
+echo "==> Writing new code into ${APP_DIR} ..."
 mkdir -p "${APP_DIR}"
 base64 -d > /tmp/algo_src.tgz <<'PAYLOAD'
 H4sIAAAAAAAAA+y9224jS5Ig2M/8iihmbRWZEu8UKSpT2c2bJEq8X3RLJHiCZJAMMcigIoKkqBwB
@@ -662,11 +661,15 @@ PAYLOAD
 tar -xzf /tmp/algo_src.tgz -C "${APP_DIR}"
 rm -f /tmp/algo_src.tgz
 cd "${APP_DIR}/backend"
-python3 -m venv .venv
-./.venv/bin/pip install --upgrade pip >/dev/null
-./.venv/bin/pip install -r requirements.txt
-echo; echo "============================================================"
-echo "  Setup complete! Starting dashboard on port 8000..."
-echo "  Open:  http://YOUR_VPS_IP:8000"
-echo "============================================================"
-exec ./.venv/bin/python main.py
+[ -d .venv ] || python3 -m venv .venv
+./.venv/bin/pip install -q -r requirements.txt
+echo "==> Restarting the app..."
+if systemctl list-unit-files | grep -q '^algo.service'; then
+  sudo systemctl start algo
+  sleep 2
+  sudo systemctl status algo --no-pager | head -6
+  echo; echo "Update done. Reload http://YOUR_VPS_IP:8000 in your browser."
+else
+  echo "No 'algo' service found. Starting in foreground instead (Ctrl+C to stop):"
+  exec ./.venv/bin/python main.py
+fi
