@@ -8,30 +8,40 @@ Brokers = "actually place / exit an order."
 Both expose the same two methods (place_entry / place_exit) so the engine
 doesn't care which one it's talking to.
 """
+import time
+
 import requests
 
 import config
 
 
 class OrderResult:
-    def __init__(self, ok: bool, fill_price: float = 0.0, order_id: str = "", error: str = ""):
+    def __init__(self, ok: bool, fill_price: float = 0.0, order_id: str = "",
+                 error: str = "", status: str = "TRADED", traded_qty: int = 0):
         self.ok = ok
         self.fill_price = fill_price
         self.order_id = order_id
         self.error = error
+        self.status = status          # TRADED / PENDING / REJECTED / ...
+        self.traded_qty = traded_qty
 
 
 class PaperBroker:
-    """Simulated broker for TEST mode."""
+    """Simulated broker for TEST / DEMO mode."""
 
     name = "PAPER"
 
     def place_entry(self, trade, current_price: float, qty=None) -> OrderResult:
-        # Fill instantly at the current simulated price.
-        return OrderResult(ok=True, fill_price=current_price, order_id=f"PAPER-E-{trade.id}")
+        # Fill instantly at the current (live) price.
+        return OrderResult(ok=True, fill_price=current_price, order_id=f"PAPER-E-{trade.id}",
+                           status="TRADED", traded_qty=int(qty or trade.quantity))
 
     def place_exit(self, trade, current_price: float, qty=None) -> OrderResult:
-        return OrderResult(ok=True, fill_price=current_price, order_id=f"PAPER-X-{trade.id}")
+        return OrderResult(ok=True, fill_price=current_price, order_id=f"PAPER-X-{trade.id}",
+                           status="TRADED", traded_qty=int(qty or trade.quantity))
+
+    def confirm(self, order_id):
+        return ("TRADED", 0.0, 0)
 
 
 class DhanBroker:
@@ -70,9 +80,10 @@ class DhanBroker:
             r.raise_for_status()
             data = r.json()
             order_id = str(data.get("orderId", ""))
-            # We use current_price as the recorded fill estimate; real fill price
-            # would come from an order-status poll (a good future enhancement).
-            return OrderResult(ok=True, fill_price=current_price, order_id=order_id)
+            status = str(data.get("orderStatus", "PENDING")).upper()
+            # current_price is a provisional fill; the engine then confirms the
+            # real traded price from Dhan via confirm().
+            return OrderResult(ok=True, fill_price=current_price, order_id=order_id, status=status)
         except Exception as e:
             detail = ""
             try:
@@ -88,6 +99,33 @@ class DhanBroker:
         # Exit is the opposite of the entry side.
         exit_side = "SELL" if trade.side == "BUY" else "BUY"
         return self._place(trade, exit_side, current_price, qty)
+
+    def order_status(self, order_id):
+        """Fetch one order's status + actual traded price/qty from Dhan."""
+        url = f"{config.DHAN_API_BASE}/orders/{order_id}"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=6)
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, list):           # Dhan returns a list for this call
+                data = data[0] if data else {}
+            status = str(data.get("orderStatus", "")).upper()
+            traded_price = float(data.get("averageTradedPrice") or data.get("price") or 0)
+            traded_qty = int(data.get("filledQty") or data.get("tradedQty") or 0)
+            return status, traded_price, traded_qty
+        except Exception:
+            return "", 0.0, 0
+
+    def confirm(self, order_id):
+        """Poll until the order reaches a final state (TRADED/REJECTED/...)."""
+        last = ("", 0.0, 0)
+        for _ in range(config.ORDER_POLLS):
+            status, tp, tq = self.order_status(order_id)
+            last = (status, tp, tq)
+            if status in ("TRADED", "REJECTED", "CANCELLED", "EXPIRED"):
+                return last
+            time.sleep(config.ORDER_POLL_DELAY)
+        return last
 
 
 def verify_dhan_credentials(client_id: str, access_token: str) -> tuple[bool, str]:

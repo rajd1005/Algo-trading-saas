@@ -30,3 +30,9 @@ DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN", "")
 
 # Dhan API base URL (v2).
 DHAN_API_BASE = os.getenv("DHAN_API_BASE", "https://api.dhan.co/v2")
+
+# --- Live order verification ---
+# After placing a real order we confirm with Dhan that it actually executed.
+ORDER_RETRIES = int(os.getenv("ORDER_RETRIES", "2"))       # re-place if rejected
+ORDER_POLLS = int(os.getenv("ORDER_POLLS", "6"))           # status checks per order
+ORDER_POLL_DELAY = float(os.getenv("ORDER_POLL_DELAY", "0.4"))  # seconds between checks

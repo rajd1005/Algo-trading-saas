@@ -68,8 +68,11 @@ async function refreshSummary() {
 }
 
 // ---- trades table ----
+let tradesById = {};
 async function refreshTrades() {
   const rows = await api.get("/api/trades");
+  tradesById = {};
+  rows.forEach((t) => (tradesById[t.id] = t));
   const body = document.getElementById("tradesBody");
   body.innerHTML = "";
   for (const t of rows) {
@@ -92,7 +95,7 @@ async function refreshTrades() {
   // wire action buttons
   body.querySelectorAll("[data-act]").forEach((b) => {
     b.onclick = () => {
-      if (b.dataset.act === "modify") openModify(b.dataset.id, b.dataset.sl, b.dataset.tp);
+      if (b.dataset.act === "modify") openModify(b.dataset.id);
       else doAction(b.dataset.act, b.dataset.id);
     };
   });
@@ -113,10 +116,9 @@ function actionsFor(t) {
   let h = "";
   if (t.status === "PENDING")
     h += `<button class="btn btn-sm" data-act="cancel" data-id="${t.id}">Cancel</button> `;
-  if (t.status === "OPEN" || t.status === "PENDING")
-    h += `<button class="btn btn-sm" data-act="modify" data-id="${t.id}" data-sl="${t.sl_points}" data-tp="${t.target_points}">SL/TP</button> `;
   if (t.status === "OPEN")
-    h += `<button class="btn btn-sm" data-act="close" data-id="${t.id}">Close</button> `;
+    h += `<button class="btn btn-sm" data-act="modify" data-id="${t.id}">SL/TP</button> `
+       + `<button class="btn btn-sm" data-act="close" data-id="${t.id}">Close</button> `;
   if (t.status === "CLOSED" || t.status === "CANCELLED")
     h += `<button class="btn btn-sm" data-act="del" data-id="${t.id}">Delete</button>`;
   return h;
@@ -487,24 +489,50 @@ document.getElementById("connectBrokerBtn").onclick = async () => {
   await refreshBroker();
 };
 
-// ---- modify SL/Target modal ----
+// ---- modify SL/Targets modal (direct prices) ----
 const modifyModal = document.getElementById("modifyModal");
 let modifyId = null;
-function openModify(id, sl, tp) {
+
+function modAddTargetRow(price = "", qty = "") {
+  const div = document.createElement("div");
+  div.className = "trow";
+  div.innerHTML = `<input class="mtp" type="number" step="0.05" placeholder="price" value="${price}" />
+    <input class="mtq" type="number" min="1" placeholder="qty" value="${qty}" />
+    <button type="button" class="step trm">×</button>`;
+  div.querySelector(".trm").onclick = () => div.remove();
+  document.getElementById("modTargetRows").appendChild(div);
+}
+document.getElementById("modAddTarget").onclick = () => modAddTargetRow();
+
+function openModify(id) {
+  const t = tradesById[id];
+  if (!t) return;
   modifyId = id;
-  document.getElementById("modSl").value = sl && sl !== "0" ? sl : 0;
-  document.getElementById("modTarget").value = tp && tp !== "0" ? tp : 0;
+  document.getElementById("modSl").value = t.stop_loss || 0;
+  const rows = document.getElementById("modTargetRows");
+  rows.innerHTML = "";
+  let added = false;
+  if (t.targets_json && t.targets_json !== "[]") {
+    try {
+      JSON.parse(t.targets_json).forEach((tg) => { modAddTargetRow(tg.price || "", tg.qty || ""); added = true; });
+    } catch (e) { /* ignore */ }
+  }
+  if (!added) modAddTargetRow(t.target || "", t.quantity - (t.exited_qty || 0));
   document.getElementById("modMsg").textContent = "";
-  document.getElementById("modifyInfo").textContent =
-    `Trade #${id} — stop-loss and target are in points from your entry price.`;
+  document.getElementById("modifyInfo").innerHTML =
+    `<b>${t.symbol}</b> — entry ₹${t.entry_fill_price} · LTP ₹${t.last_price} · remaining qty ${t.quantity - (t.exited_qty || 0)}`;
   modifyModal.style.display = "flex";
 }
 document.getElementById("modCancel").onclick = () => { modifyModal.style.display = "none"; };
 document.getElementById("modSave").onclick = async () => {
+  const targets = [...document.querySelectorAll("#modTargetRows .trow")].map((r) => ({
+    price: parseFloat(r.querySelector(".mtp").value) || 0,
+    qty: parseInt(r.querySelector(".mtq").value) || 0,
+  })).filter((x) => x.price > 0 && x.qty > 0);
   try {
     await api.post(`/api/trades/${modifyId}/modify`, {
-      sl_points: parseFloat(document.getElementById("modSl").value) || 0,
-      target_points: parseFloat(document.getElementById("modTarget").value) || 0,
+      stop_loss: parseFloat(document.getElementById("modSl").value) || 0,
+      targets,
     });
     modifyModal.style.display = "none";
     await refreshAll();

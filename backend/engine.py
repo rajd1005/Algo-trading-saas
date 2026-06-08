@@ -196,6 +196,42 @@ class TradingEngine:
             return self.paper
         return live_broker
 
+    def _place_confirmed(self, db, t, broker, is_exit, qty):
+        """Place an order and, for live Dhan, VERIFY it actually executed —
+        retry on rejection and sync our records to Dhan's real traded price,
+        so our order details match the broker's."""
+        place = broker.place_exit if is_exit else broker.place_entry
+        price = t.last_price or t.entry_fill_price or t.entry_price
+        kind = "EXIT" if is_exit else "ENTRY"
+        res = None
+        attempt = 0
+        while attempt <= config.ORDER_RETRIES:
+            res = place(t, price, qty=qty)
+            if not res.ok:
+                attempt += 1
+                self._log(db, f"{kind} order failed (try {attempt}): {res.error}", "ERROR", t.id)
+                continue
+            if broker.name != "DHAN":
+                return res                          # paper/demo fills at live price
+            status, traded_price, _ = broker.confirm(res.order_id)
+            if status == "TRADED":
+                if traded_price > 0:
+                    if abs(traded_price - res.fill_price) > 0.001:
+                        self._log(db, f"{kind} reconciled to Dhan fill {traded_price} "
+                                      f"(provisional {res.fill_price})", "INFO", t.id)
+                    res.fill_price = traded_price
+                res.status = "TRADED"
+                return res
+            if status in ("REJECTED", "CANCELLED", "EXPIRED"):
+                attempt += 1
+                self._log(db, f"{kind} {status} by broker — re-placing ({attempt})", "WARN", t.id)
+                continue
+            # still pending/unknown: accept provisional fill but flag it
+            self._log(db, f"{kind} order {res.order_id} status '{status or 'unknown'}'; "
+                          f"recorded at live price {res.fill_price}", "WARN", t.id)
+            return res
+        return res
+
     # ---------- entry ----------
     def _handle_pending(self, db, t, price, kill, live_broker):
         if kill:
@@ -204,7 +240,7 @@ class TradingEngine:
             return
 
         broker = self._broker_for(t, live_broker)
-        res = broker.place_entry(t, price)
+        res = self._place_confirmed(db, t, broker, is_exit=False, qty=t.quantity)
         if res.ok:
             t.status = "OPEN"
             t.entry_fill_price = res.fill_price
@@ -228,13 +264,22 @@ class TradingEngine:
 
     # ---------- levels / targets ----------
     def _apply_levels(self, t):
-        """Compute absolute SL/target prices from points and the entry fill."""
-        t.stop_loss = level_price(t.side, t.entry_fill_price, t.sl_points, False)
+        """Once entered, convert points into absolute SL/target prices using the
+        real fill price. Targets are stored with absolute prices from here on."""
+        if t.sl_points and t.sl_points > 0:
+            t.stop_loss = level_price(t.side, t.entry_fill_price, t.sl_points, False)
         targets = self._targets(t)
         if targets:
-            t.target = level_price(t.side, t.entry_fill_price, targets[0]["points"], True)
-        else:
+            for tg in targets:
+                if not tg.get("price"):
+                    tg["price"] = level_price(t.side, t.entry_fill_price, tg.get("points", 0), True)
+            t.targets_json = json.dumps(targets)
+            t.target = targets[0].get("price", 0)
+        elif t.target_points and t.target_points > 0:
             t.target = level_price(t.side, t.entry_fill_price, t.target_points, True)
+
+    def _target_price(self, t, tg):
+        return tg.get("price") or level_price(t.side, t.entry_fill_price, tg.get("points", 0), True)
 
     def _targets(self, t):
         if not t.targets_json:
@@ -257,7 +302,7 @@ class TradingEngine:
         sl_hit = t.stop_loss > 0 and (price <= t.stop_loss if t.side == "BUY"
                                       else price >= t.stop_loss)
         if kill or sl_hit:
-            res = broker.place_exit(t, price, qty=remaining)
+            res = self._place_confirmed(db, t, broker, is_exit=True, qty=remaining)
             if res.ok:
                 t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
                 t.exited_qty = t.quantity
@@ -278,13 +323,13 @@ class TradingEngine:
             for tg in targets:
                 if tg.get("hit"):
                     continue
-                tprice = level_price(t.side, t.entry_fill_price, tg["points"], True)
+                tprice = self._target_price(t, tg)
                 reached = price >= tprice if t.side == "BUY" else price <= tprice
                 if not reached:
                     continue
                 exit_qty = min(int(tg.get("qty", 0)), t.quantity - t.exited_qty)
                 if exit_qty > 0:
-                    res = broker.place_exit(t, price, qty=exit_qty)
+                    res = self._place_confirmed(db, t, broker, is_exit=True, qty=exit_qty)
                     if not res.ok:
                         self._log(db, f"Target exit failed {t.symbol}: {res.error}", "ERROR", t.id)
                         continue
@@ -307,7 +352,7 @@ class TradingEngine:
         if t.target > 0:
             reached = price >= t.target if t.side == "BUY" else price <= t.target
             if reached:
-                res = broker.place_exit(t, price, qty=remaining)
+                res = self._place_confirmed(db, t, broker, is_exit=True, qty=remaining)
                 if res.ok:
                     t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
                     t.exited_qty = t.quantity

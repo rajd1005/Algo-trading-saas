@@ -57,10 +57,15 @@ class TradeOut(BaseModel):
         from_attributes = True
 
 
+class ModifyTargetIn(BaseModel):
+    price: float = 0.0      # absolute target price
+    qty: int = 0            # quantity to exit at this target
+
+
 class ModifyIn(BaseModel):
-    """Edit stop-loss / target (in points) on a running trade."""
-    sl_points: Optional[float] = None
-    target_points: Optional[float] = None
+    """Edit stop-loss / targets on a running trade, using DIRECT prices."""
+    stop_loss: Optional[float] = None              # absolute price
+    targets: Optional[List[ModifyTargetIn]] = None  # absolute-price scale-out targets
 
 
 class BrokerConfigIn(BaseModel):

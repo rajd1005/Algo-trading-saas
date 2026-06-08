@@ -95,24 +95,34 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
 
 @app.post("/api/trades/{trade_id}/modify", response_model=TradeOut)
 def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)):
-    """Change stop-loss / target (in points) on a PENDING or OPEN trade."""
+    """Change stop-loss / targets on an OPEN trade, using DIRECT prices.
+    Supports editing or adding multiple (scale-out) targets here too."""
     t = db.get(Trade, trade_id)
     if not t:
         raise HTTPException(404, "Trade not found")
-    if t.status not in ("PENDING", "OPEN"):
-        raise HTTPException(400, "Only pending or open trades can be modified.")
-    if payload.sl_points is not None:
-        t.sl_points = payload.sl_points
-    if payload.target_points is not None:
-        t.target_points = payload.target_points
-        t.targets_json = ""        # switching to a single target via modify
-    # recompute absolute prices from the best reference we have
-    ref = t.entry_fill_price if (t.status == "OPEN" and t.entry_fill_price > 0) else t.entry_price
-    if ref > 0:
-        t.stop_loss = level_price(t.side, ref, t.sl_points, False)
-        t.target = level_price(t.side, ref, t.target_points, True)
-    db.add(LogEntry(message=f"Modified {t.symbol}: SL {t.sl_points}pt / Target {t.target_points}pt",
-                    trade_id=t.id))
+    if t.status != "OPEN":
+        raise HTTPException(400, "Only open trades can be modified.")
+
+    if payload.stop_loss is not None:
+        t.stop_loss = float(payload.stop_loss)
+        # keep points in sync for reference
+        if t.entry_fill_price > 0 and t.stop_loss > 0:
+            t.sl_points = round(abs(t.entry_fill_price - t.stop_loss), 2)
+
+    if payload.targets is not None:
+        clean = [{"price": float(x.price), "qty": int(x.qty), "hit": False}
+                 for x in payload.targets if float(x.price) > 0 and int(x.qty) > 0]
+        if len(clean) <= 1:
+            # single target -> store as the plain target price, clear scale-out
+            t.targets_json = ""
+            t.target = clean[0]["price"] if clean else 0.0
+            t.target_points = 0.0
+        else:
+            t.targets_json = json.dumps(clean)
+            t.target = clean[0]["price"]
+            t.target_points = 0.0
+
+    db.add(LogEntry(message=f"Modified {t.symbol}: SL {t.stop_loss} / targets updated", trade_id=t.id))
     db.commit()
     db.refresh(t)
     return t
