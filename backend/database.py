@@ -45,6 +45,7 @@ _MIGRATIONS = {
         "realized_pnl": "REAL DEFAULT 0",
         "lot_size": "INTEGER DEFAULT 1",
         "trail_sl": "REAL DEFAULT 0",
+        "trail_mode": "TEXT DEFAULT 'CONTINUE'",
         "hwm": "REAL DEFAULT 0",
     },
     "logs": {

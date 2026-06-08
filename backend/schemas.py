@@ -23,6 +23,7 @@ class TradeCreate(BaseModel):
     sl_points: float = 0.0
     target_points: float = 0.0
     trail_sl: float = 0.0             # trailing stop distance in points (0 = off)
+    trail_mode: str = "CONTINUE"      # CONTINUE or ENTRY (trail only up to breakeven)
     targets: List[TargetIn] = []      # optional scale-out targets
     mode: str = "TEST"
     name: str = ""
@@ -45,6 +46,7 @@ class TradeOut(BaseModel):
     sl_points: float
     target_points: float
     trail_sl: float
+    trail_mode: str
     hwm: float
     targets_json: str
     exited_qty: int
@@ -71,6 +73,7 @@ class ModifyIn(BaseModel):
     """Edit stop-loss / targets on a running trade, using DIRECT prices."""
     stop_loss: Optional[float] = None              # absolute price
     trail_sl: Optional[float] = None               # trailing distance in points (0 = off)
+    trail_mode: Optional[str] = None               # CONTINUE or ENTRY
     targets: Optional[List[ModifyTargetIn]] = None  # absolute-price scale-out targets
 
 

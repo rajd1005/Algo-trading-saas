@@ -117,6 +117,9 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
     if t.status != "OPEN":
         raise HTTPException(400, "Only open trades can be modified.")
 
+    if payload.trail_mode is not None:
+        t.trail_mode = "ENTRY" if str(payload.trail_mode).upper() == "ENTRY" else "CONTINUE"
+
     if payload.trail_sl is not None:
         t.trail_sl = float(payload.trail_sl)
         if t.trail_sl > 0:

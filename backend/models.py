@@ -54,6 +54,7 @@ class Trade(Base):
     sl_points = Column(Float, default=0.0)
     target_points = Column(Float, default=0.0)
     trail_sl = Column(Float, default=0.0)          # trailing stop distance in points (0 = off)
+    trail_mode = Column(String, default="CONTINUE")  # CONTINUE or ENTRY (trail only up to breakeven)
     hwm = Column(Float, default=0.0)               # high-water mark for trailing
     # Optional multiple (scale-out) targets, JSON: [{"points":x,"qty":n,"hit":false}]
     targets_json = Column(Text, default="")

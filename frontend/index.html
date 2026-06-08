@@ -127,7 +127,10 @@
         <label>Stop-loss (points) <input name="sl_points" type="number" step="0.05" value="0" /></label>
         <label>Trailing SL (points)
           <input name="trail_sl" type="number" step="0.05" value="0" />
-          <span class="muted" style="font-size:11px;">if set, overrides fixed SL</span>
+          <select name="trail_mode" style="margin-top:4px;">
+            <option value="CONTINUE">Continue trailing</option>
+            <option value="ENTRY">Trail up to entry only</option>
+          </select>
         </label>
         <label id="targetField">Target (points) <input name="target_points" type="number" step="0.05" value="0" /></label>
       </div>
@@ -135,9 +138,15 @@
       <div class="field">
         <label class="check"><input type="checkbox" id="multiToggle" /> Use multiple targets (scale-out)</label>
         <div id="multiWrap" style="display:none; margin-top:8px;">
+          <div class="autolegs">
+            <b>Auto legs:</b> total target
+            <input id="autoTotal" type="number" step="0.05" placeholder="300" style="width:90px;" /> pts
+            in <input id="autoLegs" type="number" min="1" placeholder="2" style="width:56px;" /> legs
+            <button type="button" class="btn btn-sm" id="genLegs">Generate</button>
+          </div>
           <div id="targetRows"></div>
           <button type="button" class="btn btn-sm" id="addTarget">+ Add target</button>
-          <div class="muted" style="font-size:11px; margin-top:6px;">Each target exits the given <b>lots</b> at that many <b>points</b> of profit. Remaining lots ride until stop-loss or manual close.</div>
+          <div class="muted" style="font-size:11px; margin-top:6px;">Points are <b>cumulative</b> — each target adds onto the previous one. E.g. 100 then 100 ⇒ exits at +100, then +200. Remaining lots ride until stop-loss / manual close.</div>
         </div>
       </div>
 
@@ -209,7 +218,10 @@
         <label>Stop-loss (price) <input id="modSl" type="number" step="0.05" value="0" /></label>
         <label>Trailing SL (points)
           <input id="modTrail" type="number" step="0.05" value="0" />
-          <span class="muted" style="font-size:11px;">if set, overrides fixed SL</span>
+          <select id="modTrailMode" style="margin-top:4px;">
+            <option value="CONTINUE">Continue trailing</option>
+            <option value="ENTRY">Trail up to entry only</option>
+          </select>
         </label>
       </div>
       <div class="field" style="margin-top:12px;">

@@ -278,6 +278,18 @@ function addTargetRow(points = "") {
   distributeNewTargets();
 }
 
+// Auto-generate equal target legs: total target split into N legs, lots spread evenly.
+document.getElementById("genLegs").onclick = () => {
+  const total = parseFloat(document.getElementById("autoTotal").value) || 0;
+  const legs = parseInt(document.getElementById("autoLegs").value) || 0;
+  const N = parseInt(lotsInput.value) || 1;
+  if (total <= 0 || legs < 1) { alert("Enter total target points and number of legs."); return; }
+  if (legs > N) { alert(`Legs (${legs}) cannot exceed Lots (${N}) — each leg needs at least 1 lot.`); return; }
+  document.getElementById("targetRows").innerHTML = "";
+  const per = Math.round((total / legs) * 100) / 100;   // incremental points per leg
+  for (let i = 0; i < legs; i++) addTargetRow(per);
+};
+
 function resetOrderForm() {
   document.querySelectorAll("[data-side]").forEach((x) => x.classList.toggle("active", x.dataset.side === "BUY"));
   form.side.value = "BUY";
@@ -593,6 +605,7 @@ function openModify(id) {
   modRemainingLots = Math.max(1, Math.floor(remainingQty / modLotSize));
   document.getElementById("modSl").value = t.stop_loss || 0;
   document.getElementById("modTrail").value = t.trail_sl || 0;
+  document.getElementById("modTrailMode").value = t.trail_mode || "CONTINUE";
   const rows = document.getElementById("modTargetRows");
   rows.innerHTML = "";
   let prices = [];
@@ -617,6 +630,7 @@ document.getElementById("modSave").onclick = async () => {
     await api.post(`/api/trades/${modifyId}/modify`, {
       stop_loss: parseFloat(document.getElementById("modSl").value) || 0,
       trail_sl: parseFloat(document.getElementById("modTrail").value) || 0,
+      trail_mode: document.getElementById("modTrailMode").value,
       targets,
     });
     modifyModal.style.display = "none";
