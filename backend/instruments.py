@@ -20,7 +20,8 @@ import datetime as dt
 import requests
 
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-CACHE_FILE = os.path.join(os.path.dirname(__file__), "instruments.csv")
+# New filename so an old cache from a previous version is never reused by mistake.
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "instruments_detailed.csv")
 
 # (exchange, segment-letter) -> the exchangeSegment string Dhan's API expects.
 SEGMENT_MAP = {
@@ -87,18 +88,25 @@ class InstrumentStore:
         age_h = (dt.datetime.now().timestamp() - os.path.getmtime(CACHE_FILE)) / 3600
         return age_h < 20
 
+    def _download(self):
+        r = requests.get(SCRIP_URL, timeout=90, headers={"User-Agent": "algo-trading"})
+        r.raise_for_status()
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            f.write(r.text)
+
     def _load(self, force=False):
         if self._loading:
             return
         self._loading = True
         try:
             if force or not self._is_cache_fresh():
-                r = requests.get(SCRIP_URL, timeout=90, headers={"User-Agent": "algo-trading"})
-                r.raise_for_status()
-                with open(CACHE_FILE, "w", encoding="utf-8") as f:
-                    f.write(r.text)
-            text = open(CACHE_FILE, "r", encoding="utf-8", errors="ignore").read()
-            self._parse(text)
+                self._download()
+            self._parse(open(CACHE_FILE, "r", encoding="utf-8", errors="ignore").read())
+            # Self-heal: if the cache was empty/old-format and produced nothing,
+            # download a fresh copy once and re-parse.
+            if not self.ready():
+                self._download()
+                self._parse(open(CACHE_FILE, "r", encoding="utf-8", errors="ignore").read())
             self._loaded_at = dt.datetime.utcnow()
         except Exception as e:
             print(f"[instruments] load failed: {e}")

@@ -11,8 +11,9 @@ backend/.env
 *.db
 backend/trading.db
 
-# Downloaded symbol cache (28MB, refreshes daily) — never commit
+# Downloaded symbol cache (refreshes daily) — never commit
 backend/instruments.csv
+backend/instruments_detailed.csv
 
 # OS / editor
 .DS_Store
