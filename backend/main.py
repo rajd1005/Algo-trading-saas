@@ -17,6 +17,7 @@ from models import Trade, LogEntry, Setting
 from schemas import TradeCreate, TradeOut, BrokerConfigIn, SettingsIn
 from engine import engine
 from instruments import store as instruments
+from market_data import DhanMarketData
 from brokers import verify_dhan_credentials
 
 app = FastAPI(title="Algo Trading SaaS (India)")
@@ -122,11 +123,55 @@ def delete_trade(trade_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-# ---------- instruments (symbol search) ----------
-@app.get("/api/instruments/search")
-def instruments_search(q: str = "", limit: int = 25):
-    """Search Dhan's symbol list. Returns symbols with their Security IDs."""
-    return instruments.search(q, limit=limit)
+# ---------- instruments (broker-style picker) ----------
+@app.get("/api/underlyings/search")
+def underlyings_search(q: str = "", kind: str = "OPTION", limit: int = 25):
+    """Search underlyings that have options (kind=OPTION) or futures (kind=FUTURES)."""
+    return instruments.search_underlyings(q, kind.upper(), limit=limit)
+
+
+@app.get("/api/equities/search")
+def equities_search(q: str = "", limit: int = 25):
+    """Search stocks / indices for equity trading (returns Security IDs directly)."""
+    return instruments.search_equities(q, limit=limit)
+
+
+@app.get("/api/expiries")
+def expiries(underlying: str, kind: str = "OPTION"):
+    return instruments.expiries(underlying, kind.upper())
+
+
+@app.get("/api/optionchain")
+def option_chain(underlying: str, expiry: str = ""):
+    exps = instruments.expiries(underlying, "OPTION")
+    if not expiry and exps:
+        expiry = exps[0]
+    return instruments.option_chain(underlying, expiry)
+
+
+@app.get("/api/futures")
+def futures(underlying: str):
+    return instruments.futures(underlying)
+
+
+@app.post("/api/ltp")
+def ltp(payload: dict, db: Session = Depends(get_db)):
+    """Fetch live LTP for a list of instruments (used to fill the option chain)."""
+    cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
+    tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+    items = payload.get("items", [])
+    if not cid or not tok or not items:
+        return {"connected": bool(cid and tok), "prices": {}}
+    by_seg = {}
+    for it in items:
+        seg = it.get("exchange_segment")
+        sid = str(it.get("security_id"))
+        if seg and sid:
+            by_seg.setdefault(seg, []).append(sid)
+    md = DhanMarketData(cid, tok)
+    res = md.get_ltp_batch(by_seg)
+    prices = {sid: px for (seg, sid), px in res.items()}
+    return {"connected": True, "prices": prices, "error": md.last_error}
 
 
 @app.get("/api/instruments/status")

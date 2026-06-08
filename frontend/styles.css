@@ -76,6 +76,40 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .selected-symbol { margin: 0 0 14px; padding: 9px 12px; border-radius: 8px;
   background: rgba(47,129,247,.1); border: 1px solid rgba(47,129,247,.3);
   color: var(--text); font-size: 13px; }
+
+/* segment tabs */
+.seg-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.seg { background: #21262d; border: 1px solid var(--line); color: var(--muted);
+  padding: 8px 16px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.seg.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* option chain */
+.chain-wrap { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+.chain-head { display: grid; grid-template-columns: 1fr 120px 1fr; background: #11171d;
+  color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.chain-head span { padding: 8px 12px; text-align: center; }
+.chain-head span:first-child { text-align: right; color: var(--green); }
+.chain-head span:last-child { text-align: left; color: var(--red); }
+.chain-body { max-height: 360px; overflow-y: auto; }
+.chain-row { display: grid; grid-template-columns: 1fr 120px 1fr; border-top: 1px solid var(--line); }
+.chain-cell { padding: 8px 12px; cursor: pointer; font-size: 13px; }
+.chain-cell.ce { text-align: right; }
+.chain-cell.pe { text-align: left; }
+.chain-cell:hover { background: #1a2129; }
+.chain-cell.ce:hover { background: rgba(46,160,67,.12); }
+.chain-cell.pe:hover { background: rgba(248,81,73,.12); }
+.chain-cell.sel { background: var(--accent) !important; color: #fff; }
+.chain-cell .ltp { color: var(--text); font-weight: 600; }
+.chain-cell .ltp.dim { color: var(--muted); font-weight: 400; }
+.chain-strike { padding: 8px 12px; text-align: center; font-weight: 600;
+  background: #0d1117; color: var(--text); font-size: 13px; }
+
+/* futures list */
+.fut-wrap { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.fut-btn { background: #21262d; border: 1px solid var(--line); color: var(--text);
+  padding: 10px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+.fut-btn:hover { border-color: var(--accent); }
+.fut-btn.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
 .pos { color: var(--green); } .neg { color: var(--red); }
 .badge { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
 .b-PENDING { background: rgba(210,153,34,.18); color: var(--yellow); }

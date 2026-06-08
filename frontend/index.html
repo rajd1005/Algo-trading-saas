@@ -59,15 +59,33 @@
         </label>
       </div>
 
-      <!-- Symbol search: type a name, pick from the list, IDs auto-fill -->
+      <!-- Broker-style instrument picker -->
+      <div class="seg-tabs">
+        <button type="button" class="seg active" data-seg="OPTION">Options</button>
+        <button type="button" class="seg" data-seg="FUTURES">Futures</button>
+        <button type="button" class="seg" data-seg="EQUITY">Equity / Stock</button>
+      </div>
+
       <div class="row">
-        <label style="position:relative;">Symbol* — type to search (e.g. "nifty 25000 ce", "reliance")
-          <input id="symbolSearch" autocomplete="off" placeholder="Start typing a symbol…" />
-          <div id="symbolResults" class="dropdown"></div>
+        <label style="position:relative; flex:2;">Search <span id="pickerHint" class="muted"></span>
+          <input id="ulSearch" autocomplete="off" placeholder="Type NIFTY, BANKNIFTY, RELIANCE…" />
+          <div id="ulResults" class="dropdown"></div>
+        </label>
+        <label id="expiryWrap" style="display:none; max-width:240px;">Expiry
+          <select id="expirySelect"></select>
         </label>
       </div>
+
+      <!-- option chain -->
+      <div id="chainWrap" class="chain-wrap" style="display:none;">
+        <div class="chain-head"><span>CALL — CE (LTP)</span><span>Strike</span><span>PUT — PE (LTP)</span></div>
+        <div id="chainBody" class="chain-body"></div>
+      </div>
+      <!-- futures list -->
+      <div id="futWrap" class="fut-wrap" style="display:none;"></div>
+
       <div id="selectedSymbol" class="selected-symbol">No symbol selected yet.</div>
-      <!-- these get filled automatically when you pick a symbol -->
+      <!-- these get filled automatically when you pick a contract -->
       <input type="hidden" name="symbol" /><input type="hidden" name="security_id" />
       <input type="hidden" name="exchange_segment" /><input type="hidden" name="instrument_type" />
 

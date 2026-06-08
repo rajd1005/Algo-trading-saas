@@ -1,11 +1,15 @@
 """
-Instrument master = the full list of every tradeable symbol on Dhan.
+Instrument master = every tradeable symbol on Dhan, organised the way a broker
+app shows it:
 
-We download Dhan's public "scrip master" CSV (no login needed), keep it in
-memory, and let the dashboard SEARCH it. When you pick a symbol, we already
-know its Security ID + Exchange Segment, so you never type those by hand.
+  • search an UNDERLYING (NIFTY, BANKNIFTY, RELIANCE, ...)
+  • for options: pick an EXPIRY, then see the full OPTION CHAIN (strikes x CE/PE)
+  • for futures: pick an expiry
+  • for equity: pick the stock directly
 
-This list is refreshed automatically once a day (symbols/expiries change daily).
+We download Dhan's public "detailed scrip master" CSV (no login needed), which
+has clean UNDERLYING_SYMBOL / STRIKE / EXPIRY / OPTION_TYPE columns, and build
+fast in-memory indexes from it. Refreshed automatically once a day.
 """
 import csv
 import io
@@ -15,72 +19,84 @@ import datetime as dt
 
 import requests
 
-# Dhan's public symbol file (compact version is enough and smaller).
-SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master.csv"
+SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "instruments.csv")
 
 # (exchange, segment-letter) -> the exchangeSegment string Dhan's API expects.
 SEGMENT_MAP = {
-    ("NSE", "E"): "NSE_EQ",
-    ("NSE", "D"): "NSE_FNO",
-    ("NSE", "C"): "NSE_CURRENCY",
+    ("NSE", "E"): "NSE_EQ", ("NSE", "D"): "NSE_FNO", ("NSE", "C"): "NSE_CURRENCY",
     ("NSE", "I"): "IDX_I",
-    ("BSE", "E"): "BSE_EQ",
-    ("BSE", "D"): "BSE_FNO",
-    ("BSE", "C"): "BSE_CURRENCY",
+    ("BSE", "E"): "BSE_EQ", ("BSE", "D"): "BSE_FNO", ("BSE", "C"): "BSE_CURRENCY",
     ("BSE", "I"): "IDX_I",
     ("MCX", "M"): "MCX_COMM",
 }
 
 
-def _instrument_type(name: str, option_type: str) -> str:
-    n = (name or "").upper()
-    if n.startswith("OPT") or option_type in ("CE", "PE"):
+def _instr_type(instrument: str) -> str:
+    i = (instrument or "").upper()
+    if i.startswith("OPT"):
         return "OPTION"
-    if n.startswith("FUT"):
+    if i.startswith("FUT"):
         return "FUTURES"
-    if n == "INDEX":
+    if i == "INDEX":
         return "INDEX"
     return "EQUITY"
 
 
+def _to_float(s):
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
 class InstrumentStore:
     def __init__(self):
-        self._rows = []                 # list of dicts (one per symbol)
         self._lock = threading.Lock()
         self._loaded_at = None
         self._loading = False
+        # indexes
+        self._equities = []          # list of equity/index rows (for Equity search)
+        self._underlyings = {}       # underlying -> {display, has_option, has_future}
+        self._opt = {}               # underlying -> expiry -> {strike: {"CE":row,"PE":row}}
+        self._fut = {}               # underlying -> list of future rows
 
     # ---------- status ----------
     def status(self):
         return {
-            "count": len(self._rows),
+            "count": len(self._equities) + sum(
+                len(v) for u in self._opt.values() for v in u.values()) * 2,
+            "underlyings": len(self._underlyings),
             "loaded_at": self._loaded_at.isoformat() if self._loaded_at else None,
             "loading": self._loading,
         }
 
-    def ready(self) -> bool:
-        return len(self._rows) > 0
+    def ready(self):
+        return len(self._underlyings) > 0
 
     # ---------- loading ----------
     def load_async(self):
-        """Load in a background thread so the web server starts instantly."""
-        t = threading.Thread(target=self._load, daemon=True)
-        t.start()
+        threading.Thread(target=self._load, daemon=True).start()
 
-    def _is_cache_fresh(self) -> bool:
+    def refresh(self):
+        threading.Thread(target=self._load, kwargs={"force": True}, daemon=True).start()
+
+    def _is_cache_fresh(self):
         if not os.path.exists(CACHE_FILE):
             return False
-        age_hours = (dt.datetime.now().timestamp() - os.path.getmtime(CACHE_FILE)) / 3600
-        return age_hours < 20  # refresh roughly once a day
+        age_h = (dt.datetime.now().timestamp() - os.path.getmtime(CACHE_FILE)) / 3600
+        return age_h < 20
 
-    def _load(self, force: bool = False):
+    def _load(self, force=False):
         if self._loading:
             return
         self._loading = True
         try:
             if force or not self._is_cache_fresh():
-                self._download()
+                r = requests.get(SCRIP_URL, timeout=90, headers={"User-Agent": "algo-trading"})
+                r.raise_for_status()
+                with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                    f.write(r.text)
             text = open(CACHE_FILE, "r", encoding="utf-8", errors="ignore").read()
             self._parse(text)
             self._loaded_at = dt.datetime.utcnow()
@@ -89,78 +105,139 @@ class InstrumentStore:
         finally:
             self._loading = False
 
-    def refresh(self):
-        """Force a fresh download (used by the 'Refresh symbols' button)."""
-        threading.Thread(target=self._load, kwargs={"force": True}, daemon=True).start()
-
-    def _download(self):
-        r = requests.get(SCRIP_URL, timeout=60, headers={"User-Agent": "algo-trading"})
-        r.raise_for_status()
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            f.write(r.text)
-
-    def _parse(self, text: str):
-        rows = []
-        reader = csv.DictReader(io.StringIO(text))
-        for r in reader:
-            exch = r.get("SEM_EXM_EXCH_ID", "").strip()
-            seg = r.get("SEM_SEGMENT", "").strip()
+    def _parse(self, text):
+        equities, underlyings, opt, fut = [], {}, {}, {}
+        for r in csv.DictReader(io.StringIO(text)):
+            exch = (r.get("EXCH_ID") or "").strip()
+            seg = (r.get("SEGMENT") or "").strip()
             segment = SEGMENT_MAP.get((exch, seg))
             if not segment:
-                continue  # skip anything we can't price/trade via the API
-            sec_id = r.get("SEM_SMST_SECURITY_ID", "").strip()
+                continue
+            sec_id = (r.get("SECURITY_ID") or "").strip()
             if not sec_id:
                 continue
-            custom = r.get("SEM_CUSTOM_SYMBOL", "").strip()
-            tsym = r.get("SEM_TRADING_SYMBOL", "").strip()
-            sname = r.get("SM_SYMBOL_NAME", "").strip()
-            display = custom or tsym or sname
-            rows.append({
+            itype = _instr_type(r.get("INSTRUMENT", ""))
+            underlying = (r.get("UNDERLYING_SYMBOL") or "").strip()
+            display = (r.get("DISPLAY_NAME") or r.get("SYMBOL_NAME") or "").strip()
+            expiry = (r.get("SM_EXPIRY_DATE") or "").strip()[:10]
+            row = {
                 "security_id": sec_id,
                 "exchange_segment": segment,
-                "instrument_type": _instrument_type(
-                    r.get("SEM_INSTRUMENT_NAME", ""), r.get("SEM_OPTION_TYPE", "")),
+                "instrument_type": itype,
+                "underlying": underlying,
                 "symbol": display,
-                "trading_symbol": tsym,
-                "lot_size": r.get("SEM_LOT_UNITS", "") or "1",
-                "expiry": r.get("SEM_EXPIRY_DATE", "").strip(),
-                # precomputed lowercase blob for fast searching
-                "_s": f"{display} {tsym} {sname}".lower(),
-            })
-        with self._lock:
-            self._rows = rows
+                "expiry": expiry,
+                "strike": _to_float(r.get("STRIKE_PRICE")),
+                "option_type": (r.get("OPTION_TYPE") or "").strip(),
+                "lot_size": (r.get("LOT_SIZE") or "1").strip(),
+            }
 
-    # ---------- search ----------
-    def search(self, query: str, limit: int = 25):
+            if itype in ("EQUITY", "INDEX"):
+                row["_s"] = f"{display} {underlying}".lower()
+                equities.append(row)
+            elif itype == "OPTION":
+                u = underlyings.setdefault(underlying, {"underlying": underlying,
+                                                        "display": underlying,
+                                                        "has_option": False, "has_future": False})
+                u["has_option"] = True
+                exp = opt.setdefault(underlying, {}).setdefault(expiry, {})
+                pair = exp.setdefault(row["strike"], {"CE": None, "PE": None})
+                if row["option_type"] in ("CE", "PE"):
+                    pair[row["option_type"]] = row
+            elif itype == "FUTURES":
+                u = underlyings.setdefault(underlying, {"underlying": underlying,
+                                                        "display": underlying,
+                                                        "has_option": False, "has_future": False})
+                u["has_future"] = True
+                fut.setdefault(underlying, []).append(row)
+
+        with self._lock:
+            self._equities = equities
+            self._underlyings = underlyings
+            self._opt = opt
+            self._fut = fut
+
+    # ---------- searching ----------
+    def search_underlyings(self, query, kind, limit=25):
+        """kind = OPTION or FUTURES -> returns matching underlyings."""
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        flag = "has_option" if kind == "OPTION" else "has_future"
+        out = []
+        with self._lock:
+            items = list(self._underlyings.values())
+        for u in items:
+            if not u[flag]:
+                continue
+            name = u["underlying"].lower()
+            if q in name:
+                out.append((0 if name.startswith(q) else 1, len(name),
+                            {"underlying": u["underlying"], "display": u["display"], "kind": kind}))
+        out.sort(key=lambda x: (x[0], x[1]))
+        return [r for _, _, r in out[:limit]]
+
+    def search_equities(self, query, limit=25):
         q = (query or "").strip().lower()
         if not q:
             return []
         terms = q.split()
         out = []
         with self._lock:
-            rows = self._rows
+            rows = self._equities
         for row in rows:
-            blob = row["_s"]
-            if all(t in blob for t in terms):
-                # rank: exact-ish (starts with) and shorter symbols first
-                starts = 0 if blob.startswith(terms[0]) else 1
-                out.append((starts, len(row["symbol"]), row))
-                if len(out) > 2000:      # cap work on very broad queries
-                    break
-        out.sort(key=lambda x: (x[0], x[1]))
-        return [
-            {k: v for k, v in row.items() if not k.startswith("_")}
-            for _, _, row in out[:limit]
-        ]
+            if all(t in row["_s"] for t in terms):
+                starts = 0 if row["_s"].startswith(terms[0]) else 1
+                # prefer NSE over BSE for the same name
+                exch_rank = 0 if row["exchange_segment"].startswith("NSE") else 1
+                out.append((starts, exch_rank, len(row["symbol"]), row))
+        out.sort(key=lambda x: (x[0], x[1], x[2]))
+        return [{k: v for k, v in row.items() if not k.startswith("_")}
+                for _, _, _, row in out[:limit]]
 
-    def get(self, security_id: str, exchange_segment: str = ""):
+    # ---------- expiries / chain / futures ----------
+    def expiries(self, underlying, kind="OPTION"):
         with self._lock:
-            for row in self._rows:
-                if row["security_id"] == str(security_id) and (
-                        not exchange_segment or row["exchange_segment"] == exchange_segment):
-                    return row
-        return None
+            if kind == "OPTION":
+                exps = list(self._opt.get(underlying, {}).keys())
+            else:
+                exps = sorted({r["expiry"] for r in self._fut.get(underlying, [])})
+        return sorted([e for e in exps if e])
+
+    def option_chain(self, underlying, expiry):
+        with self._lock:
+            by_strike = self._opt.get(underlying, {}).get(expiry, {})
+            strikes = sorted(by_strike.keys())
+            rows = []
+            for s in strikes:
+                pair = by_strike[s]
+                rows.append({
+                    "strike": s,
+                    "ce": self._slim(pair.get("CE")),
+                    "pe": self._slim(pair.get("PE")),
+                })
+        return {"underlying": underlying, "expiry": expiry,
+                "expiries": self.expiries(underlying, "OPTION"), "strikes": rows}
+
+    def futures(self, underlying):
+        with self._lock:
+            rows = sorted(self._fut.get(underlying, []), key=lambda r: r["expiry"])
+        return [self._slim(r) for r in rows]
+
+    @staticmethod
+    def _slim(row):
+        if not row:
+            return None
+        return {
+            "security_id": row["security_id"],
+            "exchange_segment": row["exchange_segment"],
+            "instrument_type": row["instrument_type"],
+            "symbol": row["symbol"],
+            "expiry": row["expiry"],
+            "strike": row["strike"],
+            "option_type": row["option_type"],
+            "lot_size": row["lot_size"],
+        }
 
 
-# Shared instance.
 store = InstrumentStore()

@@ -59,7 +59,7 @@ async function refreshSummary() {
   const ss = document.getElementById("symbolsState");
   if (ss) {
     if (inst.loading) { ss.textContent = "Downloading…"; ss.className = "pill pill-off"; }
-    else if (inst.count > 0) { ss.textContent = inst.count.toLocaleString("en-IN") + " symbols loaded"; ss.className = "pill pill-ok"; }
+    else if (inst.underlyings > 0) { ss.textContent = inst.underlyings.toLocaleString("en-IN") + " underlyings loaded"; ss.className = "pill pill-ok"; }
     else { ss.textContent = "Not loaded"; ss.className = "pill pill-off"; }
   }
 }
@@ -126,50 +126,157 @@ async function refreshLogs() {
   }
 }
 
-// ---- symbol search (autocomplete) ----
-const symSearch = document.getElementById("symbolSearch");
-const symResults = document.getElementById("symbolResults");
+// ---- broker-style instrument picker ----
 const form = document.getElementById("tradeForm");
-let symTimer = null;
+const ulSearch = document.getElementById("ulSearch");
+const ulResults = document.getElementById("ulResults");
+const expiryWrap = document.getElementById("expiryWrap");
+const expirySelect = document.getElementById("expirySelect");
+const chainWrap = document.getElementById("chainWrap");
+const chainBody = document.getElementById("chainBody");
+const futWrap = document.getElementById("futWrap");
+const pickerHint = document.getElementById("pickerHint");
 
-symSearch.addEventListener("input", () => {
-  clearTimeout(symTimer);
-  const q = symSearch.value.trim();
-  if (q.length < 2) { symResults.classList.remove("show"); return; }
-  symTimer = setTimeout(async () => {
-    const rows = await api.get("/api/instruments/search?q=" + encodeURIComponent(q));
-    if (!rows.length) {
-      symResults.innerHTML = `<div class="item"><div class="meta">No matches. Try a different name, or refresh symbols on the Broker tab.</div></div>`;
-    } else {
-      symResults.innerHTML = rows.map((r, i) => `
-        <div class="item" data-i="${i}">
-          <div class="sym">${r.symbol}</div>
-          <div class="meta">${r.instrument_type} · ${r.exchange_segment} · lot ${r.lot_size} · id ${r.security_id}</div>
-        </div>`).join("");
-      symResults.querySelectorAll(".item").forEach((el) => {
-        const r = rows[el.dataset.i];
-        if (r) el.onclick = () => pickSymbol(r);
-      });
-    }
-    symResults.classList.add("show");
+let currentSeg = "OPTION";
+let currentUnderlying = null;
+let ulTimer = null, ltpTimer = null;
+const HINTS = { OPTION: "— search an index/stock, then pick a strike",
+                FUTURES: "— search an index/stock future",
+                EQUITY: "— search a stock or index" };
+
+function resetPicker() {
+  currentUnderlying = null;
+  ulResults.classList.remove("show");
+  expiryWrap.style.display = "none";
+  chainWrap.style.display = "none";
+  futWrap.style.display = "none";
+  futWrap.innerHTML = ""; chainBody.innerHTML = "";
+  if (ltpTimer) { clearInterval(ltpTimer); ltpTimer = null; }
+}
+
+document.querySelectorAll(".seg").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll(".seg").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    currentSeg = b.dataset.seg;
+    pickerHint.textContent = HINTS[currentSeg];
+    ulSearch.value = ""; resetPicker();
+  };
+});
+pickerHint.textContent = HINTS.OPTION;
+
+ulSearch.addEventListener("input", () => {
+  clearTimeout(ulTimer);
+  const q = ulSearch.value.trim();
+  if (q.length < 2) { ulResults.classList.remove("show"); return; }
+  ulTimer = setTimeout(async () => {
+    const rows = currentSeg === "EQUITY"
+      ? await api.get("/api/equities/search?q=" + encodeURIComponent(q))
+      : await api.get(`/api/underlyings/search?kind=${currentSeg}&q=` + encodeURIComponent(q));
+    renderUlResults(rows);
   }, 250);
 });
 
-function pickSymbol(r) {
+function renderUlResults(rows) {
+  if (!rows.length) {
+    ulResults.innerHTML = `<div class="item"><div class="meta">No matches.</div></div>`;
+  } else if (currentSeg === "EQUITY") {
+    ulResults.innerHTML = rows.map((r, i) => `<div class="item" data-i="${i}">
+      <div class="sym">${r.symbol}</div>
+      <div class="meta">${r.instrument_type} · ${r.exchange_segment} · id ${r.security_id}</div></div>`).join("");
+    ulResults.querySelectorAll(".item").forEach((el) => {
+      const r = rows[el.dataset.i]; if (r) el.onclick = () => { pickContract(r); ulResults.classList.remove("show"); };
+    });
+  } else {
+    ulResults.innerHTML = rows.map((r, i) => `<div class="item" data-i="${i}">
+      <div class="sym">${r.underlying}</div>
+      <div class="meta">${currentSeg === "OPTION" ? "Options" : "Futures"} available</div></div>`).join("");
+    ulResults.querySelectorAll(".item").forEach((el) => {
+      const r = rows[el.dataset.i]; if (r) el.onclick = () => selectUnderlying(r.underlying);
+    });
+  }
+  ulResults.classList.add("show");
+}
+
+async function selectUnderlying(underlying) {
+  currentUnderlying = underlying;
+  ulSearch.value = underlying;
+  ulResults.classList.remove("show");
+  if (currentSeg === "OPTION") {
+    const exps = await api.get("/api/expiries?kind=OPTION&underlying=" + encodeURIComponent(underlying));
+    expirySelect.innerHTML = exps.map((e) => `<option>${e}</option>`).join("");
+    expiryWrap.style.display = exps.length ? "" : "none";
+    futWrap.style.display = "none";
+    if (exps.length) loadChain(underlying, exps[0]);
+  } else {
+    const futs = await api.get("/api/futures?underlying=" + encodeURIComponent(underlying));
+    expiryWrap.style.display = "none"; chainWrap.style.display = "none";
+    renderFutures(futs);
+  }
+}
+
+expirySelect.onchange = () => { if (currentUnderlying) loadChain(currentUnderlying, expirySelect.value); };
+
+async function loadChain(underlying, expiry) {
+  const data = await api.get(`/api/optionchain?underlying=${encodeURIComponent(underlying)}&expiry=${encodeURIComponent(expiry)}`);
+  chainBody.innerHTML = data.strikes.map((row) => {
+    const ce = row.ce, pe = row.pe;
+    const cell = (c, cls) => c
+      ? `<div class="chain-cell ${cls}" data-c='${JSON.stringify(c)}'><span class="ltp dim" data-ltp="${c.security_id}">tap to pick</span></div>`
+      : `<div class="chain-cell ${cls}"><span class="ltp dim">-</span></div>`;
+    return `<div class="chain-row">${cell(ce, "ce")}<div class="chain-strike">${row.strike}</div>${cell(pe, "pe")}</div>`;
+  }).join("");
+  chainWrap.style.display = "block";
+  chainBody.querySelectorAll(".chain-cell[data-c]").forEach((el) => {
+    el.onclick = () => { pickContract(JSON.parse(el.dataset.c)); markSelected(el); };
+  });
+  refreshChainLtp();
+  if (ltpTimer) clearInterval(ltpTimer);
+  ltpTimer = setInterval(refreshChainLtp, 3000);
+}
+
+function markSelected(el) {
+  chainBody.querySelectorAll(".chain-cell.sel").forEach((x) => x.classList.remove("sel"));
+  el.classList.add("sel");
+}
+
+async function refreshChainLtp() {
+  const cells = [...chainBody.querySelectorAll(".chain-cell[data-c]")].slice(0, 500);
+  if (!cells.length) return;
+  const items = cells.map((el) => { const c = JSON.parse(el.dataset.c);
+    return { security_id: c.security_id, exchange_segment: c.exchange_segment }; });
+  let res; try { res = await api.post("/api/ltp", { items }); } catch { return; }
+  const prices = res.prices || {};
+  chainBody.querySelectorAll(".ltp[data-ltp]").forEach((sp) => {
+    const p = prices[sp.dataset.ltp];
+    if (p != null) { sp.textContent = "₹" + p; sp.classList.remove("dim"); }
+  });
+}
+
+function renderFutures(futs) {
+  if (!futs.length) { futWrap.style.display = "none"; return; }
+  futWrap.innerHTML = futs.map((f, i) => `<button type="button" class="fut-btn" data-i="${i}">
+    ${f.symbol}<br><span class="muted" style="font-size:11px;">exp ${f.expiry} · lot ${parseInt(parseFloat(f.lot_size))}</span></button>`).join("");
+  futWrap.style.display = "flex";
+  futWrap.querySelectorAll(".fut-btn").forEach((el) => {
+    const f = futs[el.dataset.i];
+    el.onclick = () => { pickContract(f); futWrap.querySelectorAll(".fut-btn").forEach((x) => x.classList.remove("sel")); el.classList.add("sel"); };
+  });
+}
+
+function pickContract(r) {
   form.symbol.value = r.symbol;
   form.security_id.value = r.security_id;
   form.exchange_segment.value = r.exchange_segment;
   form.instrument_type.value = r.instrument_type;
+  if (r.lot_size) { const lot = parseInt(parseFloat(r.lot_size)); if (lot > 0) form.quantity.value = lot; }
   document.getElementById("selectedSymbol").innerHTML =
-    `✅ <b>${r.symbol}</b> — ${r.instrument_type} · ${r.exchange_segment} · Security ID ${r.security_id} · lot size ${r.lot_size}`;
-  symSearch.value = r.symbol;
-  symResults.classList.remove("show");
+    `✅ <b>${r.symbol}</b> — ${r.instrument_type} · ${r.exchange_segment} · ID ${r.security_id}`
+    + (r.lot_size ? ` · lot ${parseInt(parseFloat(r.lot_size))}` : "");
 }
 
-// hide dropdown when clicking elsewhere
 document.addEventListener("click", (e) => {
-  if (!symSearch.contains(e.target) && !symResults.contains(e.target))
-    symResults.classList.remove("show");
+  if (!ulSearch.contains(e.target) && !ulResults.contains(e.target)) ulResults.classList.remove("show");
 });
 
 // ---- new trade form ----
@@ -189,6 +296,7 @@ form.onsubmit = async (e) => {
     msg.textContent = `✅ Created trade #${t.id} (${t.symbol}).`; msg.className = "msg pos";
     e.target.reset();
     document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
+    ulSearch.value = ""; resetPicker();
     await refreshAll();
   } catch (err) { msg.textContent = "❌ " + err.message; msg.className = "msg neg"; }
 };
