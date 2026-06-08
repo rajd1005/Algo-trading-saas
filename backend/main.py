@@ -438,9 +438,11 @@ def get_broker(db: Session = Depends(get_db)):
             pass
     return {
         "dhan_client_id": cid,
-        # Never send the full token back to the browser; just say if it's set.
+        "dhan_app_id": get_setting(db, "dhan_app_id", ""),
+        # Never send secrets back; just say if they're set.
         "has_access_token": bool(tok),
         "has_app": bool(get_setting(db, "dhan_app_id", "")),
+        "has_app_secret": bool(get_setting(db, "dhan_app_secret", "")),
         "mode": mode,
         "connected": mode == "DEMO" or get_setting(db, "dhan_connected", "no") == "yes",
         "token_hours_left": hours_left,

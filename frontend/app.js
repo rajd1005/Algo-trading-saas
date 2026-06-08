@@ -354,9 +354,9 @@ function resetPicker() {
   if (ltpTimer) { clearInterval(ltpTimer); ltpTimer = null; }
 }
 
-document.querySelectorAll(".seg").forEach((b) => {
+document.querySelectorAll("[data-seg]").forEach((b) => {
   b.onclick = () => {
-    document.querySelectorAll(".seg").forEach((x) => x.classList.remove("active"));
+    document.querySelectorAll("[data-seg]").forEach((x) => x.classList.remove("active"));
     b.classList.add("active");
     currentSeg = b.dataset.seg;
     pickerHint.textContent = HINTS[currentSeg];
@@ -587,6 +587,12 @@ async function refreshBroker() {
   const b = await api.get("/api/broker");
   const cidEl = document.getElementById("dhanClientId");
   if (document.activeElement !== cidEl) cidEl.value = b.dhan_client_id || "";
+  const appIdEl = document.getElementById("dhanAppId");
+  if (appIdEl && document.activeElement !== appIdEl) appIdEl.value = b.dhan_app_id || "";
+  const secEl = document.getElementById("dhanAppSecret");
+  if (secEl && b.has_app_secret && !secEl.value && document.activeElement !== secEl) {
+    secEl.placeholder = "•••••• saved (leave blank to keep)";
+  }
   applyBrokerMode(b.mode || "DHAN");
   const st = document.getElementById("brokerState");
   const label = b.mode === "DEMO" ? "Demo connected" : (b.connected ? "Dhan connected" : "Not connected");
