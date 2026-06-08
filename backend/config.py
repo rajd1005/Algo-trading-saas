@@ -12,6 +12,12 @@ load_dotenv()
 HOST = os.getenv("HOST", "0.0.0.0")          # 0.0.0.0 = reachable from your VPS IP
 PORT = int(os.getenv("PORT", "8000"))
 
+# --- Dashboard login ---
+# Set DASHBOARD_PASSWORD in .env to require login. SECRET_KEY signs the session
+# cookie (optional; a stable one is derived from the password if left blank).
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+
 # --- Database ---
 # A single SQLite file. Easy to back up: just copy this file.
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "trading.db"))

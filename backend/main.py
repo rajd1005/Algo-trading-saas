@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 import dhan_auth
+import auth
 
 import config
 from database import init_db, get_db, SessionLocal
@@ -29,6 +30,46 @@ from brokers import verify_dhan_credentials
 app = FastAPI(title="Algo Trading SaaS (India)")
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+
+
+_OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    """Gate the whole site behind the dashboard password (if one is set)."""
+    if not auth.auth_required():
+        return await call_next(request)
+    path = request.url.path
+    if path in _OPEN_PATHS or path.startswith("/static"):
+        return await call_next(request)
+    if auth.token_ok(request.cookies.get("session", "")):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "Login required"}, status_code=401)
+    return RedirectResponse(url="/login")
+
+
+@app.get("/login")
+def login_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "login.html"))
+
+
+@app.post("/api/login")
+def login(payload: dict):
+    if auth.password_ok(payload.get("password", "")):
+        resp = JSONResponse({"ok": True})
+        resp.set_cookie("session", auth.make_token(), httponly=True, samesite="lax",
+                        max_age=7 * 86400)
+        return resp
+    raise HTTPException(401, "Wrong password")
+
+
+@app.post("/api/logout")
+def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("session")
+    return resp
 
 
 @app.exception_handler(Exception)

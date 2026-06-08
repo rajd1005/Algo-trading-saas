@@ -1,16 +1,17 @@
 // ---- tiny API helper ----
+function checkAuth(r) { if (r.status === 401) { location.href = "/login"; throw new Error("Login required"); } return r; }
 const api = {
-  async get(url) { const r = await fetch(url); return r.json(); },
+  async get(url) { const r = checkAuth(await fetch(url)); return r.json(); },
   async post(url, body) {
-    const r = await fetch(url, {
+    const r = checkAuth(await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : null,
-    });
+    }));
     if (!r.ok) throw new Error((await r.json()).detail || "Request failed");
     return r.json();
   },
-  async del(url) { const r = await fetch(url, { method: "DELETE" }); return r.json(); },
+  async del(url) { const r = checkAuth(await fetch(url, { method: "DELETE" })); return r.json(); },
 };
 
 const money = (n) => (n >= 0 ? "₹" : "-₹") + Math.abs(n).toLocaleString("en-IN");
@@ -544,6 +545,12 @@ form.onsubmit = async (e) => {
     ulSearch.value = ""; resetOrderForm(); resetPicker();
     await refreshAll();
   } catch (err) { msg.textContent = "❌ " + err.message; msg.className = "msg neg"; }
+};
+
+// ---- logout ----
+document.getElementById("logoutBtn").onclick = async () => {
+  await fetch("/api/logout", { method: "POST" });
+  location.href = "/login";
 };
 
 // ---- kill switch ----

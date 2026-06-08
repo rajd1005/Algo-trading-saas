@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — Algo Trading</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <style>
+    .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .login-box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+      padding: 30px; width: 360px; max-width: 92vw; }
+    .login-box h1 { font-size: 20px; margin: 0 0 6px; }
+    .login-box input { width: 100%; background: var(--bg); border: 1px solid var(--line);
+      color: var(--text); border-radius: 8px; padding: 11px 12px; font-size: 15px; margin: 14px 0; }
+    .login-box .btn { width: 100%; justify-content: center; }
+  </style>
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-box">
+      <h1>⚡ Algo Trading</h1>
+      <div class="muted" style="font-size:13px;">Enter your dashboard password</div>
+      <input id="pw" type="password" placeholder="Password" autofocus
+             onkeydown="if(event.key==='Enter')doLogin()" />
+      <button class="btn btn-primary" onclick="doLogin()">Log in</button>
+      <p id="msg" class="msg neg"></p>
+    </div>
+  </div>
+  <script>
+    async function doLogin() {
+      const pw = document.getElementById("pw").value;
+      const r = await fetch("/api/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pw }),
+      });
+      if (r.ok) { location.href = "/"; }
+      else { document.getElementById("msg").textContent = "❌ Wrong password"; }
+    }
+  </script>
+</body>
+</html>
