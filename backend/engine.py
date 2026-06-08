@@ -44,6 +44,8 @@ class TradingEngine:
         self._last_rest = 0.0          # last time we used the REST fallback
         self._rest_cache = {}          # last REST prices (warmup / fallback)
         self._demo = False             # DEMO mode (simulated prices + fake broker)
+        self._last_feed_err = ""       # de-dupe feed errors in the log
+        self._last_rest_err = ""
 
     # ---------- lifecycle ----------
     def start(self):
@@ -157,6 +159,11 @@ class TradingEngine:
         feed.configure(cid, tok)
         feed.ensure_subscribed(instruments)
 
+        # Log websocket feed errors (de-duplicated) so they appear in the log.
+        if feed.last_error and feed.last_error != self._last_feed_err:
+            self._last_feed_err = feed.last_error
+            self._log(db, f"WebSocket price feed error: {feed.last_error[:250]}", "ERROR")
+
         prices = {}
         for it in instruments:
             p = feed.get_ltp(it[0], it[1])
@@ -174,8 +181,12 @@ class TradingEngine:
             rest = md.get_ltp_batch(by_seg)
             prices.update(rest)
             self._rest_cache.update(rest)
-            if md.last_error and not prices:
-                self._set_setting(db, "md_status", f"Price feed error: {md.last_error[:200]}")
+            if md.last_error:
+                if md.last_error != self._last_rest_err:
+                    self._last_rest_err = md.last_error
+                    self._log(db, f"REST price feed error: {md.last_error[:250]}", "ERROR")
+                if not prices:
+                    self._set_setting(db, "md_status", f"Price feed error: {md.last_error[:200]}")
         # use last known REST price for anything still missing
         for it in missing:
             if it not in prices and it in self._rest_cache:

@@ -133,19 +133,49 @@ async function doAction(act, id, sym) {
   } catch (e) { alert(e.message); }
 }
 
-// ---- logs ----
+// ---- logs (day-wise + paginated) ----
+let logState = { date: "", level: "", page: 1, pages: 1, inited: false };
+let lastDaysKey = "";
+
 async function refreshLogs() {
-  const rows = await api.get("/api/logs");
+  const p = new URLSearchParams({ date: logState.date, level: logState.level, page: logState.page, per_page: 25 });
+  const d = await api.get("/api/logs?" + p.toString());
+  logState.pages = d.pages;
+  buildDateOptions(d.days);
+  // default to the most recent day on first load
+  if (!logState.inited && d.days.length) {
+    logState.inited = true; logState.date = d.days[0]; logState.page = 1;
+    document.getElementById("logDate").value = logState.date;
+    return refreshLogs();
+  }
   const body = document.getElementById("logsBody");
   body.innerHTML = "";
-  for (const r of rows) {
+  for (const r of d.logs) {
     const tr = document.createElement("tr");
     const time = new Date(r.time + "Z").toLocaleTimeString();
-    tr.innerHTML = `<td>${time}</td><td>${r.level}</td>
+    tr.innerHTML = `<td>${time}</td><td><span class="lvl lvl-${r.level}">${r.level}</span></td>
       <td>${r.trade_id || "-"}</td><td>${r.message}</td>`;
     body.appendChild(tr);
   }
+  document.getElementById("logPageInfo").textContent =
+    `${logState.date || "All days"} · page ${d.page}/${d.pages} · ${d.total} entries`;
+  document.getElementById("logPrev").disabled = d.page <= 1;
+  document.getElementById("logNext").disabled = d.page >= d.pages;
 }
+
+function buildDateOptions(days) {
+  const key = days.join(",");
+  if (key === lastDaysKey) return;
+  lastDaysKey = key;
+  const sel = document.getElementById("logDate");
+  sel.innerHTML = `<option value="">All days</option>` + days.map((d) => `<option value="${d}">${d}</option>`).join("");
+  sel.value = logState.date;
+}
+
+document.getElementById("logDate").onchange = (e) => { logState.date = e.target.value; logState.page = 1; refreshLogs(); };
+document.getElementById("logLevel").onchange = (e) => { logState.level = e.target.value; logState.page = 1; refreshLogs(); };
+document.getElementById("logPrev").onclick = () => { if (logState.page > 1) { logState.page--; refreshLogs(); } };
+document.getElementById("logNext").onclick = () => { if (logState.page < logState.pages) { logState.page++; refreshLogs(); } };
 
 // ---- broker-style instrument picker ----
 const form = document.getElementById("tradeForm");
@@ -171,6 +201,8 @@ function updateQty() {
   const qty = lots * currentLotSize;
   form.quantity.value = qty;
   document.getElementById("qtyComputed").textContent = `= ${qty} qty (lot size ${currentLotSize})`;
+  const mt = document.getElementById("multiToggle");
+  if (mt && mt.checked) trimAndDistribute();
 }
 lotsInput.addEventListener("input", updateQty);
 
@@ -206,14 +238,39 @@ multiToggle.onchange = () => {
   if (on && !document.querySelector("#targetRows .trow")) addTargetRow();
 };
 document.getElementById("addTarget").onclick = () => addTargetRow();
-function addTargetRow(points = "", lots = 1) {
+
+function newTargetCount() { return document.querySelectorAll("#targetRows .trow").length; }
+
+// Spread the total lots evenly across the target rows (auto-distribute).
+function distributeNewTargets() {
+  const rows = [...document.querySelectorAll("#targetRows .trow")];
+  const N = parseInt(lotsInput.value) || 1, M = rows.length;
+  if (!M) return;
+  const base = Math.floor(N / M), rem = N % M;
+  rows.forEach((r, i) => { r.querySelector(".tl").value = base + (i < rem ? 1 : 0); });
+}
+// If lots drop below the number of targets, trim extra targets, then redistribute.
+function trimAndDistribute() {
+  const N = parseInt(lotsInput.value) || 1;
+  const rows = [...document.querySelectorAll("#targetRows .trow")];
+  while (rows.length > N) rows.pop().remove();
+  distributeNewTargets();
+}
+function addTargetRow(points = "") {
+  const N = parseInt(lotsInput.value) || 1;
+  if (newTargetCount() >= N) {
+    alert(`You can have at most ${N} target(s) — one per lot. Increase Lots to add more.`);
+    return;
+  }
   const div = document.createElement("div");
   div.className = "trow";
   div.innerHTML = `<input class="tp" type="number" step="0.05" placeholder="points" value="${points}" />
-    <input class="tl" type="number" min="1" placeholder="lots" value="${lots}" />
+    <input class="tl" type="number" readonly title="lots (auto-distributed)" style="width:70px;" />
+    <span class="muted" style="font-size:11px;">lots</span>
     <button type="button" class="step trm">×</button>`;
-  div.querySelector(".trm").onclick = () => div.remove();
+  div.querySelector(".trm").onclick = () => { div.remove(); distributeNewTargets(); };
   document.getElementById("targetRows").appendChild(div);
+  distributeNewTargets();
 }
 
 function resetOrderForm() {
@@ -407,6 +464,7 @@ form.onsubmit = async (e) => {
   const payload = Object.fromEntries(fd.entries());
   ["entry_price", "sl_points", "target_points"].forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
   payload.quantity = parseInt(payload.quantity) || 1;
+  payload.lot_size = currentLotSize;
   if (multiToggle.checked) {
     payload.targets = [...document.querySelectorAll("#targetRows .trow")].map((r) => ({
       points: parseFloat(r.querySelector(".tp").value) || 0,
@@ -491,16 +549,29 @@ document.getElementById("connectBrokerBtn").onclick = async () => {
 
 // ---- modify SL/Targets modal (direct prices) ----
 const modifyModal = document.getElementById("modifyModal");
-let modifyId = null;
+let modifyId = null, modLotSize = 1, modRemainingLots = 1;
 
-function modAddTargetRow(price = "", qty = "") {
+function modDistribute() {
+  const rows = [...document.querySelectorAll("#modTargetRows .trow")];
+  const N = modRemainingLots, M = rows.length;
+  if (!M) return;
+  const base = Math.floor(N / M), rem = N % M;
+  rows.forEach((r, i) => { r.querySelector(".mtl").value = base + (i < rem ? 1 : 0); });
+}
+function modAddTargetRow(price = "") {
+  if ([...document.querySelectorAll("#modTargetRows .trow")].length >= modRemainingLots) {
+    alert(`At most ${modRemainingLots} target(s) — one per remaining lot.`);
+    return;
+  }
   const div = document.createElement("div");
   div.className = "trow";
   div.innerHTML = `<input class="mtp" type="number" step="0.05" placeholder="price" value="${price}" />
-    <input class="mtq" type="number" min="1" placeholder="qty" value="${qty}" />
+    <input class="mtl" type="number" readonly title="lots (auto-distributed)" style="width:70px;" />
+    <span class="muted" style="font-size:11px;">lots</span>
     <button type="button" class="step trm">×</button>`;
-  div.querySelector(".trm").onclick = () => div.remove();
+  div.querySelector(".trm").onclick = () => { div.remove(); modDistribute(); };
   document.getElementById("modTargetRows").appendChild(div);
+  modDistribute();
 }
 document.getElementById("modAddTarget").onclick = () => modAddTargetRow();
 
@@ -508,26 +579,29 @@ function openModify(id) {
   const t = tradesById[id];
   if (!t) return;
   modifyId = id;
+  modLotSize = t.lot_size || 1;
+  const remainingQty = t.quantity - (t.exited_qty || 0);
+  modRemainingLots = Math.max(1, Math.floor(remainingQty / modLotSize));
   document.getElementById("modSl").value = t.stop_loss || 0;
   const rows = document.getElementById("modTargetRows");
   rows.innerHTML = "";
-  let added = false;
+  let prices = [];
   if (t.targets_json && t.targets_json !== "[]") {
-    try {
-      JSON.parse(t.targets_json).forEach((tg) => { modAddTargetRow(tg.price || "", tg.qty || ""); added = true; });
-    } catch (e) { /* ignore */ }
+    try { prices = JSON.parse(t.targets_json).map((tg) => tg.price || ""); } catch (e) { /* ignore */ }
   }
-  if (!added) modAddTargetRow(t.target || "", t.quantity - (t.exited_qty || 0));
+  if (!prices.length) prices = [t.target || ""];
+  prices.slice(0, modRemainingLots).forEach((pr) => modAddTargetRow(pr));
+  modDistribute();
   document.getElementById("modMsg").textContent = "";
   document.getElementById("modifyInfo").innerHTML =
-    `<b>${t.symbol}</b> — entry ₹${t.entry_fill_price} · LTP ₹${t.last_price} · remaining qty ${t.quantity - (t.exited_qty || 0)}`;
+    `<b>${t.symbol}</b> — entry ₹${t.entry_fill_price} · LTP ₹${t.last_price} · remaining ${remainingQty} qty (${modRemainingLots} lots, lot size ${modLotSize})`;
   modifyModal.style.display = "flex";
 }
 document.getElementById("modCancel").onclick = () => { modifyModal.style.display = "none"; };
 document.getElementById("modSave").onclick = async () => {
   const targets = [...document.querySelectorAll("#modTargetRows .trow")].map((r) => ({
     price: parseFloat(r.querySelector(".mtp").value) || 0,
-    qty: parseInt(r.querySelector(".mtq").value) || 0,
+    qty: (parseInt(r.querySelector(".mtl").value) || 0) * modLotSize,
   })).filter((x) => x.price > 0 && x.qty > 0);
   try {
     await api.post(`/api/trades/${modifyId}/modify`, {

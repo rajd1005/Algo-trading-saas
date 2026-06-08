@@ -16,9 +16,16 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, Text
 
 from database import Base
 
+# India time, for grouping logs by trading day.
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
 
 def _now():
     return dt.datetime.utcnow()
+
+
+def _ist_date():
+    return dt.datetime.now(IST).strftime("%Y-%m-%d")
 
 
 class Trade(Base):
@@ -34,6 +41,7 @@ class Trade(Base):
     instrument_type = Column(String, default="OPTION")    # OPTION / FUTURES / EQUITY
     side = Column(String, default="BUY")           # BUY (long) or SELL (short)
     quantity = Column(Integer, default=1)
+    lot_size = Column(Integer, default=1)           # contract lot size (for lots math)
 
     # --- Entry / Exit rules ---
     entry_type = Column(String, default="MARKET")  # MARKET or LIMIT
@@ -72,6 +80,7 @@ class LogEntry(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     created_at = Column(DateTime, default=_now)
+    day = Column(String, default=_ist_date, index=True)   # India date, for day-wise view
     level = Column(String, default="INFO")         # INFO / WARN / ERROR
     trade_id = Column(Integer, default=0)
     message = Column(Text, default="")

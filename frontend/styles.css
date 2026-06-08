@@ -135,6 +135,15 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
   border-radius: 7px; padding: 8px 10px; width: 110px; font-size: 14px; }
 .trow .trm { width: 32px; }
 
+/* logs */
+.logs-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+.logs-bar select { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 7px 9px; font-size: 13px; }
+.lvl { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+.lvl-INFO { background: rgba(139,152,165,.18); color: var(--muted); }
+.lvl-WARN { background: rgba(210,153,34,.2); color: var(--yellow); }
+.lvl-ERROR { background: rgba(248,81,73,.2); color: var(--red); }
+
 /* modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6);
   display: flex; align-items: center; justify-content: center; z-index: 100; }

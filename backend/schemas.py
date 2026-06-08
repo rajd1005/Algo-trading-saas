@@ -17,6 +17,7 @@ class TradeCreate(BaseModel):
     instrument_type: str = "OPTION"
     side: str = "BUY"
     quantity: int = 1
+    lot_size: int = 1
     entry_type: str = "MARKET"
     entry_price: float = 0.0
     sl_points: float = 0.0
@@ -35,6 +36,7 @@ class TradeOut(BaseModel):
     instrument_type: str
     side: str
     quantity: int
+    lot_size: int
     entry_type: str
     entry_price: float
     stop_loss: float

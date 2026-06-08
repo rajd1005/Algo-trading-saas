@@ -112,6 +112,15 @@ class InstrumentStore:
             self._loaded_at = dt.datetime.utcnow()
         except Exception as e:
             print(f"[instruments] load failed: {e}")
+            try:
+                from database import SessionLocal
+                from models import LogEntry
+                db = SessionLocal()
+                db.add(LogEntry(message=f"Symbol list download failed: {e}", level="ERROR"))
+                db.commit()
+                db.close()
+            except Exception:
+                pass
         finally:
             self._loading = False
 

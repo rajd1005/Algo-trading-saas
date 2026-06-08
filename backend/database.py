@@ -43,6 +43,10 @@ _MIGRATIONS = {
         "targets_json": "TEXT DEFAULT ''",
         "exited_qty": "INTEGER DEFAULT 0",
         "realized_pnl": "REAL DEFAULT 0",
+        "lot_size": "INTEGER DEFAULT 1",
+    },
+    "logs": {
+        "day": "TEXT DEFAULT ''",
     },
 }
 
@@ -52,6 +56,13 @@ def _migrate():
     with engine.begin() as conn:
         for table, cols in _MIGRATIONS.items():
             existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            added = []
             for col, decl in cols.items():
                 if col not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {decl}"))
+                    added.append(col)
+            # Backfill the log 'day' (India date) for existing rows.
+            if table == "logs" and "day" in added:
+                conn.execute(text(
+                    "UPDATE logs SET day = strftime('%Y-%m-%d', datetime(created_at, '+330 minutes')) "
+                    "WHERE day IS NULL OR day = ''"))

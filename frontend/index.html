@@ -178,6 +178,18 @@
 
   <!-- LOGS -->
   <section id="tab-logs" class="tab-panel">
+    <div class="logs-bar">
+      <label style="margin:0;">Day&nbsp;
+        <select id="logDate"></select></label>
+      <label style="margin:0;">Level&nbsp;
+        <select id="logLevel">
+          <option value="">All</option><option>INFO</option><option>WARN</option><option>ERROR</option>
+        </select></label>
+      <span style="flex:1;"></span>
+      <button class="btn btn-sm" id="logPrev">‹ Prev</button>
+      <span id="logPageInfo" class="muted" style="font-size:12px;"></span>
+      <button class="btn btn-sm" id="logNext">Next ›</button>
+    </div>
     <table class="data">
       <thead><tr><th>Time</th><th>Level</th><th>Trade</th><th>Message</th></tr></thead>
       <tbody id="logsBody"></tbody>

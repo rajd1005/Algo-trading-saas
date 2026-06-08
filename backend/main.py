@@ -7,8 +7,8 @@ Run it with:   uvicorn main:app --host 0.0.0.0 --port 8000
 import os
 import json
 
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,20 @@ from brokers import verify_dhan_credentials
 app = FastAPI(title="Algo Trading SaaS (India)")
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+
+
+@app.exception_handler(Exception)
+async def log_unhandled_errors(request: Request, exc: Exception):
+    """Record every unexpected server error in the activity log."""
+    try:
+        db = SessionLocal()
+        db.add(LogEntry(message=f"Server error on {request.method} {request.url.path}: {exc}",
+                        level="ERROR"))
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 # ---------- settings helpers ----------
@@ -264,13 +278,27 @@ def summary(db: Session = Depends(get_db)):
 
 # ---------- logs ----------
 @app.get("/api/logs")
-def list_logs(limit: int = 100, db: Session = Depends(get_db)):
-    rows = db.query(LogEntry).order_by(LogEntry.id.desc()).limit(limit).all()
-    return [
-        {"id": r.id, "time": r.created_at.isoformat(), "level": r.level,
-         "trade_id": r.trade_id, "message": r.message}
-        for r in rows
-    ]
+def list_logs(date: str = "", level: str = "", page: int = 1, per_page: int = 25,
+              db: Session = Depends(get_db)):
+    import math
+    q = db.query(LogEntry)
+    if date:
+        q = q.filter(LogEntry.day == date)
+    if level:
+        q = q.filter(LogEntry.level == level)
+    total = q.count()
+    page = max(1, page)
+    per_page = min(max(per_page, 1), 200)
+    rows = (q.order_by(LogEntry.id.desc())
+            .offset((page - 1) * per_page).limit(per_page).all())
+    days = [d[0] for d in db.query(LogEntry.day).distinct()
+            .order_by(LogEntry.day.desc()).all() if d[0]]
+    return {
+        "logs": [{"id": r.id, "time": r.created_at.isoformat(), "level": r.level,
+                  "trade_id": r.trade_id, "message": r.message, "day": r.day} for r in rows],
+        "page": page, "per_page": per_page, "total": total,
+        "pages": max(1, math.ceil(total / per_page)), "days": days,
+    }
 
 
 # ---------- settings (kill switch etc.) ----------
