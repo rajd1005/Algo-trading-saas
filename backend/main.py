@@ -16,7 +16,7 @@ from database import init_db, get_db, SessionLocal
 from models import Trade, LogEntry, Setting
 from schemas import TradeCreate, TradeOut, BrokerConfigIn, SettingsIn
 from engine import engine
-from market_data import sim_market
+from instruments import store as instruments
 from brokers import verify_dhan_credentials
 
 app = FastAPI(title="Algo Trading SaaS (India)")
@@ -50,6 +50,7 @@ def _startup():
     if db.get(Setting, "default_mode") is None:
         set_setting(db, "default_mode", "TEST")
     db.close()
+    instruments.load_async()   # download Dhan's symbol list in the background
     engine.start()
 
 
@@ -64,6 +65,10 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
     # Safety: block creating LIVE trades while the kill switch is on.
     if payload.mode == "LIVE" and get_setting(db, "kill_switch", "off") == "on":
         raise HTTPException(400, "Kill switch is ON. Turn it off to place LIVE trades.")
+    # A real symbol must be picked (we need its Security ID to fetch the LTP).
+    if not payload.security_id:
+        raise HTTPException(400, "Please search and select a symbol from the list "
+                                 "(so we know its Security ID for live prices).")
     t = Trade(**payload.model_dump())
     db.add(t)
     db.commit()
@@ -117,17 +122,22 @@ def delete_trade(trade_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-# ---------- TEST helper: nudge a simulated price ----------
-@app.post("/api/trades/{trade_id}/simulate")
-def simulate_price(trade_id: int, price: float, db: Session = Depends(get_db)):
-    """Force the simulated price of a TEST trade (to test SL/target instantly)."""
-    t = db.get(Trade, trade_id)
-    if not t:
-        raise HTTPException(404, "Trade not found")
-    if t.mode != "TEST":
-        raise HTTPException(400, "Simulate only works in TEST mode.")
-    sim_market.nudge(t.symbol, price)
-    return {"ok": True, "symbol": t.symbol, "price": price}
+# ---------- instruments (symbol search) ----------
+@app.get("/api/instruments/search")
+def instruments_search(q: str = "", limit: int = 25):
+    """Search Dhan's symbol list. Returns symbols with their Security IDs."""
+    return instruments.search(q, limit=limit)
+
+
+@app.get("/api/instruments/status")
+def instruments_status():
+    return instruments.status()
+
+
+@app.post("/api/instruments/refresh")
+def instruments_refresh():
+    instruments.refresh()
+    return {"ok": True, "message": "Refreshing symbol list in the background…"}
 
 
 # ---------- summary ----------
@@ -145,6 +155,8 @@ def summary(db: Session = Depends(get_db)):
         "closed_pnl": round(closed_pnl, 2),
         "total_pnl": round(open_pnl + closed_pnl, 2),
         "kill_switch": get_setting(db, "kill_switch", "off"),
+        "md_status": get_setting(db, "md_status", ""),
+        "instruments": instruments.status(),
     }
 
 

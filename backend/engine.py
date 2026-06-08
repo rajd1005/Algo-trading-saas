@@ -2,21 +2,25 @@
 The trading engine — the heart of the app.
 
 It runs forever in a background thread. On every tick (default every 1000ms) it:
-  1. Reads the current price of each active trade.
+  1. Fetches the REAL LTP (last traded price) of every active trade from Dhan,
+     in a single batched request.
   2. For PENDING trades: checks if the entry condition is met -> enters.
   3. For OPEN trades: checks stop-loss / target -> exits.
-  4. Respects the global KILL SWITCH (stops new entries; you can also flat-all).
+  4. Respects the global KILL SWITCH.
 
-TEST trades use the simulated market + PaperBroker.
-LIVE trades use real Dhan prices + DhanBroker.
+BOTH test and live trades use real Dhan prices. The only difference:
+  - TEST -> PaperBroker (records a simulated fill, no real order)
+  - LIVE -> DhanBroker  (sends a real order to Dhan)
+
+So Dhan must be connected for the engine to do anything (that's where LTP
+comes from).
 """
 import threading
 import time
-import datetime as dt
 
 from database import SessionLocal
 from models import Trade, LogEntry, Setting
-from market_data import sim_market, DhanMarketData
+from market_data import DhanMarketData
 from brokers import PaperBroker, DhanBroker
 import config
 
@@ -38,10 +42,17 @@ class TradingEngine:
     def stop(self):
         self._running = False
 
-    # ---------- helpers ----------
+    # ---------- settings helpers ----------
     def _get_setting(self, db, key, default=""):
         row = db.get(Setting, key)
         return row.value if row else default
+
+    def _set_setting(self, db, key, value):
+        row = db.get(Setting, key)
+        if row:
+            row.value = value
+        else:
+            db.add(Setting(key=key, value=value))
 
     def _log(self, db, message, level="INFO", trade_id=0):
         db.add(LogEntry(message=message, level=level, trade_id=trade_id))
@@ -49,19 +60,24 @@ class TradingEngine:
     def _kill_switch_on(self, db) -> bool:
         return self._get_setting(db, "kill_switch", "off") == "on"
 
-    def _live_broker(self, db):
+    def _market_data(self, db):
         cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
         tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
         if not cid or not tok:
-            return None, None
-        return DhanBroker(cid, tok), DhanMarketData(cid, tok)
+            return None
+        return DhanMarketData(cid, tok)
+
+    def _live_broker(self, db):
+        cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
+        tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+        return DhanBroker(cid, tok)
 
     # ---------- main loop ----------
     def _loop(self):
         while self._running:
             try:
                 self._tick()
-            except Exception as e:  # never let the engine die
+            except Exception as e:
                 try:
                     db = SessionLocal()
                     self._log(db, f"Engine error: {e}", level="ERROR")
@@ -74,12 +90,34 @@ class TradingEngine:
     def _tick(self):
         db = SessionLocal()
         try:
-            kill = self._kill_switch_on(db)
-            live_broker, live_md = self._live_broker(db)
-
             active = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
+
+            md = self._market_data(db)
+            if md is None:
+                if active:
+                    self._set_setting(db, "md_status", "Dhan not connected — connect on the Broker tab to get prices.")
+                db.commit()
+                return
+
+            # Group every active trade's security id by its exchange segment.
+            by_segment = {}
             for t in active:
-                price = self._price_for(t, live_md)
+                if t.security_id:
+                    by_segment.setdefault(t.exchange_segment, set()).add(str(t.security_id))
+            prices = md.get_ltp_batch({k: list(v) for k, v in by_segment.items()}) if by_segment else {}
+
+            if md.last_error:
+                self._set_setting(db, "md_status", f"Price feed error: {md.last_error[:200]}")
+            elif active:
+                self._set_setting(db, "md_status", "ok")
+
+            kill = self._kill_switch_on(db)
+            live_broker = self._live_broker(db)
+
+            for t in active:
+                if not t.security_id:
+                    continue
+                price = prices.get((t.exchange_segment, str(t.security_id)), 0.0)
                 if price <= 0:
                     continue
                 t.last_price = price
@@ -94,29 +132,17 @@ class TradingEngine:
         finally:
             db.close()
 
-    def _price_for(self, t, live_md):
-        if t.mode == "LIVE":
-            if live_md is None:
-                return 0.0
-            return live_md.get_ltp(t.exchange_segment, t.security_id)
-        # TEST mode: simulated price, seeded near the entry price.
-        return sim_market.get_ltp(t.symbol, hint_price=t.entry_price)
-
     def _broker_for(self, t, live_broker):
         return self.paper if t.mode == "TEST" else live_broker
 
     # ---------- entry ----------
     def _handle_pending(self, db, t, price, kill, live_broker):
         if kill:
-            return  # kill switch blocks all new entries
+            return
         if not self._entry_triggered(t, price):
             return
 
         broker = self._broker_for(t, live_broker)
-        if broker is None:
-            self._log(db, "LIVE entry skipped: Dhan not connected.", "WARN", t.id)
-            return
-
         res = broker.place_entry(t, price)
         if res.ok:
             t.status = "OPEN"
@@ -130,16 +156,13 @@ class TradingEngine:
             self._log(db, f"Entry failed for {t.symbol}: {res.error}", "ERROR", t.id)
 
     def _entry_triggered(self, t, price):
-        # MARKET entry triggers immediately.
         if t.entry_type == "MARKET":
             return True
-        # LIMIT entry: for a BUY, trigger when price <= entry_price (buy the dip);
-        # for a SELL, trigger when price >= entry_price (sell the rip).
         if t.entry_price <= 0:
             return True
         if t.side == "BUY":
-            return price <= t.entry_price
-        return price >= t.entry_price
+            return price <= t.entry_price       # buy at/below entry
+        return price >= t.entry_price           # short at/above entry
 
     # ---------- exit ----------
     def _handle_open(self, db, t, price, kill, live_broker):
@@ -151,7 +174,7 @@ class TradingEngine:
                 reason = "STOPLOSS"
             elif t.target > 0 and price >= t.target:
                 reason = "TARGET"
-        else:  # SELL / short
+        else:
             if t.stop_loss > 0 and price >= t.stop_loss:
                 reason = "STOPLOSS"
             elif t.target > 0 and price <= t.target:
@@ -161,10 +184,6 @@ class TradingEngine:
             return
 
         broker = self._broker_for(t, live_broker)
-        if broker is None:
-            self._log(db, "LIVE exit skipped: Dhan not connected.", "WARN", t.id)
-            return
-
         res = broker.place_exit(t, price)
         if res.ok:
             t.exit_fill_price = res.fill_price
@@ -184,5 +203,4 @@ class TradingEngine:
         t.pnl = round((price - t.entry_fill_price) * direction * t.quantity, 2)
 
 
-# A single shared engine instance.
 engine = TradingEngine()

@@ -60,6 +60,22 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .pill-ok { background: rgba(46,160,67,.18); color: var(--green); }
 
 .msg { margin-top: 12px; font-size: 13px; min-height: 18px; }
+
+.banner { margin: 0 22px 8px; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+  background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.4); color: var(--yellow); }
+.banner.ok { background: rgba(46,160,67,.12); border-color: rgba(46,160,67,.4); color: var(--green); }
+
+.dropdown { position: absolute; top: 100%; left: 0; right: 0; z-index: 30;
+  background: #0d1117; border: 1px solid var(--line); border-radius: 8px; margin-top: 4px;
+  max-height: 280px; overflow-y: auto; display: none; }
+.dropdown.show { display: block; }
+.dropdown .item { padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--line); }
+.dropdown .item:hover { background: #1a2129; }
+.dropdown .item .sym { color: var(--text); font-size: 14px; }
+.dropdown .item .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.selected-symbol { margin: 0 0 14px; padding: 9px 12px; border-radius: 8px;
+  background: rgba(47,129,247,.1); border: 1px solid rgba(47,129,247,.3);
+  color: var(--text); font-size: 13px; }
 .pos { color: var(--green); } .neg { color: var(--red); }
 .badge { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
 .b-PENDING { background: rgba(210,153,34,.18); color: var(--yellow); }

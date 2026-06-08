@@ -23,6 +23,8 @@
     <div class="card"><div class="card-label">Open / Pending</div><div id="sumCounts" class="card-value">0 / 0</div></div>
   </section>
 
+  <div id="mdBanner" class="banner" style="display:none;"></div>
+
   <nav class="tabs">
     <button class="tab active" data-tab="dashboard">Dashboard</button>
     <button class="tab" data-tab="new">+ New Trade</button>
@@ -51,43 +53,38 @@
         <label>Label <input name="name" placeholder="My Nifty trade" /></label>
         <label>Mode
           <select name="mode">
-            <option value="TEST">TEST (paper)</option>
+            <option value="TEST">TEST (paper — real prices, no real order)</option>
             <option value="LIVE">LIVE (real money)</option>
           </select>
         </label>
       </div>
+
+      <!-- Symbol search: type a name, pick from the list, IDs auto-fill -->
       <div class="row">
-        <label>Symbol* <input name="symbol" required placeholder="NIFTY 25000 CE" /></label>
-        <label>Instrument
-          <select name="instrument_type">
-            <option>OPTION</option><option>FUTURES</option><option>EQUITY</option>
-          </select>
+        <label style="position:relative;">Symbol* — type to search (e.g. "nifty 25000 ce", "reliance")
+          <input id="symbolSearch" autocomplete="off" placeholder="Start typing a symbol…" />
+          <div id="symbolResults" class="dropdown"></div>
         </label>
+      </div>
+      <div id="selectedSymbol" class="selected-symbol">No symbol selected yet.</div>
+      <!-- these get filled automatically when you pick a symbol -->
+      <input type="hidden" name="symbol" /><input type="hidden" name="security_id" />
+      <input type="hidden" name="exchange_segment" /><input type="hidden" name="instrument_type" />
+
+      <div class="row">
         <label>Side
           <select name="side"><option>BUY</option><option>SELL</option></select>
         </label>
         <label>Quantity <input name="quantity" type="number" value="1" min="1" /></label>
-      </div>
-      <div class="row">
         <label>Entry type
           <select name="entry_type"><option>MARKET</option><option>LIMIT</option></select>
         </label>
+      </div>
+      <div class="row">
         <label>Entry price <input name="entry_price" type="number" step="0.05" value="0" /></label>
         <label>Stop-loss <input name="stop_loss" type="number" step="0.05" value="0" /></label>
         <label>Target <input name="target" type="number" step="0.05" value="0" /></label>
       </div>
-      <details class="live-only">
-        <summary>Live-only fields (Dhan security id) — needed only for LIVE mode</summary>
-        <div class="row">
-          <label>Security ID <input name="security_id" placeholder="e.g. 11536" /></label>
-          <label>Exchange segment
-            <select name="exchange_segment">
-              <option>NSE_FNO</option><option>NSE_EQ</option>
-              <option>BSE_EQ</option><option>BSE_FNO</option><option>MCX_COMM</option>
-            </select>
-          </label>
-        </div>
-      </details>
       <button type="submit" class="btn btn-primary">Create Trade</button>
       <p id="formMsg" class="msg"></p>
     </form>
@@ -108,6 +105,12 @@
         <span id="brokerState" class="pill pill-off">Not connected</span>
       </div>
       <p id="brokerMsg" class="msg"></p>
+      <hr style="border-color:#2a3441; margin:18px 0;" />
+      <p class="muted">Symbol list (auto-downloaded from Dhan, refreshes daily):</p>
+      <div class="row">
+        <button id="refreshSymbolsBtn" class="btn">Refresh symbols now</button>
+        <span id="symbolsState" class="pill pill-off">Loading…</span>
+      </div>
     </div>
   </section>
 
