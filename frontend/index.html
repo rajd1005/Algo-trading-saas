@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Algo Trading — India</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>⚡ Algo Trading <span class="muted">— India</span></h1>
+    <div class="header-right">
+      <span id="killState" class="pill pill-off">KILL: OFF</span>
+      <button id="killBtn" class="btn btn-danger">Kill Switch</button>
+    </div>
+  </header>
+
+  <!-- Summary cards -->
+  <section class="cards">
+    <div class="card"><div class="card-label">Total P&L</div><div id="sumTotal" class="card-value">₹0</div></div>
+    <div class="card"><div class="card-label">Open P&L</div><div id="sumOpen" class="card-value">₹0</div></div>
+    <div class="card"><div class="card-label">Booked P&L</div><div id="sumClosed" class="card-value">₹0</div></div>
+    <div class="card"><div class="card-label">Open / Pending</div><div id="sumCounts" class="card-value">0 / 0</div></div>
+  </section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="dashboard">Dashboard</button>
+    <button class="tab" data-tab="new">+ New Trade</button>
+    <button class="tab" data-tab="broker">Broker</button>
+    <button class="tab" data-tab="logs">Logs</button>
+  </nav>
+
+  <!-- DASHBOARD -->
+  <section id="tab-dashboard" class="tab-panel active">
+    <table class="data">
+      <thead>
+        <tr>
+          <th>ID</th><th>Symbol</th><th>Mode</th><th>Side</th><th>Qty</th>
+          <th>Entry</th><th>SL</th><th>Target</th><th>LTP</th><th>P&L</th>
+          <th>Status</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tradesBody"></tbody>
+    </table>
+  </section>
+
+  <!-- NEW TRADE -->
+  <section id="tab-new" class="tab-panel">
+    <form id="tradeForm" class="form">
+      <div class="row">
+        <label>Label <input name="name" placeholder="My Nifty trade" /></label>
+        <label>Mode
+          <select name="mode">
+            <option value="TEST">TEST (paper)</option>
+            <option value="LIVE">LIVE (real money)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>Symbol* <input name="symbol" required placeholder="NIFTY 25000 CE" /></label>
+        <label>Instrument
+          <select name="instrument_type">
+            <option>OPTION</option><option>FUTURES</option><option>EQUITY</option>
+          </select>
+        </label>
+        <label>Side
+          <select name="side"><option>BUY</option><option>SELL</option></select>
+        </label>
+        <label>Quantity <input name="quantity" type="number" value="1" min="1" /></label>
+      </div>
+      <div class="row">
+        <label>Entry type
+          <select name="entry_type"><option>MARKET</option><option>LIMIT</option></select>
+        </label>
+        <label>Entry price <input name="entry_price" type="number" step="0.05" value="0" /></label>
+        <label>Stop-loss <input name="stop_loss" type="number" step="0.05" value="0" /></label>
+        <label>Target <input name="target" type="number" step="0.05" value="0" /></label>
+      </div>
+      <details class="live-only">
+        <summary>Live-only fields (Dhan security id) — needed only for LIVE mode</summary>
+        <div class="row">
+          <label>Security ID <input name="security_id" placeholder="e.g. 11536" /></label>
+          <label>Exchange segment
+            <select name="exchange_segment">
+              <option>NSE_FNO</option><option>NSE_EQ</option>
+              <option>BSE_EQ</option><option>BSE_FNO</option><option>MCX_COMM</option>
+            </select>
+          </label>
+        </div>
+      </details>
+      <button type="submit" class="btn btn-primary">Create Trade</button>
+      <p id="formMsg" class="msg"></p>
+    </form>
+  </section>
+
+  <!-- BROKER -->
+  <section id="tab-broker" class="tab-panel">
+    <div class="form">
+      <p class="muted">Enter your Dhan API credentials, then click <b>Connect</b> to authenticate.
+      Get these from the Dhan website → DhanHQ Trading APIs.</p>
+      <div class="row">
+        <label>Dhan Client ID <input id="dhanClientId" placeholder="1000000000" /></label>
+        <label>Access Token <input id="dhanToken" type="password" placeholder="paste token" /></label>
+      </div>
+      <div class="row">
+        <button id="saveBrokerBtn" class="btn">Save</button>
+        <button id="connectBrokerBtn" class="btn btn-primary">Connect / Authenticate</button>
+        <span id="brokerState" class="pill pill-off">Not connected</span>
+      </div>
+      <p id="brokerMsg" class="msg"></p>
+    </div>
+  </section>
+
+  <!-- LOGS -->
+  <section id="tab-logs" class="tab-panel">
+    <table class="data">
+      <thead><tr><th>Time</th><th>Level</th><th>Trade</th><th>Message</th></tr></thead>
+      <tbody id="logsBody"></tbody>
+    </table>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

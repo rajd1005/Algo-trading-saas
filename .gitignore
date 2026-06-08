@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Secrets & local data — NEVER commit these
+.env
+backend/.env
+*.db
+backend/trading.db
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
