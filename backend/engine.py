@@ -16,6 +16,7 @@ So Dhan must be connected for the engine to do anything (that's where LTP
 comes from).
 """
 import json
+import math
 import threading
 import time
 
@@ -277,12 +278,14 @@ class TradingEngine:
     def _apply_levels(self, t):
         """Once entered, convert points into absolute SL/target prices using the
         real fill price. Targets are stored with absolute prices from here on."""
-        if t.trail_sl and t.trail_sl > 0:
-            # trailing stop: start the stop a trail-distance away and arm the high-water mark
-            t.hwm = t.entry_fill_price
-            t.stop_loss = level_price(t.side, t.entry_fill_price, t.trail_sl, False)
-        elif t.sl_points and t.sl_points > 0:
+        # Fixed stop-loss: this is the starting stop that the trail will ratchet up.
+        if t.sl_points and t.sl_points > 0:
             t.stop_loss = level_price(t.side, t.entry_fill_price, t.sl_points, False)
+        if t.trail_sl and t.trail_sl > 0:
+            t.hwm = t.entry_fill_price          # step reference for trailing
+            if not (t.sl_points and t.sl_points > 0):
+                # no fixed SL given -> start the stop a trail-distance away
+                t.stop_loss = level_price(t.side, t.entry_fill_price, t.trail_sl, False)
         targets = self._targets(t)
         if targets:
             # Target points are CUMULATIVE: each target is measured from the
@@ -317,27 +320,32 @@ class TradingEngine:
             return
         broker = self._broker_for(t, live_broker)
 
-        # 0) Trailing stop-loss: ratchet the stop in the favourable direction only.
-        #    trail_mode ENTRY = trail only up to entry (breakeven) then stop.
-        #    trail_mode CONTINUE = keep trailing the price indefinitely.
+        # 0) Trailing stop-loss: each time the price advances another trail-step,
+        #    raise the stop-loss by the same step (it RESPECTS the fixed SL, which
+        #    is just where the stop starts). e.g. SL 300, trail 5 -> 305, 310, 315...
+        #    trail_mode ENTRY caps the trailed stop at entry (breakeven) then stops.
         if t.trail_sl and t.trail_sl > 0:
+            step = t.trail_sl
             cap_entry = (t.trail_mode == "ENTRY")
             if t.side == "BUY":
-                if price > (t.hwm or 0):
-                    t.hwm = price
-                new_sl = round(t.hwm - t.trail_sl, 2)
-                if cap_entry:
-                    new_sl = min(new_sl, t.entry_fill_price)
-                if new_sl > (t.stop_loss or 0):
-                    t.stop_loss = new_sl
+                steps = math.floor((price - (t.hwm or 0)) / step)
+                if steps > 0:
+                    t.hwm = (t.hwm or 0) + steps * step
+                    new_sl = round((t.stop_loss or 0) + steps * step, 2)
+                    if cap_entry:
+                        new_sl = min(new_sl, t.entry_fill_price)
+                    if new_sl > (t.stop_loss or 0):
+                        t.stop_loss = new_sl
             else:
-                if not t.hwm or price < t.hwm:
-                    t.hwm = price
-                new_sl = round(t.hwm + t.trail_sl, 2)
-                if cap_entry:
-                    new_sl = max(new_sl, t.entry_fill_price)
-                if not t.stop_loss or new_sl < t.stop_loss:
-                    t.stop_loss = new_sl
+                ref = t.hwm if t.hwm else t.entry_fill_price
+                steps = math.floor((ref - price) / step)
+                if steps > 0:
+                    t.hwm = ref - steps * step
+                    new_sl = round((t.stop_loss or 0) - steps * step, 2)
+                    if cap_entry:
+                        new_sl = max(new_sl, t.entry_fill_price)
+                    if not t.stop_loss or new_sl < t.stop_loss:
+                        t.stop_loss = new_sl
 
         # 1) Kill switch or stop-loss -> exit ALL remaining.
         sl_hit = (t.stop_loss or 0) > 0 and (price <= t.stop_loss if t.side == "BUY"

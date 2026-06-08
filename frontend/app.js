@@ -88,7 +88,7 @@ async function refreshTrades() {
       <td>${targetCell(t)}</td>
       <td>${t.last_price || "-"}</td>
       <td class="${cls(t.pnl)}">${money(t.pnl)}</td>
-      <td><span class="badge b-${t.status}">${t.status}</span></td>
+      <td>${statusCell(t)}</td>
       <td>${actionsFor(t)}</td>`;
     body.appendChild(tr);
   }
@@ -99,6 +99,14 @@ async function refreshTrades() {
       else doAction(b.dataset.act, b.dataset.id);
     };
   });
+}
+
+function statusCell(t) {
+  // For closed trades, show WHY it exited (TARGET / TRAIL / STOPLOSS / ...).
+  if (t.status === "CLOSED" && t.exit_reason) {
+    return `<span class="badge b-CLOSED">CLOSED</span> <span class="rbadge r-${t.exit_reason}">${t.exit_reason}</span>`;
+  }
+  return `<span class="badge b-${t.status}">${t.status}</span>`;
 }
 
 function targetCell(t) {
@@ -153,8 +161,10 @@ async function refreshLogs() {
   for (const r of d.logs) {
     const tr = document.createElement("tr");
     const time = new Date(r.time + "Z").toLocaleTimeString();
+    const reason = r.message.match(/EXIT \((\w+)\)/);
+    const msg = reason ? `<span class="rbadge r-${reason[1]}">${reason[1]}</span> ${r.message}` : r.message;
     tr.innerHTML = `<td>${time}</td><td><span class="lvl lvl-${r.level}">${r.level}</span></td>
-      <td>${r.trade_id || "-"}</td><td>${r.message}</td>`;
+      <td>${r.trade_id || "-"}</td><td>${msg}</td>`;
     body.appendChild(tr);
   }
   document.getElementById("logPageInfo").textContent =
@@ -227,17 +237,6 @@ document.querySelectorAll("[data-et]").forEach((b) => {
     if (isMarket) entryPrice.value = 0;
   };
 });
-
-// Stop-loss and Trailing SL are mutually exclusive — use one OR the other.
-const slInput = form.sl_points, trailInput = form.trail_sl, trailModeSel = form.trail_mode;
-function syncSLTrail() {
-  const sl = parseFloat(slInput.value) || 0, tr = parseFloat(trailInput.value) || 0;
-  if (tr > 0) { slInput.disabled = true; slInput.value = 0; trailInput.disabled = false; trailModeSel.disabled = false; }
-  else if (sl > 0) { trailInput.disabled = true; trailInput.value = 0; trailModeSel.disabled = true; slInput.disabled = false; }
-  else { slInput.disabled = false; trailInput.disabled = false; trailModeSel.disabled = false; }
-}
-slInput.addEventListener("input", syncSLTrail);
-trailInput.addEventListener("input", syncSLTrail);
 
 const multiToggle = document.getElementById("multiToggle");
 const multiWrap = document.getElementById("multiWrap");
@@ -320,7 +319,6 @@ function resetOrderForm() {
   form.entry_type.value = "MARKET"; entryPrice.disabled = true; entryPrice.value = 0;
   multiToggle.checked = false; multiWrap.style.display = "none"; targetField.style.display = "";
   document.getElementById("targetRows").innerHTML = "";
-  slInput.disabled = false; trailInput.disabled = false; trailModeSel.disabled = false;
   currentLotSize = 1; lotsInput.value = 1; updateQty();
 }
 const HINTS = { OPTION: "— search an index/stock, then pick a strike",
@@ -620,17 +618,6 @@ function modAddTargetRow(price = "") {
 }
 document.getElementById("modAddTarget").onclick = () => modAddTargetRow();
 
-function syncModSLTrail() {
-  const sl = parseFloat(document.getElementById("modSl").value) || 0;
-  const tr = parseFloat(document.getElementById("modTrail").value) || 0;
-  const slEl = document.getElementById("modSl"), trEl = document.getElementById("modTrail"), tmEl = document.getElementById("modTrailMode");
-  if (tr > 0) { slEl.disabled = true; tmEl.disabled = false; }
-  else if (sl > 0) { trEl.disabled = true; tmEl.disabled = true; slEl.disabled = false; }
-  else { slEl.disabled = false; trEl.disabled = false; tmEl.disabled = false; }
-}
-document.getElementById("modSl").addEventListener("input", syncModSLTrail);
-document.getElementById("modTrail").addEventListener("input", syncModSLTrail);
-
 function openModify(id) {
   const t = tradesById[id];
   if (!t) return;
@@ -638,12 +625,9 @@ function openModify(id) {
   modLotSize = t.lot_size || 1;
   const remainingQty = t.quantity - (t.exited_qty || 0);
   modRemainingLots = Math.max(1, Math.floor(remainingQty / modLotSize));
-  const slEl = document.getElementById("modSl"), trEl = document.getElementById("modTrail"), tmEl = document.getElementById("modTrailMode");
-  slEl.disabled = false; trEl.disabled = false; tmEl.disabled = false;
-  slEl.value = t.stop_loss || 0;
-  trEl.value = t.trail_sl || 0;
-  tmEl.value = t.trail_mode || "CONTINUE";
-  syncModSLTrail();
+  document.getElementById("modSl").value = t.stop_loss || 0;
+  document.getElementById("modTrail").value = t.trail_sl || 0;
+  document.getElementById("modTrailMode").value = t.trail_mode || "CONTINUE";
   const rows = document.getElementById("modTargetRows");
   rows.innerHTML = "";
   let prices = [];
