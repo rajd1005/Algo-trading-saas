@@ -90,15 +90,15 @@ class DemoMarketData:
             if underlying not in self._spot:
                 seed = store.spot_seed(underlying) or 1000.0
                 self._spot[underlying] = seed
-            # gentle random walk
-            self._spot[underlying] *= (1 + random.uniform(-0.0008, 0.0008))
+            # gentle random walk (kept calm so small SL/targets behave sensibly)
+            self._spot[underlying] *= (1 + random.uniform(-0.00025, 0.00025))
             return self._spot[underlying]
 
     def _base_for(self, security_id):
         with self._lock:
             if security_id not in self._base:
                 self._base[security_id] = random.uniform(100, 1500)
-            self._base[security_id] *= (1 + random.uniform(-0.001, 0.001))
+            self._base[security_id] *= (1 + random.uniform(-0.0004, 0.0004))
             return self._base[security_id]
 
     def _price(self, security_id, spot_cache):
@@ -115,7 +115,7 @@ class DemoMarketData:
                 intrinsic = max(0.0, strike - spot)
             width = max(spot * 0.04, 1.0)
             tv = spot * 0.015 * math.exp(-((strike - spot) / width) ** 2) + spot * 0.002
-            price = (intrinsic + tv) * (1 + random.uniform(-0.004, 0.004))
+            price = (intrinsic + tv) * (1 + random.uniform(-0.0015, 0.0015))
             return round(max(0.05, price), 2)
         # equities / futures / index -> simple random walk
         return round(self._base_for(security_id), 2)

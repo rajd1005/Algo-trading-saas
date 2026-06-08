@@ -349,7 +349,7 @@ class TradingEngine:
                 t.exited_qty = t.quantity
                 t.exit_fill_price = res.fill_price
                 t.status = "CLOSED"
-                t.exit_reason = "KILL" if kill else "STOPLOSS"
+                t.exit_reason = "KILL" if kill else ("TRAIL" if (t.trail_sl or 0) > 0 else "STOPLOSS")
                 t.pnl = round(t.realized_pnl, 2)
                 self._log(db, f"EXIT ({t.exit_reason}) {t.symbol} x{remaining} @ {res.fill_price} "
                               f"P&L={t.pnl:.2f} [{t.mode}/{broker.name}]", "INFO", t.id)
