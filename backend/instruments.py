@@ -61,6 +61,8 @@ class InstrumentStore:
         self._underlyings = {}       # underlying -> {display, has_option, has_future}
         self._opt = {}               # underlying -> expiry -> {strike: {"CE":row,"PE":row}}
         self._fut = {}               # underlying -> list of future rows
+        self._by_id = {}             # security_id -> meta (for the Demo price simulator)
+        self._spot_seed = {}         # underlying -> a realistic spot (median strike)
 
     # ---------- status ----------
     def status(self):
@@ -114,7 +116,7 @@ class InstrumentStore:
             self._loading = False
 
     def _parse(self, text):
-        equities, underlyings, opt, fut = [], {}, {}, {}
+        equities, underlyings, opt, fut, by_id = [], {}, {}, {}, {}
         for r in csv.DictReader(io.StringIO(text)):
             exch = (r.get("EXCH_ID") or "").strip()
             seg = (r.get("SEGMENT") or "").strip()
@@ -140,6 +142,9 @@ class InstrumentStore:
                 "lot_size": (r.get("LOT_SIZE") or "1").strip(),
             }
 
+            by_id[sec_id] = {"strike": row["strike"], "option_type": row["option_type"],
+                             "underlying": underlying, "instrument_type": itype}
+
             if itype in ("EQUITY", "INDEX"):
                 row["_s"] = f"{display} {underlying}".lower()
                 equities.append(row)
@@ -159,11 +164,21 @@ class InstrumentStore:
                 u["has_future"] = True
                 fut.setdefault(underlying, []).append(row)
 
+        # A realistic "spot" per underlying = the middle strike of its options.
+        import statistics
+        spot_seed = {}
+        for u, exps in opt.items():
+            strikes = [s for e in exps.values() for s in e.keys() if s > 0]
+            if strikes:
+                spot_seed[u] = statistics.median(strikes)
+
         with self._lock:
             self._equities = equities
             self._underlyings = underlyings
             self._opt = opt
             self._fut = fut
+            self._by_id = by_id
+            self._spot_seed = spot_seed
 
     # ---------- searching ----------
     def search_underlyings(self, query, kind, limit=25):
@@ -231,6 +246,15 @@ class InstrumentStore:
         with self._lock:
             rows = sorted(self._fut.get(underlying, []), key=lambda r: r["expiry"])
         return [self._slim(r) for r in rows]
+
+    # ---------- metadata (used by the Demo price simulator) ----------
+    def get_meta(self, security_id):
+        with self._lock:
+            return self._by_id.get(str(security_id))
+
+    def spot_seed(self, underlying):
+        with self._lock:
+            return self._spot_seed.get(underlying, 0.0)
 
     @staticmethod
     def _slim(row):

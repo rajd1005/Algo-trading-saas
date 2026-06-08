@@ -20,7 +20,7 @@ import time
 
 from database import SessionLocal
 from models import Trade, LogEntry, Setting
-from market_data import DhanMarketData
+from market_data import DhanMarketData, demo_market
 from live_feed import feed
 from brokers import PaperBroker, DhanBroker
 import config
@@ -33,6 +33,7 @@ class TradingEngine:
         self.paper = PaperBroker()
         self._last_rest = 0.0          # last time we used the REST fallback
         self._rest_cache = {}          # last REST prices (warmup / fallback)
+        self._demo = False             # DEMO mode (simulated prices + fake broker)
 
     # ---------- lifecycle ----------
     def start(self):
@@ -97,19 +98,27 @@ class TradingEngine:
         try:
             active = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
 
-            cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-            tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
-            if not cid or not tok:
-                if active:
-                    self._set_setting(db, "md_status",
-                                      "Dhan not connected — connect on the Broker tab to get prices.")
-                db.commit()
-                return
-
+            self._demo = self._get_setting(db, "broker_mode", "DHAN") == "DEMO"
             instruments = list({(t.exchange_segment, str(t.security_id))
                                 for t in active if t.security_id})
 
-            prices = self._collect_prices(db, cid, tok, instruments)
+            if self._demo:
+                by_seg = {}
+                for seg, sid in instruments:
+                    by_seg.setdefault(seg, []).append(sid)
+                prices = demo_market.get_ltp_batch(by_seg)
+                if active:
+                    self._set_setting(db, "md_status", "ok:demo")
+            else:
+                cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
+                tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+                if not cid or not tok:
+                    if active:
+                        self._set_setting(db, "md_status",
+                                          "Dhan not connected — connect on the Broker tab to get prices.")
+                    db.commit()
+                    return
+                prices = self._collect_prices(db, cid, tok, instruments)
 
             kill = self._kill_switch_on(db)
             live_broker = self._live_broker(db)
@@ -172,7 +181,10 @@ class TradingEngine:
         return prices
 
     def _broker_for(self, t, live_broker):
-        return self.paper if t.mode == "TEST" else live_broker
+        # DEMO mode never sends real orders; TEST mode is always paper.
+        if self._demo or t.mode == "TEST":
+            return self.paper
+        return live_broker
 
     # ---------- entry ----------
     def _handle_pending(self, db, t, price, kill, live_broker):

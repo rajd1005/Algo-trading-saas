@@ -17,7 +17,7 @@ from models import Trade, LogEntry, Setting
 from schemas import TradeCreate, TradeOut, BrokerConfigIn, SettingsIn
 from engine import engine
 from instruments import store as instruments
-from market_data import DhanMarketData
+from market_data import DhanMarketData, demo_market
 from brokers import verify_dhan_credentials
 
 app = FastAPI(title="Algo Trading SaaS (India)")
@@ -50,6 +50,8 @@ def _startup():
         set_setting(db, "kill_switch", "off")
     if db.get(Setting, "default_mode") is None:
         set_setting(db, "default_mode", "TEST")
+    if db.get(Setting, "broker_mode") is None:
+        set_setting(db, "broker_mode", "DEMO")   # start in safe Demo mode
     db.close()
     instruments.load_async()   # download Dhan's symbol list in the background
     engine.start()
@@ -157,17 +159,22 @@ def futures(underlying: str):
 @app.post("/api/ltp")
 def ltp(payload: dict, db: Session = Depends(get_db)):
     """Fetch live LTP for a list of instruments (used to fill the option chain)."""
-    cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-    tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
     items = payload.get("items", [])
-    if not cid or not tok or not items:
-        return {"connected": bool(cid and tok), "prices": {}}
     by_seg = {}
     for it in items:
         seg = it.get("exchange_segment")
         sid = str(it.get("security_id"))
         if seg and sid:
             by_seg.setdefault(seg, []).append(sid)
+
+    if get_setting(db, "broker_mode", "DHAN") == "DEMO":
+        res = demo_market.get_ltp_batch(by_seg)
+        return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()}}
+
+    cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
+    tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+    if not cid or not tok or not by_seg:
+        return {"connected": bool(cid and tok), "prices": {}}
     md = DhanMarketData(cid, tok)
     res = md.get_ltp_batch(by_seg)
     prices = {sid: px for (seg, sid), px in res.items()}
@@ -242,12 +249,23 @@ def update_settings(payload: SettingsIn, db: Session = Depends(get_db)):
 def get_broker(db: Session = Depends(get_db)):
     cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
     tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+    mode = get_setting(db, "broker_mode", "DHAN")
     return {
         "dhan_client_id": cid,
         # Never send the full token back to the browser; just say if it's set.
         "has_access_token": bool(tok),
-        "connected": get_setting(db, "dhan_connected", "no") == "yes",
+        "mode": mode,
+        "connected": mode == "DEMO" or get_setting(db, "dhan_connected", "no") == "yes",
     }
+
+
+@app.post("/api/broker/mode")
+def set_broker_mode(payload: dict, db: Session = Depends(get_db)):
+    mode = "DEMO" if str(payload.get("mode", "")).upper() == "DEMO" else "DHAN"
+    set_setting(db, "broker_mode", mode)
+    db.add(LogEntry(message=f"Broker mode set to {mode}", level="WARN"))
+    db.commit()
+    return {"mode": mode}
 
 
 @app.post("/api/broker")
@@ -263,6 +281,8 @@ def save_broker(payload: BrokerConfigIn, db: Session = Depends(get_db)):
 @app.post("/api/broker/connect")
 def connect_broker(db: Session = Depends(get_db)):
     """Authenticate with Dhan using the saved client id + access token."""
+    if get_setting(db, "broker_mode", "DHAN") == "DEMO":
+        return {"connected": True, "message": "Demo mode — simulated broker connected."}
     cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
     tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
     if not cid or not tok:

@@ -8,11 +8,15 @@ either mode to work (LTP comes from Dhan).
 To be efficient we fetch the LTP of ALL active trades in ONE request per tick,
 grouped by exchange segment, instead of one request per symbol.
 """
+import math
+import random
+import threading
 import time
 
 import requests
 
 import config
+from instruments import store
 
 
 class DhanMarketData:
@@ -66,3 +70,68 @@ class DhanMarketData:
     def get_ltp(self, exchange_segment: str, security_id: str) -> float:
         res = self.get_ltp_batch({exchange_segment: [security_id]})
         return res.get((exchange_segment, str(security_id)), 0.0)
+
+
+class DemoMarketData:
+    """
+    Fully simulated prices for DEMO mode — no Dhan, no subscription, no real money.
+    Options are priced realistically (intrinsic value + a bell-shaped time value
+    peaking at-the-money) so the option chain, ATM detection, stop-loss and target
+    all behave like the real thing.
+    """
+    def __init__(self):
+        self._spot = {}        # underlying -> current simulated spot
+        self._base = {}        # security_id -> base price (non-options)
+        self._lock = threading.Lock()
+        self.last_error = ""
+
+    def _spot_for(self, underlying):
+        with self._lock:
+            if underlying not in self._spot:
+                seed = store.spot_seed(underlying) or 1000.0
+                self._spot[underlying] = seed
+            # gentle random walk
+            self._spot[underlying] *= (1 + random.uniform(-0.0008, 0.0008))
+            return self._spot[underlying]
+
+    def _base_for(self, security_id):
+        with self._lock:
+            if security_id not in self._base:
+                self._base[security_id] = random.uniform(100, 1500)
+            self._base[security_id] *= (1 + random.uniform(-0.001, 0.001))
+            return self._base[security_id]
+
+    def _price(self, security_id, spot_cache):
+        meta = store.get_meta(security_id)
+        if meta and meta["instrument_type"] == "OPTION" and meta["strike"] > 0:
+            u = meta["underlying"]
+            spot = spot_cache.get(u)
+            if spot is None:
+                spot = spot_cache[u] = self._spot_for(u)
+            strike = meta["strike"]
+            if meta["option_type"] == "CE":
+                intrinsic = max(0.0, spot - strike)
+            else:
+                intrinsic = max(0.0, strike - spot)
+            width = max(spot * 0.04, 1.0)
+            tv = spot * 0.015 * math.exp(-((strike - spot) / width) ** 2) + spot * 0.002
+            price = (intrinsic + tv) * (1 + random.uniform(-0.004, 0.004))
+            return round(max(0.05, price), 2)
+        # equities / futures / index -> simple random walk
+        return round(self._base_for(security_id), 2)
+
+    def get_ltp_batch(self, by_segment: dict) -> dict:
+        out = {}
+        spot_cache = {}            # one walked spot per underlying per call
+        for seg, ids in by_segment.items():
+            for sid in ids:
+                out[(seg, str(sid))] = self._price(str(sid), spot_cache)
+        return out
+
+    def get_ltp(self, exchange_segment: str, security_id: str) -> float:
+        return self.get_ltp_batch({exchange_segment: [security_id]}).get(
+            (exchange_segment, str(security_id)), 0.0)
+
+
+# Shared instances.
+demo_market = DemoMarketData()

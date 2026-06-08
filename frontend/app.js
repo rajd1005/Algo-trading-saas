@@ -49,8 +49,8 @@ async function refreshSummary() {
   const m = s.md_status || "";
   if (m.indexOf("ok") === 0) {
     banner.style.display = "block"; banner.className = "banner ok";
-    banner.textContent = m === "ok:ws"
-      ? "⚡ Real-time prices (WebSocket) flowing from Dhan."
+    banner.textContent = m === "ok:ws" ? "⚡ Real-time prices (WebSocket) flowing from Dhan."
+      : m === "ok:demo" ? "🧪 DEMO mode — simulated prices (no real money)."
       : "✅ Live prices (1-second) flowing from Dhan.";
   } else if (m) {
     banner.style.display = "block"; banner.className = "banner";
@@ -144,6 +144,17 @@ let currentSeg = "OPTION";
 let currentUnderlying = null;
 let ulTimer = null, ltpTimer = null;
 let chainData = [], chainScrolled = false;
+let currentLotSize = 1;
+
+// ---- lots -> quantity ----
+const lotsInput = document.getElementById("lotsInput");
+function updateQty() {
+  const lots = parseInt(lotsInput.value) || 1;
+  const qty = lots * currentLotSize;
+  form.quantity.value = qty;
+  document.getElementById("qtyComputed").textContent = `= ${qty} qty (lot size ${currentLotSize})`;
+}
+lotsInput.addEventListener("input", updateQty);
 const HINTS = { OPTION: "— search an index/stock, then pick a strike",
                 FUTURES: "— search an index/stock future",
                 EQUITY: "— search a stock or index" };
@@ -309,10 +320,10 @@ function pickContract(r) {
   form.security_id.value = r.security_id;
   form.exchange_segment.value = r.exchange_segment;
   form.instrument_type.value = r.instrument_type;
-  if (r.lot_size) { const lot = parseInt(parseFloat(r.lot_size)); if (lot > 0) form.quantity.value = lot; }
+  currentLotSize = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
+  updateQty();
   document.getElementById("selectedSymbol").innerHTML =
-    `✅ <b>${r.symbol}</b> — ${r.instrument_type} · ${r.exchange_segment} · ID ${r.security_id}`
-    + (r.lot_size ? ` · lot ${parseInt(parseFloat(r.lot_size))}` : "");
+    `✅ <b>${r.symbol}</b> — ${r.instrument_type} · ${r.exchange_segment} · ID ${r.security_id} · lot size ${currentLotSize}`;
 }
 
 document.addEventListener("click", (e) => {
@@ -336,7 +347,7 @@ form.onsubmit = async (e) => {
     msg.textContent = `✅ Created trade #${t.id} (${t.symbol}).`; msg.className = "msg pos";
     e.target.reset();
     document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
-    ulSearch.value = ""; resetPicker();
+    ulSearch.value = ""; currentLotSize = 1; lotsInput.value = 1; updateQty(); resetPicker();
     await refreshAll();
   } catch (err) { msg.textContent = "❌ " + err.message; msg.className = "msg neg"; }
 };
@@ -351,13 +362,35 @@ document.getElementById("killBtn").onclick = async () => {
 };
 
 // ---- broker ----
+const MODE_DESC = {
+  DEMO: "🧪 Demo mode: everything is simulated — prices, the option chain, and orders. No Dhan, no subscription, no real money. Perfect for testing all features.",
+  DHAN: "Dhan mode: real live prices and (in LIVE trades) real orders on your Dhan account.",
+};
+function applyBrokerMode(mode) {
+  document.getElementById("modeDemo").classList.toggle("active", mode === "DEMO");
+  document.getElementById("modeDhan").classList.toggle("active", mode === "DHAN");
+  document.getElementById("dhanFields").style.display = mode === "DEMO" ? "none" : "block";
+  document.getElementById("modeDesc").textContent = MODE_DESC[mode] || "";
+}
+
 async function refreshBroker() {
   const b = await api.get("/api/broker");
   document.getElementById("dhanClientId").value = b.dhan_client_id || "";
+  applyBrokerMode(b.mode || "DHAN");
   const st = document.getElementById("brokerState");
-  st.textContent = b.connected ? "Connected" : "Not connected";
+  const label = b.mode === "DEMO" ? "Demo connected" : (b.connected ? "Dhan connected" : "Not connected");
+  st.textContent = label;
   st.className = "pill " + (b.connected ? "pill-ok" : "pill-off");
 }
+
+["modeDemo", "modeDhan"].forEach((id) => {
+  document.getElementById(id).onclick = async () => {
+    const mode = document.getElementById(id).dataset.mode;
+    await api.post("/api/broker/mode", { mode });
+    applyBrokerMode(mode);
+    await refreshBroker();
+  };
+});
 document.getElementById("saveBrokerBtn").onclick = async () => {
   await api.post("/api/broker", {
     dhan_client_id: document.getElementById("dhanClientId").value,
