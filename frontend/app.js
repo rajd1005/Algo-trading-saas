@@ -58,6 +58,15 @@ async function refreshSummary() {
   } else {
     banner.style.display = "none";
   }
+  // demo direction state
+  const dir = s.demo_direction || 0;
+  const dirState = document.getElementById("demoDirState");
+  if (dirState) dirState.textContent = dir > 0 ? "drifting UP ▲" : dir < 0 ? "drifting DOWN ▼" : "flat (random)";
+  document.querySelectorAll("[data-dir]").forEach((b) => {
+    const on = (b.dataset.dir === "UP" && dir > 0) || (b.dataset.dir === "DOWN" && dir < 0) || (b.dataset.dir === "FLAT" && dir === 0);
+    b.classList.toggle("active", on);
+  });
+
   // symbol list state (Broker tab)
   const ss = document.getElementById("symbolsState");
   if (ss) {
@@ -82,7 +91,7 @@ async function refreshTrades() {
       <td>${t.symbol}</td>
       <td><span class="badge b-${t.mode}">${t.mode}</span></td>
       <td>${t.side}</td>
-      <td>${t.quantity}</td>
+      <td>${qtyCell(t)}</td>
       <td>${t.entry_fill_price || t.entry_price || "-"}</td>
       <td>${t.stop_loss || (t.sl_points ? t.sl_points + "p" : "-")}</td>
       <td>${targetCell(t)}</td>
@@ -99,6 +108,15 @@ async function refreshTrades() {
       else doAction(b.dataset.act, b.dataset.id);
     };
   });
+}
+
+function qtyCell(t) {
+  // Show remaining vs total once some quantity has been booked via targets.
+  const exited = t.exited_qty || 0;
+  if (exited > 0 && t.status === "OPEN") {
+    return `<span title="remaining / total">${t.quantity - exited} / ${t.quantity}</span>`;
+  }
+  return t.quantity;
 }
 
 function statusCell(t) {
@@ -547,7 +565,16 @@ function applyBrokerMode(mode) {
   document.getElementById("modeDhan").classList.toggle("active", mode === "DHAN");
   document.getElementById("dhanFields").style.display = mode === "DEMO" ? "none" : "block";
   document.getElementById("modeDesc").textContent = MODE_DESC[mode] || "";
+  document.getElementById("demoControls").style.display = mode === "DEMO" ? "flex" : "none";
 }
+
+// Demo price controls (push up/down/flat, reset)
+document.querySelectorAll("[data-dir]").forEach((b) => {
+  b.onclick = async () => { await api.post("/api/demo/direction", { direction: b.dataset.dir }); await refreshSummary(); };
+});
+document.getElementById("demoReset").onclick = async () => {
+  await api.post("/api/demo/reset"); await refreshAll();
+};
 
 async function refreshBroker() {
   const b = await api.get("/api/broker");

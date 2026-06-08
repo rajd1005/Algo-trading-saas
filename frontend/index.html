@@ -34,6 +34,14 @@
 
   <!-- DASHBOARD -->
   <section id="tab-dashboard" class="tab-panel active">
+    <div id="demoControls" class="demo-bar" style="display:none;">
+      <span><b>🧪 Demo price:</b></span>
+      <button type="button" class="btn btn-sm" data-dir="UP">▲ Push Up</button>
+      <button type="button" class="btn btn-sm" data-dir="DOWN">▼ Push Down</button>
+      <button type="button" class="btn btn-sm" data-dir="FLAT">• Flat</button>
+      <button type="button" class="btn btn-sm" id="demoReset">↻ Reset prices</button>
+      <span id="demoDirState" class="muted" style="font-size:12px;"></span>
+    </div>
     <table class="data">
       <thead>
         <tr>

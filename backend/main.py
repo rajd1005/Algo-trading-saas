@@ -253,6 +253,22 @@ def ltp(payload: dict, db: Session = Depends(get_db)):
     return {"connected": True, "prices": prices, "error": md.last_error}
 
 
+# ---------- demo controls (push price up/down, reset) ----------
+@app.post("/api/demo/direction")
+def demo_direction(payload: dict):
+    d = str(payload.get("direction", "FLAT")).upper()
+    demo_market.set_direction(1 if d == "UP" else (-1 if d == "DOWN" else 0))
+    return {"direction": demo_market.direction}
+
+
+@app.post("/api/demo/reset")
+def demo_reset(db: Session = Depends(get_db)):
+    demo_market.reset()
+    db.add(LogEntry(message="Demo prices reset", level="INFO"))
+    db.commit()
+    return {"ok": True}
+
+
 @app.get("/api/instruments/status")
 def instruments_status():
     return instruments.status()
@@ -281,6 +297,7 @@ def summary(db: Session = Depends(get_db)):
         "kill_switch": get_setting(db, "kill_switch", "off"),
         "md_status": get_setting(db, "md_status", ""),
         "instruments": instruments.status(),
+        "demo_direction": demo_market.direction,
     }
 
 

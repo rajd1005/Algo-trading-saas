@@ -336,6 +336,7 @@ class TradingEngine:
                         new_sl = min(new_sl, t.entry_fill_price)
                     if new_sl > (t.stop_loss or 0):
                         t.stop_loss = new_sl
+                        self._log(db, f"Trailing SL → {new_sl} (price {price}) {t.symbol}", "INFO", t.id)
             else:
                 ref = t.hwm if t.hwm else t.entry_fill_price
                 steps = math.floor((ref - price) / step)
@@ -346,6 +347,7 @@ class TradingEngine:
                         new_sl = max(new_sl, t.entry_fill_price)
                     if not t.stop_loss or new_sl < t.stop_loss:
                         t.stop_loss = new_sl
+                        self._log(db, f"Trailing SL → {new_sl} (price {price}) {t.symbol}", "INFO", t.id)
 
         # 1) Kill switch or stop-loss -> exit ALL remaining.
         sl_hit = (t.stop_loss or 0) > 0 and (price <= t.stop_loss if t.side == "BUY"
@@ -385,8 +387,10 @@ class TradingEngine:
                     t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * exit_qty
                     t.exited_qty += exit_qty
                     t.exit_fill_price = res.fill_price
+                    remaining_after = t.quantity - t.exited_qty
                     self._log(db, f"TARGET hit {t.symbol} x{exit_qty} @ {res.fill_price} "
-                                  f"(booked P&L={t.realized_pnl:.2f}) [{t.mode}/{broker.name}]", "INFO", t.id)
+                                  f"({remaining_after} qty left, booked P&L={t.realized_pnl:.2f}) "
+                                  f"[{t.mode}/{broker.name}]", "INFO", t.id)
                 tg["hit"] = True
                 changed = True
             if changed:

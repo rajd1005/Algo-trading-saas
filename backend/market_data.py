@@ -84,21 +84,34 @@ class DemoMarketData:
         self._base = {}        # security_id -> base price (non-options)
         self._lock = threading.Lock()
         self.last_error = ""
+        self.direction = 0     # +1 = drift up, -1 = drift down, 0 = flat/random
+
+    def set_direction(self, d):
+        self.direction = 1 if d > 0 else (-1 if d < 0 else 0)
+
+    def reset(self):
+        with self._lock:
+            self._spot.clear()
+            self._base.clear()
+
+    def _drift(self):
+        # ~0.15% per tick push in the chosen direction (so SL/targets are reachable fast)
+        return 0.0015 * self.direction
 
     def _spot_for(self, underlying):
         with self._lock:
             if underlying not in self._spot:
                 seed = store.spot_seed(underlying) or 1000.0
                 self._spot[underlying] = seed
-            # gentle random walk (kept calm so small SL/targets behave sensibly)
-            self._spot[underlying] *= (1 + random.uniform(-0.00025, 0.00025))
+            # gentle random walk + optional directional drift
+            self._spot[underlying] *= (1 + self._drift() + random.uniform(-0.00025, 0.00025))
             return self._spot[underlying]
 
     def _base_for(self, security_id):
         with self._lock:
             if security_id not in self._base:
                 self._base[security_id] = random.uniform(100, 1500)
-            self._base[security_id] *= (1 + random.uniform(-0.0004, 0.0004))
+            self._base[security_id] *= (1 + self._drift() + random.uniform(-0.0004, 0.0004))
             return self._base[security_id]
 
     def _price(self, security_id, spot_cache):
