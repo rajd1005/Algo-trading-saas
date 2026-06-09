@@ -15,6 +15,7 @@ BOTH test and live trades use real Dhan prices. The only difference:
 So Dhan must be connected for the engine to do anything (that's where LTP
 comes from).
 """
+import datetime as dt
 import json
 import math
 import threading
@@ -22,6 +23,22 @@ import time
 
 from database import SessionLocal
 from models import Trade, LogEntry, Setting, Account
+
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
+
+def _ist_now():
+    return dt.datetime.now(IST)
+
+
+def _ist_today():
+    return _ist_now().strftime("%Y-%m-%d")
+
+
+def _ist_day_start_utc():
+    """UTC datetime for 00:00 IST today (to filter 'today's' trades)."""
+    midnight_ist = _ist_now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight_ist.astimezone(dt.timezone.utc).replace(tzinfo=None)
 from market_data import DhanMarketData, demo_market
 from live_feed import feed
 from brokers import PaperBroker, DhanBroker
@@ -79,6 +96,8 @@ class TradingEngine:
                 row.value = value
         else:
             db.add(Setting(key=key, value=value))
+            db.flush()                    # make it visible to db.get() within this tick
+                                          # (autoflush is off) so we never double-insert
 
     def _log(self, db, message, level="INFO", trade_id=0):
         db.add(LogEntry(message=message, level=level, trade_id=trade_id))
@@ -226,6 +245,8 @@ class TradingEngine:
             kill = self._kill_switch_on(db)
             live_broker = self._trade_broker(db, trade_provider)
 
+            # Pass 1: refresh the latest price + live MTM on every OPEN trade, so the
+            # account-level risk checks below see fresh numbers.
             for t in active:
                 if not t.security_id:
                     continue
@@ -233,16 +254,119 @@ class TradingEngine:
                 if price <= 0:
                     continue
                 t.last_price = price
-
-                if t.status == "PENDING":
-                    self._handle_pending(db, t, price, kill, live_broker)
-                elif t.status == "OPEN":
+                if t.status == "OPEN":
                     self._update_pnl(t, price)
+
+            # Account-level daily target / drawdown + step profit-lock (may square
+            # off everything and halt trading for the rest of the day).
+            self._check_daily_limits(db, active, live_broker)
+            self._check_global_lock(db, active, live_broker)
+            halted = self._daily_halted(db)
+
+            # Pass 2: per-trade entry/exit handling.
+            for t in active:
+                if not t.security_id:
+                    continue
+                price = prices.get((t.exchange_segment, str(t.security_id)), 0.0)
+                if price <= 0:
+                    continue
+                if t.status == "PENDING":
+                    self._handle_pending(db, t, price, kill, live_broker, halted)
+                elif t.status == "OPEN":
                     self._handle_open(db, t, price, kill, live_broker)
 
             db.commit()
         finally:
             db.close()
+
+    # ---------- account-level daily risk ----------
+    def _account_day_pnl(self, db, account_id):
+        """Combined realized+unrealized P&L for today's trades on this account."""
+        day_start = _ist_day_start_utc()
+        rows = (db.query(Trade)
+                .filter(Trade.account_id == (account_id or 0),
+                        Trade.status.in_(["OPEN", "CLOSED"]),
+                        Trade.created_at >= day_start).all())
+        return round(sum(t.pnl or 0 for t in rows), 2)
+
+    def _daily_halted(self, db):
+        return (self._get_setting(db, "daily_halt", "off") == "on"
+                and self._get_setting(db, "daily_halt_date", "") == _ist_today())
+
+    def _reset_daily_if_new_day(self, db):
+        today = _ist_today()
+        if self._get_setting(db, "daily_risk_date", "") != today:
+            self._set_setting(db, "daily_risk_date", today)
+            self._set_setting(db, "daily_halt", "off")
+            self._set_setting(db, "daily_halt_date", "")
+            self._set_setting(db, "daily_halt_reason", "")
+            self._set_setting(db, "global_lock_floor", "0")
+
+    def _halt_account(self, db, active, live_broker, reason, exit_reason):
+        """Square off all OPEN trades on the active account and block new entries."""
+        acct = self._trade_account_id
+        for t in active:
+            if t.status == "OPEN" and (t.account_id or 0) == acct:
+                broker = self._broker_for(t, live_broker)
+                if broker is not None:
+                    self._exit_all(db, t, t.last_price, broker, exit_reason)
+        self._set_setting(db, "daily_halt", "on")
+        self._set_setting(db, "daily_halt_date", _ist_today())
+        self._set_setting(db, "daily_halt_reason", reason)
+        self._log(db, f"DAILY LIMIT: {reason} — squared off open positions and halted "
+                      f"new trading for today.", "WARN")
+
+    def _check_daily_limits(self, db, active, live_broker):
+        self._reset_daily_if_new_day(db)
+        if self._daily_halted(db):
+            return
+        try:
+            maxp = float(self._get_setting(db, "daily_max_profit", "") or 0)
+            maxl = float(self._get_setting(db, "daily_max_loss", "") or 0)
+        except Exception:
+            maxp = maxl = 0.0
+        if maxp <= 0 and maxl <= 0:
+            return
+        pnl = self._account_day_pnl(db, self._trade_account_id)
+        if maxl > 0 and pnl <= -abs(maxl):
+            self._halt_account(db, active, live_broker,
+                               f"Daily max loss ₹{abs(maxl):,.0f} hit (P&L ₹{pnl:,.0f})",
+                               "DAILY_LOSS")
+        elif maxp > 0 and pnl >= maxp:
+            self._halt_account(db, active, live_broker,
+                               f"Daily max profit ₹{maxp:,.0f} hit (P&L ₹{pnl:,.0f})",
+                               "DAILY_PROFIT")
+
+    def _check_global_lock(self, db, active, live_broker):
+        if self._daily_halted(db):
+            return
+        tiers = self._parse_tiers(self._get_setting(db, "global_profit_lock_json", ""))
+        if not tiers:
+            return
+        pnl = self._account_day_pnl(db, self._trade_account_id)
+        try:
+            floor = float(self._get_setting(db, "global_lock_floor", "0") or 0)
+        except Exception:
+            floor = 0.0
+        for tier in sorted(tiers, key=lambda x: x.get("activate", 0)):
+            if pnl >= tier.get("activate", 0) > 0:
+                floor = max(floor, tier.get("lock", 0))
+        if floor != 0:
+            self._set_setting(db, "global_lock_floor", str(floor))
+        if floor > 0 and pnl <= floor:
+            self._halt_account(db, active, live_broker,
+                               f"Profit lock triggered — securing ₹{floor:,.0f} (P&L ₹{pnl:,.0f})",
+                               "GLOBAL_LOCK")
+
+    @staticmethod
+    def _parse_tiers(raw):
+        if not raw:
+            return []
+        try:
+            tiers = json.loads(raw)
+            return [t for t in tiers if t.get("activate", 0) > 0 and t.get("lock", 0) > 0]
+        except Exception:
+            return []
 
     def _collect_prices(self, db, cid, tok, instruments):
         """Prefer the real-time WebSocket feed; fall back to REST for anything
@@ -346,10 +470,14 @@ class TradingEngine:
         return res
 
     # ---------- entry ----------
-    def _handle_pending(self, db, t, price, kill, live_broker):
+    def _handle_pending(self, db, t, price, kill, live_broker, halted=False):
         # External (broker-terminal) orders are managed by the sync monitor, not
         # by us — never place an order on their behalf.
         if t.source == "EXTERNAL":
+            return
+
+        # Daily limit hit -> trading is halted for the day; hold all new entries.
+        if halted and not t.broker_order_id:
             return
 
         broker = self._broker_for(t, live_broker)
@@ -420,9 +548,26 @@ class TradingEngine:
             self._log(db, f"Trade #{t.id}: " + "; ".join(parts) + " (set at entry)", "INFO", t.id)
 
     def _entry_triggered(self, t, price):
-        if t.entry_type == "MARKET":
+        et = t.entry_type
+        if et == "SCHEDULED":
+            # Hold until the wall-clock time, then push a market order.
+            if not t.scheduled_time:
+                return True
+            return _ist_now().strftime("%H:%M:%S") >= t.scheduled_time
+        if et == "TRIGGER":
+            # Algo-tracked synthetic limit: fire when LTP crosses the trigger.
+            if (t.trigger_price or 0) <= 0:
+                return True
+            d = (t.trigger_dir or "").upper()
+            if d == "ABOVE":
+                return price >= t.trigger_price
+            if d == "BELOW":
+                return price <= t.trigger_price
+            # auto: a BUY waits for a dip to/below; a SELL waits for a rise to/above.
+            return price <= t.trigger_price if t.side == "BUY" else price >= t.trigger_price
+        if et == "MARKET":
             return True
-        if t.entry_price <= 0:
+        if t.entry_price <= 0:                   # LIMIT
             return True
         if t.side == "BUY":
             return price <= t.entry_price       # buy at/below entry
@@ -466,6 +611,49 @@ class TradingEngine:
             return []
 
     # ---------- exit ----------
+    def _exit_all(self, db, t, price, broker, reason):
+        """Square off all remaining quantity at market. Returns True once CLOSED."""
+        remaining = t.quantity - (t.exited_qty or 0)
+        if remaining <= 0:
+            t.status = "CLOSED"
+            return True
+        direction = 1 if t.side == "BUY" else -1
+        res = self._place_confirmed(db, t, broker, is_exit=True, qty=remaining)
+        if not res.ok:
+            self._log(db, f"Exit failed for {t.symbol} ({reason}): {res.error}", "ERROR", t.id)
+            return False
+        t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+        t.exited_qty = t.quantity
+        t.exit_fill_price = res.fill_price
+        t.status = "CLOSED"
+        t.exit_reason = reason
+        t.pnl = round(t.realized_pnl, 2)
+        self._log(db, f"EXIT ({reason}) {t.symbol} x{remaining} @ {res.fill_price} "
+                      f"P&L={t.pnl:.2f} [{t.mode}/{broker.name}]", "INFO", t.id)
+        return True
+
+    def _check_trade_risk(self, db, t, price, broker):
+        """Trade-level monetary risk on this position's live MTM (t.pnl). Returns
+        True if the trade was squared off (max loss / max profit / profit-lock)."""
+        mtm = t.pnl or 0
+        if (t.max_loss_amt or 0) > 0 and mtm <= -abs(t.max_loss_amt):
+            return self._exit_all(db, t, price, broker, "MAXLOSS")
+        if (t.max_profit_amt or 0) > 0 and mtm >= t.max_profit_amt:
+            return self._exit_all(db, t, price, broker, "MAXPROFIT")
+        tiers = self._parse_tiers(t.profit_lock_json)
+        if tiers:
+            floor = t.lock_floor or 0
+            for tier in sorted(tiers, key=lambda x: x.get("activate", 0)):
+                if mtm >= tier.get("activate", 0) > 0:
+                    floor = max(floor, tier.get("lock", 0))
+            if floor != (t.lock_floor or 0):
+                t.lock_floor = floor
+                self._log(db, f"Trade #{t.id}: profit-lock armed — securing ₹{floor:,.0f} "
+                              f"(MTM ₹{mtm:,.0f}).", "INFO", t.id)
+            if floor > 0 and mtm <= floor:
+                return self._exit_all(db, t, price, broker, "LOCK")
+        return False
+
     def _handle_open(self, db, t, price, kill, live_broker):
         direction = 1 if t.side == "BUY" else -1
         remaining = t.quantity - (t.exited_qty or 0)
@@ -510,25 +698,20 @@ class TradingEngine:
                         self._log(db, f"Trade #{t.id}: SL updated (trailing). "
                                       f"Old SL: {old_sl} -> New SL: {new_sl}", "INFO", t.id)
 
-        # 1) Kill switch or stop-loss -> exit ALL remaining.
+        # 1) Trade-level monetary risk (max loss / max profit / step profit-lock)
+        #    on this position's live MTM — square off if any threshold is hit.
+        if self._check_trade_risk(db, t, price, broker):
+            return
+
+        # 2) Kill switch or stop-loss -> exit ALL remaining.
         sl_hit = (t.stop_loss or 0) > 0 and (price <= t.stop_loss if t.side == "BUY"
                                              else price >= t.stop_loss)
         if kill or sl_hit:
-            res = self._place_confirmed(db, t, broker, is_exit=True, qty=remaining)
-            if res.ok:
-                t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
-                t.exited_qty = t.quantity
-                t.exit_fill_price = res.fill_price
-                t.status = "CLOSED"
-                t.exit_reason = "KILL" if kill else ("TRAIL" if (t.trail_sl or 0) > 0 else "STOPLOSS")
-                t.pnl = round(t.realized_pnl, 2)
-                self._log(db, f"EXIT ({t.exit_reason}) {t.symbol} x{remaining} @ {res.fill_price} "
-                              f"P&L={t.pnl:.2f} [{t.mode}/{broker.name}]", "INFO", t.id)
-            else:
-                self._log(db, f"Exit failed for {t.symbol}: {res.error}", "ERROR", t.id)
+            reason = "KILL" if kill else ("TRAIL" if (t.trail_sl or 0) > 0 else "STOPLOSS")
+            self._exit_all(db, t, price, broker, reason)
             return
 
-        # 2) Targets.
+        # 3) Targets.
         targets = self._targets(t)
         if targets:
             changed = False

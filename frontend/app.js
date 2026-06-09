@@ -80,20 +80,38 @@ function setCard(id, val) {
 async function refreshSummary() {
   const s = await api.get("/api/summary?broker=" + pnlFilter);
   const p = s.pnl || {};
-  setCard("sumNet", p.net || 0);
-  setCard("sumGross", p.gross || 0);
-  const ch = document.getElementById("sumCharges");
-  if (ch) { ch.textContent = money(p.charges || 0); ch.className = "card-value neg"; }
-  const w = document.getElementById("sumWin");
-  if (w) { w.textContent = (p.win_rate || 0) + "%  (" + (p.wins || 0) + "/" + (p.closed || 0) + ")"; }
-  setCard("sumOpen", p.open_pnl || 0);
-  setCard("sumClosed", p.closed_pnl || 0);
+  setCard("sumBooked", p.booked || 0);
+  setCard("sumActive", p.active || 0);
+  setCard("sumTotal", p.total || 0);
   // per-account breakdown (only in the All view)
   const bd = document.getElementById("pnlBreakdown");
   const list = s.pnl_breakdown || [];
   bd.innerHTML = (s.pnl_filter === "ALL")
     ? list.map((x) => `${x.label}: <span class="${cls(x.net)}">${money(x.net)}</span>`).join(" &nbsp;·&nbsp; ")
     : "";
+  // daily limit halt banner
+  const halt = document.getElementById("haltBanner");
+  if (halt) {
+    if (s.daily_halt) {
+      halt.style.display = "block";
+      halt.innerHTML = `⛔ Trading halted for today — ${s.daily_halt_reason || "daily limit hit"}. `
+        + `<span class="link" id="resetHaltLink">Resume trading</span>`;
+      const rl = document.getElementById("resetHaltLink");
+      if (rl) rl.onclick = async () => {
+        if (confirm("Clear the daily limit halt and allow new trades again?")) {
+          await api.post("/api/settings/reset_halt", {}); await refreshAll();
+        }
+      };
+    } else halt.style.display = "none";
+  }
+  // strict broker lock: disable provider switching while any trade is active/pending
+  const locked = !!s.active_locked;
+  ["dataProvider", "tradeProvider"].forEach((id) => {
+    const e = document.getElementById(id);
+    if (e) { e.disabled = locked; e.title = locked ? "Locked while trades are active or pending" : ""; }
+  });
+  const ln = document.getElementById("brokerLockNote");
+  if (ln) ln.style.display = locked ? "block" : "none";
   // kill switch state
   const on = s.kill_switch === "on";
   const ks = document.getElementById("killState");
@@ -201,7 +219,7 @@ async function refreshTrades() {
       <td>${brokerLabel(t)}</td>
       <td>${t.side}</td>
       <td>${qtyCell(t)}</td>
-      <td>${t.entry_fill_price || t.entry_price || "-"}</td>
+      <td>${entryCell(t)}</td>
       <td>${t.stop_loss || (t.sl_points ? t.sl_points + "p" : "-")}</td>
       <td>${targetCell(t)}</td>
       <td>${t.last_price || "-"}</td>
@@ -223,6 +241,16 @@ function brokerLabel(t) {
   const name = t.broker === "PAPER" ? "Paper" : (t.broker || (t.mode === "TEST" ? "Paper" : "—"));
   const ext = t.source === "EXTERNAL" ? ' <span class="rbadge r-MANUAL">EXT</span>' : "";
   return name + ext;
+}
+
+function entryCell(t) {
+  if (t.status === "PENDING") {
+    if (t.entry_type === "SCHEDULED" && t.scheduled_time)
+      return `<span title="scheduled market order">⏱ ${t.scheduled_time}</span>`;
+    if (t.entry_type === "TRIGGER" && t.trigger_price)
+      return `<span title="algo trigger">🎯 ${t.trigger_dir === "ABOVE" ? "≥" : t.trigger_dir === "BELOW" ? "≤" : "@"} ${t.trigger_price}</span>`;
+  }
+  return t.entry_fill_price || t.entry_price || "-";
 }
 
 function qtyCell(t) {
@@ -361,15 +389,46 @@ document.querySelectorAll("[data-side]").forEach((b) => {
 });
 
 const entryPrice = document.getElementById("entryPrice");
-document.querySelectorAll("[data-et]").forEach((b) => {
-  b.onclick = () => {
-    document.querySelectorAll("[data-et]").forEach((x) => x.classList.remove("active"));
-    b.classList.add("active"); form.entry_type.value = b.dataset.et;
-    const isMarket = b.dataset.et === "MARKET";
-    entryPrice.disabled = isMarket;
-    if (isMarket) entryPrice.value = 0;
-  };
-});
+function applyEntryType(et) {
+  form.entry_type.value = et;
+  document.querySelectorAll("[data-et]").forEach((x) => x.classList.toggle("active", x.dataset.et === et));
+  const show = (id, on) => { const e = document.getElementById(id); if (e) e.style.display = on ? "" : "none"; };
+  show("entryPriceWrap", et === "LIMIT");
+  show("schedWrap", et === "SCHEDULED");
+  show("trigWrap", et === "TRIGGER");
+  entryPrice.disabled = et !== "LIMIT";
+  if (et !== "LIMIT") entryPrice.value = 0;
+}
+document.querySelectorAll("[data-et]").forEach((b) => { b.onclick = () => applyEntryType(b.dataset.et); });
+applyEntryType("MARKET");   // normalize the optional entry fields on load
+
+// ---- profit-lock tier rows (reused in New Trade, Settings, Presets, Modify) ----
+function addLockRow(container, activate = "", lock = "") {
+  const div = document.createElement("div");
+  div.className = "lockrow";
+  div.innerHTML = `<input class="lk-a" type="number" step="1" placeholder="activate ₹" value="${activate}" />
+    <span class="muted">→ lock</span>
+    <input class="lk-l" type="number" step="1" placeholder="lock ₹" value="${lock}" />
+    <button type="button" class="step lk-rm">×</button>`;
+  div.querySelector(".lk-rm").onclick = () => div.remove();
+  container.appendChild(div);
+}
+function readLockRows(container) {
+  return [...container.querySelectorAll(".lockrow")].map((r) => ({
+    activate: parseFloat(r.querySelector(".lk-a").value) || 0,
+    lock: parseFloat(r.querySelector(".lk-l").value) || 0,
+  })).filter((x) => x.activate > 0 && x.lock > 0);
+}
+function setLockRows(container, tiers) {
+  if (!container) return;
+  container.innerHTML = "";
+  (tiers || []).forEach((t) => addLockRow(container, t.activate, t.lock));
+}
+const _lockBtn = (btnId, contId) => { const b = document.getElementById(btnId); if (b) b.onclick = () => addLockRow(document.getElementById(contId)); };
+_lockBtn("addLock", "lockRows");
+_lockBtn("addGlobalLock", "globalLockRows");
+_lockBtn("prAddLock", "prLockRows");
+_lockBtn("modAddLock", "modLockRows");
 
 const multiToggle = document.getElementById("multiToggle");
 const multiWrap = document.getElementById("multiWrap");
@@ -448,10 +507,12 @@ document.getElementById("genLegs").onclick = () => {
 function resetOrderForm() {
   document.querySelectorAll("[data-side]").forEach((x) => x.classList.toggle("active", x.dataset.side === "BUY"));
   form.side.value = "BUY";
-  document.querySelectorAll("[data-et]").forEach((x) => x.classList.toggle("active", x.dataset.et === "MARKET"));
-  form.entry_type.value = "MARKET"; entryPrice.disabled = true; entryPrice.value = 0;
+  applyEntryType("MARKET");
   multiToggle.checked = false; multiWrap.style.display = "none"; targetField.style.display = "";
   document.getElementById("targetRows").innerHTML = "";
+  if (form.max_profit_amt) form.max_profit_amt.value = 0;
+  if (form.max_loss_amt) form.max_loss_amt.value = 0;
+  setLockRows(document.getElementById("lockRows"), []);
   currentLotSize = 1; lotsInput.value = 1; updateQty();
 }
 const HINTS = { OPTION: "— search index / stock / commodity (NIFTY, RELIANCE, GOLD…), then pick a strike",
@@ -628,6 +689,7 @@ function pickContract(r) {
   form.instrument_type.value = r.instrument_type;
   currentLotSize = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
   updateQty();
+  applyPreset((currentSeg === "EQUITY" ? r.symbol : currentUnderlying) || r.symbol);
   // Auto-fetch & live-update the LTP for stocks / futures / index right away.
   if (selLtpTimer) { clearInterval(selLtpTimer); selLtpTimer = null; }
   if (["EQUITY", "FUTURES", "INDEX"].includes(r.instrument_type)) {
@@ -672,9 +734,11 @@ form.onsubmit = async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
   const payload = Object.fromEntries(fd.entries());
-  ["entry_price", "sl_points", "target_points", "trail_sl"].forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
+  ["entry_price", "sl_points", "target_points", "trail_sl", "trigger_price", "max_profit_amt", "max_loss_amt"]
+    .forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
   payload.quantity = parseInt(payload.quantity) || 1;
   payload.lot_size = currentLotSize;
+  payload.profit_lock = readLockRows(document.getElementById("lockRows"));
   if (multiToggle.checked) {
     payload.targets = [...document.querySelectorAll("#targetRows .trow")].map((r) => ({
       points: parseFloat(r.querySelector(".tp").value) || 0,
@@ -929,6 +993,11 @@ function openModify(id) {
   if (!prices.length) prices = [t.target || ""];
   prices.slice(0, modRemainingLots).forEach((pr) => modAddTargetRow(pr));
   modDistribute();
+  document.getElementById("modMaxProfit").value = t.max_profit_amt || 0;
+  document.getElementById("modMaxLoss").value = t.max_loss_amt || 0;
+  let lock = [];
+  try { lock = JSON.parse(t.profit_lock_json || "[]"); } catch (e) { /* ignore */ }
+  setLockRows(document.getElementById("modLockRows"), lock);
   document.getElementById("modMsg").textContent = "";
   document.getElementById("modifyInfo").innerHTML =
     `<b>${t.symbol}</b> — entry ₹${t.entry_fill_price} · LTP ₹${t.last_price} · remaining ${remainingQty} qty (${modRemainingLots} lots, lot size ${modLotSize})`;
@@ -946,6 +1015,9 @@ document.getElementById("modSave").onclick = async () => {
       trail_sl: parseFloat(document.getElementById("modTrail").value) || 0,
       trail_mode: document.getElementById("modTrailMode").value,
       targets,
+      max_profit_amt: parseFloat(document.getElementById("modMaxProfit").value) || 0,
+      max_loss_amt: parseFloat(document.getElementById("modMaxLoss").value) || 0,
+      profit_lock: readLockRows(document.getElementById("modLockRows")),
     });
     modifyModal.style.display = "none";
     await refreshAll();
@@ -962,10 +1034,126 @@ document.getElementById("refreshSymbolsBtn").onclick = async () => {
   await api.post("/api/instruments/refresh");
 };
 
+// ---- symbol presets ----
+let _presets = {};
+async function loadPresets() {
+  try {
+    const rows = await api.get("/api/presets");
+    _presets = {};
+    rows.forEach((p) => { _presets[String(p.symbol).toUpperCase()] = p; });
+    renderPresets(rows);
+  } catch (e) { /* ignore */ }
+}
+function applyPreset(key) {
+  if (!key) return;
+  const p = _presets[String(key).toUpperCase()];
+  if (!p) return;
+  form.sl_points.value = p.sl_points || 0;
+  form.trail_sl.value = p.trail_sl || 0;
+  if (form.trail_mode) form.trail_mode.value = p.trail_mode || "CONTINUE";
+  const rowsBox = document.getElementById("targetRows");
+  if (p.targets && p.targets.length > 1) {
+    if (p.targets.length > (parseInt(lotsInput.value) || 1)) { lotsInput.value = p.targets.length; updateQty(); }
+    multiToggle.checked = true; multiWrap.style.display = "block"; targetField.style.display = "none";
+    rowsBox.innerHTML = "";
+    p.targets.forEach((pts) => addTargetRow(pts));
+    form.target_points.value = 0;
+  } else {
+    multiToggle.checked = false; multiWrap.style.display = "none"; targetField.style.display = "";
+    rowsBox.innerHTML = "";
+    form.target_points.value = (p.targets && p.targets.length === 1) ? p.targets[0] : (p.target_points || 0);
+  }
+  if (form.max_profit_amt) form.max_profit_amt.value = p.max_profit_amt || 0;
+  if (form.max_loss_amt) form.max_loss_amt.value = p.max_loss_amt || 0;
+  setLockRows(document.getElementById("lockRows"), p.profit_lock || []);
+  const msg = document.getElementById("formMsg");
+  msg.textContent = `↺ Preset applied for ${p.symbol}.`; msg.className = "msg pos";
+}
+function renderPresets(rows) {
+  const box = document.getElementById("presetList");
+  if (!box) return;
+  if (!rows.length) { box.innerHTML = `<p class="muted" style="font-size:12px;">No presets saved yet.</p>`; return; }
+  box.innerHTML = `<table class="data"><thead><tr><th>Symbol</th><th>SL</th><th>Trail</th><th>Targets</th><th>Max P / L</th><th>Lock</th><th></th></tr></thead><tbody>`
+    + rows.map((p) => {
+      const tg = (p.targets && p.targets.length) ? p.targets.join(", ") + "p" : (p.target_points ? p.target_points + "p" : "-");
+      const lock = (p.profit_lock && p.profit_lock.length) ? p.profit_lock.map((t) => `${t.activate}/${t.lock}`).join(", ") : "-";
+      return `<tr><td><b>${p.symbol}</b></td><td>${p.sl_points || "-"}</td><td>${p.trail_sl || "-"}</td><td>${tg}</td>
+        <td>${p.max_profit_amt || "-"} / ${p.max_loss_amt || "-"}</td><td>${lock}</td>
+        <td><button class="btn btn-sm" data-pr-edit="${p.id}">Edit</button> <button class="btn btn-sm" data-pr-del="${p.id}">✕</button></td></tr>`;
+    }).join("") + `</tbody></table>`;
+  box.querySelectorAll("[data-pr-edit]").forEach((b) => b.onclick = () => editPreset(rows.find((x) => String(x.id) === b.dataset.prEdit)));
+  box.querySelectorAll("[data-pr-del]").forEach((b) => b.onclick = async () => {
+    if (confirm("Delete this preset?")) { await api.del("/api/presets/" + b.dataset.prDel); await loadPresets(); }
+  });
+}
+function editPreset(p) {
+  if (!p) return;
+  document.getElementById("prSymbol").value = p.symbol;
+  document.getElementById("prSl").value = p.sl_points || 0;
+  document.getElementById("prTrail").value = p.trail_sl || 0;
+  document.getElementById("prTrailMode").value = p.trail_mode || "CONTINUE";
+  document.getElementById("prTarget").value = p.target_points || 0;
+  document.getElementById("prTargets").value = (p.targets || []).join(", ");
+  document.getElementById("prMaxProfit").value = p.max_profit_amt || 0;
+  document.getElementById("prMaxLoss").value = p.max_loss_amt || 0;
+  setLockRows(document.getElementById("prLockRows"), p.profit_lock || []);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+function clearPresetForm() {
+  ["prSymbol", "prSl", "prTrail", "prTarget", "prTargets", "prMaxProfit", "prMaxLoss"].forEach((id) => {
+    const e = document.getElementById(id); if (e) e.value = (id === "prSymbol" || id === "prTargets") ? "" : 0;
+  });
+  document.getElementById("prTrailMode").value = "CONTINUE";
+  setLockRows(document.getElementById("prLockRows"), []);
+}
+document.getElementById("clearPresetBtn").onclick = clearPresetForm;
+document.getElementById("savePresetBtn").onclick = async () => {
+  const msg = document.getElementById("presetMsg");
+  const targets = document.getElementById("prTargets").value.split(",").map((x) => parseFloat(x.trim())).filter((x) => x > 0);
+  try {
+    await api.post("/api/presets", {
+      symbol: document.getElementById("prSymbol").value,
+      sl_points: parseFloat(document.getElementById("prSl").value) || 0,
+      trail_sl: parseFloat(document.getElementById("prTrail").value) || 0,
+      trail_mode: document.getElementById("prTrailMode").value,
+      target_points: parseFloat(document.getElementById("prTarget").value) || 0,
+      targets,
+      max_profit_amt: parseFloat(document.getElementById("prMaxProfit").value) || 0,
+      max_loss_amt: parseFloat(document.getElementById("prMaxLoss").value) || 0,
+      profit_lock: readLockRows(document.getElementById("prLockRows")),
+    });
+    msg.textContent = "✅ Preset saved."; msg.className = "msg pos";
+    clearPresetForm(); await loadPresets();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+
+// ---- global settings (daily limits + account profit-lock) ----
+async function loadSettings() {
+  try {
+    const s = await api.get("/api/settings");
+    document.getElementById("dailyMaxProfit").value = s.daily_max_profit || 0;
+    document.getElementById("dailyMaxLoss").value = s.daily_max_loss || 0;
+    setLockRows(document.getElementById("globalLockRows"), s.global_profit_lock || []);
+  } catch (e) { /* ignore */ }
+}
+document.getElementById("saveSettingsBtn").onclick = async () => {
+  const msg = document.getElementById("settingsMsg");
+  try {
+    await api.post("/api/settings", {
+      daily_max_profit: parseFloat(document.getElementById("dailyMaxProfit").value) || 0,
+      daily_max_loss: parseFloat(document.getElementById("dailyMaxLoss").value) || 0,
+      global_profit_lock: readLockRows(document.getElementById("globalLockRows")),
+    });
+    msg.textContent = "✅ Settings saved."; msg.className = "msg pos";
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+
 // ---- refresh loop ----
 async function refreshAll() {
   await Promise.all([refreshSummary(), refreshTrades(), refreshLogs(), refreshBroker()]);
 }
 showTradesSkeleton();   // skeleton rows until the first data arrives
+loadPresets();
+loadSettings();
 refreshAll();
 setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); }, 2000);

@@ -44,10 +44,21 @@ class Trade(Base):
     lot_size = Column(Integer, default=1)           # contract lot size (for lots math)
 
     # --- Entry / Exit rules ---
-    entry_type = Column(String, default="MARKET")  # MARKET or LIMIT
+    entry_type = Column(String, default="MARKET")  # MARKET / LIMIT / SCHEDULED / TRIGGER
     entry_price = Column(Float, default=0.0)       # trigger/limit price for entry
     stop_loss = Column(Float, default=0.0)         # absolute price (computed from points)
     target = Column(Float, default=0.0)            # absolute price (computed from points)
+
+    # --- Scheduling / algo-tracked triggers (apply while PENDING) ---
+    scheduled_time = Column(String, default="")    # "HH:MM:SS" IST; push market at this time
+    trigger_price = Column(Float, default=0.0)     # synthetic-limit price tracked by the algo
+    trigger_dir = Column(String, default="")       # ABOVE / BELOW (which way LTP must cross)
+
+    # --- Trade-level monetary risk (on this trade's live MTM) ---
+    max_profit_amt = Column(Float, default=0.0)    # auto square-off if MTM >= this (₹)
+    max_loss_amt = Column(Float, default=0.0)      # auto square-off if MTM <= -this (₹)
+    profit_lock_json = Column(Text, default="")    # tiers [{"activate":x,"lock":y}]
+    lock_floor = Column(Float, default=0.0)        # currently-armed locked-profit floor (₹)
 
     # Stop-loss / target are entered as POINTS; the absolute prices above are
     # computed from the actual entry fill price when the trade enters.
@@ -101,14 +112,31 @@ class Setting(Base):
 
 
 class Account(Base):
-    """A configured broker login (Dhan or Angel). Users can add several."""
+    """A configured broker login (Dhan / Angel / Zerodha / Alice). Several allowed."""
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, index=True)
-    broker = Column(String, default="DHAN")        # DHAN / ANGEL
+    broker = Column(String, default="DHAN")        # DHAN / ANGEL / ZERODHA / ALICE
     client_id = Column(String, default="")
     label = Column(String, default="")             # e.g. "Dhan · 1100000000"
     creds_json = Column(Text, default="{}")        # broker-specific secrets/tokens
     connected = Column(Integer, default=0)
     token_time = Column(DateTime, default=None, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class SymbolPreset(Base):
+    """Per-symbol default trade settings, auto-filled into the New Trade form."""
+    __tablename__ = "symbol_presets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True, default="")    # underlying, UPPER (BANKNIFTY…)
+    sl_points = Column(Float, default=0.0)
+    trail_sl = Column(Float, default=0.0)
+    trail_mode = Column(String, default="CONTINUE")
+    target_points = Column(Float, default=0.0)         # single target (points)
+    targets_json = Column(Text, default="")            # multi-target points list, e.g. [100,100]
+    max_profit_amt = Column(Float, default=0.0)
+    max_loss_amt = Column(Float, default=0.0)
+    profit_lock_json = Column(Text, default="")        # tiers [{"activate":x,"lock":y}]
     created_at = Column(DateTime, default=_now)

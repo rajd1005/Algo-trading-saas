@@ -32,21 +32,20 @@
       <span id="pnlBreakdown" class="muted" style="font-size:12px;"></span>
     </div>
     <div class="cards">
-      <div class="card"><div class="card-label">Net P&L</div><div id="sumNet" class="card-value">₹0</div></div>
-      <div class="card"><div class="card-label">Gross P&L</div><div id="sumGross" class="card-value">₹0</div></div>
-      <div class="card"><div class="card-label">Charges (est.)</div><div id="sumCharges" class="card-value">₹0</div></div>
-      <div class="card"><div class="card-label">Win Rate</div><div id="sumWin" class="card-value">0%</div></div>
-      <div class="card"><div class="card-label">Open P&L</div><div id="sumOpen" class="card-value">₹0</div></div>
-      <div class="card"><div class="card-label">Booked P&L</div><div id="sumClosed" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label">Booked P&L (Realized)</div><div id="sumBooked" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label">Active P&L (MTM)</div><div id="sumActive" class="card-value">₹0</div></div>
+      <div class="card card-total"><div class="card-label">Total P&L</div><div id="sumTotal" class="card-value">₹0</div></div>
     </div>
   </section>
 
   <div id="mdBanner" class="banner" style="display:none;"></div>
+  <div id="haltBanner" class="banner halt" style="display:none;"></div>
 
   <nav class="tabs">
     <button class="tab active" data-tab="dashboard">Dashboard</button>
     <button class="tab" data-tab="new">+ New Trade</button>
     <button class="tab" data-tab="broker">Broker</button>
+    <button class="tab" data-tab="settings">Settings</button>
     <button class="tab" data-tab="logs">Logs</button>
   </nav>
 
@@ -141,12 +140,30 @@
           <div class="btn-group">
             <button type="button" class="opt active" data-et="MARKET">MARKET</button>
             <button type="button" class="opt" data-et="LIMIT">LIMIT</button>
+            <button type="button" class="opt" data-et="SCHEDULED">⏱ TIME</button>
+            <button type="button" class="opt" data-et="TRIGGER">🎯 TRIGGER</button>
           </div>
           <input type="hidden" name="entry_type" value="MARKET" />
         </div>
-        <label>Entry price
+        <label id="entryPriceWrap">Entry price
           <input name="entry_price" id="entryPrice" type="number" step="0.05" value="0" disabled />
         </label>
+        <label id="schedWrap" style="display:none;">Execute at (IST)
+          <input name="scheduled_time" id="schedTime" type="time" step="1" value="09:15:00" />
+          <span class="muted" style="font-size:11px;">held, then sent as a MARKET order at this time</span>
+        </label>
+        <div id="trigWrap" class="field" style="display:none;">
+          <div class="field-label">Algo trigger (synthetic limit)</div>
+          <div class="row" style="gap:6px;">
+            <input name="trigger_price" id="trigPrice" type="number" step="0.05" value="0" placeholder="price" style="max-width:120px;" />
+            <select name="trigger_dir" id="trigDir" style="max-width:170px;">
+              <option value="">Auto (by side)</option>
+              <option value="ABOVE">When LTP ≥ price</option>
+              <option value="BELOW">When LTP ≤ price</option>
+            </select>
+          </div>
+          <span class="muted" style="font-size:11px;">tracked by the algo; pushed as a MARKET order when the LTP crosses</span>
+        </div>
       </div>
 
       <div class="row">
@@ -177,9 +194,87 @@
         </div>
       </div>
 
+      <details class="adv-box">
+        <summary>⚙️ Risk &amp; profit-lock (optional)</summary>
+        <div class="row" style="margin-top:8px;">
+          <label>Max Profit (₹) <input name="max_profit_amt" type="number" step="1" value="0" />
+            <span class="muted" style="font-size:11px;">auto square-off when this trade's MTM ≥ amount</span></label>
+          <label>Max Loss (₹) <input name="max_loss_amt" type="number" step="1" value="0" />
+            <span class="muted" style="font-size:11px;">auto square-off when this trade's MTM ≤ −amount</span></label>
+        </div>
+        <div class="field" style="margin-top:8px;">
+          <div class="field-label">Step profit-lock (booked profit)</div>
+          <div class="muted" style="font-size:11px; margin-bottom:6px;">Arm at a profit level, then square off if MTM falls back to the locked amount. Add tiers, e.g. hit ₹10k → lock ₹5k.</div>
+          <div id="lockRows"></div>
+          <button type="button" class="btn btn-sm" id="addLock">+ Add tier</button>
+        </div>
+      </details>
+
       <button type="submit" class="btn btn-primary">Create Trade</button>
       <p id="formMsg" class="msg"></p>
     </form>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="tab-panel">
+    <div class="form">
+      <h3 style="margin-top:0;">Overall Settings</h3>
+
+      <div class="acct-title">Global daily limits (selected trading account)</div>
+      <p class="muted" style="font-size:12px;">When the day's total P&L on the connected trading account hits a limit, the system squares off open positions and blocks new orders for the rest of the day.</p>
+      <div class="row">
+        <label>Daily Max Profit (₹) <input id="dailyMaxProfit" type="number" step="1" value="0" /></label>
+        <label>Daily Max Loss (₹) <input id="dailyMaxLoss" type="number" step="1" value="0" /></label>
+      </div>
+
+      <div class="field" style="margin-top:10px;">
+        <div class="field-label">Account-level step profit-lock</div>
+        <div class="muted" style="font-size:12px; margin-bottom:6px;">Applies to the combined day P&L. Arm at a threshold, then secure the locked amount if it reverses. Multiple tiers allowed.</div>
+        <div id="globalLockRows"></div>
+        <button type="button" class="btn btn-sm" id="addGlobalLock">+ Add tier</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <button type="button" class="btn btn-primary" id="saveSettingsBtn">Save settings</button>
+        <span id="settingsMsg" class="msg"></span>
+      </div>
+
+      <hr style="border-color:#2a3441; margin:18px 0;" />
+
+      <div class="acct-title">Symbol preset manager</div>
+      <p class="muted" style="font-size:12px;">Save default SL / trailing / targets / max profit-loss per symbol. When you pick that symbol in New Trade, these auto-fill.</p>
+      <div class="acct-panel">
+        <div class="row">
+          <label>Symbol (underlying) <input id="prSymbol" placeholder="BANKNIFTY" /></label>
+          <label>Stop-loss (pts) <input id="prSl" type="number" step="0.05" value="0" /></label>
+          <label>Trailing SL (pts)
+            <input id="prTrail" type="number" step="0.05" value="0" />
+            <select id="prTrailMode" style="margin-top:4px;">
+              <option value="CONTINUE">Continue trailing</option>
+              <option value="ENTRY">Trail up to entry only</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label>Single Target (pts) <input id="prTarget" type="number" step="0.05" value="0" /></label>
+          <label>or Multiple Targets (cumulative pts, comma-sep) <input id="prTargets" placeholder="100, 100" /></label>
+        </div>
+        <div class="row">
+          <label>Max Profit (₹) <input id="prMaxProfit" type="number" step="1" value="0" /></label>
+          <label>Max Loss (₹) <input id="prMaxLoss" type="number" step="1" value="0" /></label>
+        </div>
+        <div class="field">
+          <div class="field-label">Profit-lock tiers</div>
+          <div id="prLockRows"></div>
+          <button type="button" class="btn btn-sm" id="prAddLock">+ Add tier</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button type="button" class="btn btn-primary" id="savePresetBtn">Save preset</button>
+          <button type="button" class="btn" id="clearPresetBtn">Clear form</button>
+          <span id="presetMsg" class="msg"></span>
+        </div>
+      </div>
+      <div id="presetList" style="margin-top:12px;"></div>
+    </div>
   </section>
 
   <!-- BROKER -->
@@ -190,6 +285,7 @@
         <label>Trading Provider <select id="tradeProvider"></select></label>
       </div>
       <p class="muted" id="providerDesc" style="font-size:12px;"></p>
+      <p id="brokerLockNote" class="msg" style="display:none; font-size:12px;">🔒 Broker switching is locked while trades are active or pending. Close all positions and cancel pending orders to change brokers.</p>
 
       <hr style="border-color:#2a3441; margin:14px 0;" />
 
@@ -330,6 +426,15 @@
         <div class="field-label">Targets — direct price &amp; quantity (add more for scale-out)</div>
         <div id="modTargetRows"></div>
         <button type="button" class="btn btn-sm" id="modAddTarget">+ Add target</button>
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <label>Max Profit (₹) <input id="modMaxProfit" type="number" step="1" value="0" /></label>
+        <label>Max Loss (₹) <input id="modMaxLoss" type="number" step="1" value="0" /></label>
+      </div>
+      <div class="field" style="margin-top:8px;">
+        <div class="field-label">Step profit-lock tiers</div>
+        <div id="modLockRows"></div>
+        <button type="button" class="btn btn-sm" id="modAddLock">+ Add tier</button>
       </div>
       <div class="row" style="margin-top:14px;">
         <button class="btn btn-primary" id="modSave">Save</button>

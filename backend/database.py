@@ -50,6 +50,13 @@ _MIGRATIONS = {
         "broker": "TEXT DEFAULT ''",
         "account_id": "INTEGER DEFAULT 0",
         "source": "TEXT DEFAULT 'ALGO'",
+        "scheduled_time": "TEXT DEFAULT ''",
+        "trigger_price": "REAL DEFAULT 0",
+        "trigger_dir": "TEXT DEFAULT ''",
+        "max_profit_amt": "REAL DEFAULT 0",
+        "max_loss_amt": "REAL DEFAULT 0",
+        "profit_lock_json": "TEXT DEFAULT ''",
+        "lock_floor": "REAL DEFAULT 0",
     },
     "logs": {
         "day": "TEXT DEFAULT ''",

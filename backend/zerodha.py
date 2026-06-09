@@ -217,7 +217,7 @@ class ZerodhaBroker:
         if not k:
             return OrderResult(ok=False, status="REJECTED",
                                error="Symbol not available / mapped on Zerodha")
-        order_type = "MARKET" if trade.entry_type == "MARKET" else "LIMIT"
+        order_type = "LIMIT" if trade.entry_type == "LIMIT" else "MARKET"
         data = {
             "tradingsymbol": k["tradingsymbol"], "exchange": k["exchange"],
             "transaction_type": side, "order_type": order_type,

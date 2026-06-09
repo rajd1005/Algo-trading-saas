@@ -83,7 +83,7 @@ class DhanBroker:
     def _place(self, trade, side: str, current_price: float, qty=None) -> OrderResult:
         """Send one order to Dhan. `side` is BUY or SELL."""
         url = f"{config.DHAN_API_BASE}/orders"
-        order_type = "MARKET" if trade.entry_type == "MARKET" else "LIMIT"
+        order_type = "LIMIT" if trade.entry_type == "LIMIT" else "MARKET"
         payload = {
             "dhanClientId": self.client_id,
             "transactionType": side,

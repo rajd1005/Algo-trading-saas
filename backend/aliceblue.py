@@ -220,7 +220,7 @@ class AliceBroker:
         if not a:
             return OrderResult(ok=False, status="REJECTED",
                                error="Symbol not available / mapped on Alice Blue")
-        prctyp = "MKT" if trade.entry_type == "MARKET" else "L"
+        prctyp = "L" if trade.entry_type == "LIMIT" else "MKT"
         order = [{
             "complexty": "regular", "discqty": "0", "exch": a["exchange"],
             "pCode": "MIS", "prctyp": prctyp,

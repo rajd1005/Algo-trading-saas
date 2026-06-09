@@ -184,6 +184,25 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .r-KILL { background: rgba(248,81,73,.3); color: #fff; }
 .r-MANUAL { background: rgba(139,152,165,.22); color: var(--muted); }
 .r-ENTRY_FAILED { background: rgba(248,81,73,.22); color: var(--red); }
+.r-MAXPROFIT { background: rgba(46,160,67,.22); color: var(--green); }
+.r-MAXLOSS { background: rgba(248,81,73,.22); color: var(--red); }
+.r-LOCK { background: rgba(210,153,34,.25); color: #e3b341; }
+.r-DAILY_PROFIT { background: rgba(46,160,67,.3); color: #fff; }
+.r-DAILY_LOSS { background: rgba(248,81,73,.3); color: #fff; }
+.r-GLOBAL_LOCK { background: rgba(210,153,34,.3); color: #fff; }
+
+/* simplified P&L total card + daily-halt banner */
+.card-total { border-color: rgba(47,129,247,.5); background: rgba(47,129,247,.08); }
+.banner.halt { background: rgba(248,81,73,.16); border-color: rgba(248,81,73,.5); color: #ff7b72; }
+
+/* advanced / risk boxes + profit-lock tier rows */
+.adv-box { background: #11171d; border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 12px; margin: 6px 0 4px; }
+.adv-box > summary { cursor: pointer; font-weight: 700; color: var(--text); }
+.lockrow { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.lockrow input { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 7px 9px; font-size: 13px; max-width: 130px; }
+.lockrow .lk-rm { width: 32px; }
 
 /* logs */
 .logs-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }

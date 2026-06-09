@@ -35,8 +35,9 @@ import aliceblue
 
 import config
 from database import init_db, get_db, SessionLocal
-from models import Trade, LogEntry, Setting, Account
-from schemas import TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn
+from models import Trade, LogEntry, Setting, Account, SymbolPreset
+from schemas import (TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn,
+                     SymbolPresetIn)
 from engine import engine, level_price
 from instruments import store as instruments
 from market_data import DhanMarketData, demo_market
@@ -117,6 +118,30 @@ def set_setting(db: Session, key: str, value: str):
 def get_setting(db: Session, key: str, default: str = "") -> str:
     row = db.get(Setting, key)
     return row.value if row else default
+
+
+def _ist_today() -> str:
+    return dt.datetime.now(dt.timezone(dt.timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+
+
+def _daily_halted(db) -> bool:
+    """True when the daily target/drawdown halt has tripped for today."""
+    return (get_setting(db, "daily_halt", "off") == "on"
+            and get_setting(db, "daily_halt_date", "") == _ist_today())
+
+
+def _tiers_json(raw_list) -> str:
+    """Clean a list of {activate, lock} dicts -> JSON (drops empty/invalid tiers)."""
+    tiers = []
+    for x in (raw_list or []):
+        try:
+            a, l = float(x.get("activate", 0)), float(x.get("lock", 0))
+        except Exception:
+            continue
+        if a > 0 and l > 0:
+            tiers.append({"activate": a, "lock": l})
+    tiers.sort(key=lambda t: t["activate"])
+    return json.dumps(tiers) if tiers else ""
 
 
 def get_trade_creds(db):
@@ -471,15 +496,21 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
     # Safety: block creating LIVE trades while the kill switch is on.
     if payload.mode == "LIVE" and get_setting(db, "kill_switch", "off") == "on":
         raise HTTPException(400, "Kill switch is ON. Turn it off to place LIVE trades.")
+    # Block new orders once the daily limit halt has tripped for today.
+    if _daily_halted(db):
+        raise HTTPException(400, "Daily limit hit — trading is halted for today. "
+                                 + (get_setting(db, "daily_halt_reason", "") or ""))
     # A real symbol must be picked (we need its Security ID to fetch the LTP).
     if not payload.security_id:
         raise HTTPException(400, "Please search and select a symbol from the list "
                                  "(so we know its Security ID for live prices).")
     data = payload.model_dump()
     raw_targets = data.pop("targets", [])
+    raw_lock = data.pop("profit_lock", [])
     targets = [{"points": float(x["points"]), "qty": int(x["qty"]), "hit": False}
                for x in raw_targets if float(x.get("points", 0)) > 0 and int(x.get("qty", 0)) > 0]
     t = Trade(**data)
+    t.profit_lock_json = _tiers_json(raw_lock)
     t.name = data.get("name") or data["symbol"]
     t.targets_json = json.dumps(targets) if targets else ""
     # Provisional SL/target prices for display before entry (final ones computed at fill).
@@ -502,12 +533,35 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
     t = db.get(Trade, trade_id)
     if not t:
         raise HTTPException(404, "Trade not found")
-    if t.status != "OPEN":
-        raise HTTPException(400, "Only open trades can be modified.")
+    if t.status not in ("OPEN", "PENDING"):
+        raise HTTPException(400, "Only open or pending trades can be modified.")
 
     old_sl, old_trail = t.stop_loss, t.trail_sl
     old_targets = t.targets_json or (str(t.target) if t.target else "")
     changes = []
+
+    # Trade-level monetary risk (edit / remove while running).
+    if payload.max_profit_amt is not None:
+        t.max_profit_amt = max(0.0, float(payload.max_profit_amt))
+        changes.append(f"Max profit: {'₹%.0f' % t.max_profit_amt if t.max_profit_amt else 'off'}")
+    if payload.max_loss_amt is not None:
+        t.max_loss_amt = max(0.0, float(payload.max_loss_amt))
+        changes.append(f"Max loss: {'₹%.0f' % t.max_loss_amt if t.max_loss_amt else 'off'}")
+    if payload.profit_lock is not None:
+        t.profit_lock_json = _tiers_json([x.model_dump() for x in payload.profit_lock])
+        t.lock_floor = 0.0       # re-arm against the new tiers
+        changes.append("Profit-lock tiers updated" if t.profit_lock_json else "Profit-lock removed")
+
+    # Pending-only edits: scheduled time / algo trigger price.
+    if t.status == "PENDING":
+        if payload.scheduled_time is not None:
+            t.scheduled_time = payload.scheduled_time.strip()
+            changes.append(f"Scheduled time: {t.scheduled_time or 'cleared'}")
+        if payload.trigger_price is not None:
+            t.trigger_price = max(0.0, float(payload.trigger_price))
+            changes.append(f"Trigger price: {t.trigger_price or 'cleared'}")
+        if payload.trigger_dir is not None:
+            t.trigger_dir = str(payload.trigger_dir).upper()
 
     if payload.trail_mode is not None:
         t.trail_mode = "ENTRY" if str(payload.trail_mode).upper() == "ENTRY" else "CONTINUE"
@@ -710,37 +764,30 @@ def _trade_env(t):
 
 
 def _metrics(trades):
-    """Compute the P&L metric set for a list of trades."""
+    """Broker-style P&L: Booked (realized) + Active (unrealized MTM) = Total.
+
+    - Booked  = realized P&L of fully-closed trades + partially-booked legs of
+      still-open trades (mirrors a broker terminal's "realized" / booked figure).
+    - Active  = unrealized MTM on the quantity still open.
+    - Total   = Booked + Active (the live MTM the broker shows).
+    """
     closed = [t for t in trades if t.status == "CLOSED"]
-    gross = sum(t.pnl for t in trades if t.status in ("OPEN", "CLOSED"))
-    open_pnl = sum(t.pnl for t in trades if t.status == "OPEN")
-    closed_pnl = sum(t.pnl for t in closed)
-    charges = 0.0
-    for t in trades:
-        legs = 1 if (t.entry_fill_price or 0) > 0 else 0
-        hits = 0
-        if t.targets_json:
-            try:
-                hits = sum(1 for x in json.loads(t.targets_json) if x.get("hit"))
-            except Exception:
-                hits = 0
-        if hits > 0:
-            legs += hits
-        elif t.status == "CLOSED":
-            legs += 1
-        charges += legs * config.CHARGE_PER_LEG
-    wins = sum(1 for t in closed if t.pnl > 0)
+    open_trades = [t for t in trades if t.status == "OPEN"]
+    booked = sum(t.pnl for t in closed) + sum(t.realized_pnl or 0 for t in open_trades)
+    active = sum((t.pnl or 0) - (t.realized_pnl or 0) for t in open_trades)
+    total = booked + active
     return {
-        "gross": round(gross, 2),
-        "charges": round(charges, 2),
-        "net": round(gross - charges, 2),
-        "open_pnl": round(open_pnl, 2),
-        "closed_pnl": round(closed_pnl, 2),
-        "win_rate": round(100 * wins / len(closed), 1) if closed else 0.0,
-        "wins": wins,
-        "closed": len(closed),
-        "open": sum(1 for t in trades if t.status == "OPEN"),
+        "booked": round(booked, 2),
+        "active": round(active, 2),
+        "total": round(total, 2),
+        # legacy aliases (kept so older callers don't break)
+        "net": round(total, 2),
+        "gross": round(total, 2),
+        "open_pnl": round(active, 2),
+        "closed_pnl": round(booked, 2),
+        "open": len(open_trades),
         "pending": sum(1 for t in trades if t.status == "PENDING"),
+        "closed": len(closed),
     }
 
 
@@ -805,6 +852,9 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
         "data_provider": data_provider, "trade_provider": trade_provider,
         "data_name": data_name, "broker_name": broker_name, "balance": balance,
         "broker_alert": broker_alert, "alert_msg": alert_msg,
+        "active_locked": active > 0,     # broker switch is locked while trades run
+        "daily_halt": _daily_halted(db),
+        "daily_halt_reason": get_setting(db, "daily_halt_reason", ""),
     }
 
 
@@ -834,11 +884,28 @@ def list_logs(date: str = "", level: str = "", page: int = 1, per_page: int = 25
 
 
 # ---------- settings (kill switch etc.) ----------
+def _num_setting(db, key):
+    try:
+        v = get_setting(db, key, "")
+        return float(v) if v not in ("", None) else 0.0
+    except Exception:
+        return 0.0
+
+
 @app.get("/api/settings")
 def get_settings(db: Session = Depends(get_db)):
+    try:
+        lock_tiers = json.loads(get_setting(db, "global_profit_lock_json", "") or "[]")
+    except Exception:
+        lock_tiers = []
     return {
         "kill_switch": get_setting(db, "kill_switch", "off"),
         "default_mode": get_setting(db, "default_mode", "TEST"),
+        "daily_max_profit": _num_setting(db, "daily_max_profit"),
+        "daily_max_loss": _num_setting(db, "daily_max_loss"),
+        "global_profit_lock": lock_tiers,
+        "daily_halt": _daily_halted(db),
+        "daily_halt_reason": get_setting(db, "daily_halt_reason", ""),
     }
 
 
@@ -851,7 +918,80 @@ def update_settings(payload: SettingsIn, db: Session = Depends(get_db)):
         db.commit()
     if payload.default_mode in ("TEST", "LIVE"):
         set_setting(db, "default_mode", payload.default_mode)
+    if payload.daily_max_profit is not None:
+        set_setting(db, "daily_max_profit", str(max(0.0, float(payload.daily_max_profit))))
+    if payload.daily_max_loss is not None:
+        set_setting(db, "daily_max_loss", str(max(0.0, float(payload.daily_max_loss))))
+    if payload.global_profit_lock is not None:
+        set_setting(db, "global_profit_lock_json",
+                    _tiers_json([x.model_dump() for x in payload.global_profit_lock]))
     return get_settings(db)
+
+
+@app.post("/api/settings/reset_halt")
+def reset_daily_halt(db: Session = Depends(get_db)):
+    """Manually clear the daily limit halt (e.g. to resume trading deliberately)."""
+    set_setting(db, "daily_halt", "off")
+    set_setting(db, "daily_halt_date", "")
+    set_setting(db, "daily_halt_reason", "")
+    set_setting(db, "global_lock_floor", "0")
+    db.add(LogEntry(message="Daily limit halt manually cleared.", level="WARN"))
+    db.commit()
+    return get_settings(db)
+
+
+# ---------- symbol presets ----------
+def _preset_dict(p):
+    try:
+        targets = json.loads(p.targets_json or "[]")
+    except Exception:
+        targets = []
+    try:
+        lock = json.loads(p.profit_lock_json or "[]")
+    except Exception:
+        lock = []
+    return {
+        "id": p.id, "symbol": p.symbol, "sl_points": p.sl_points, "trail_sl": p.trail_sl,
+        "trail_mode": p.trail_mode, "target_points": p.target_points, "targets": targets,
+        "max_profit_amt": p.max_profit_amt, "max_loss_amt": p.max_loss_amt, "profit_lock": lock,
+    }
+
+
+@app.get("/api/presets")
+def list_presets(db: Session = Depends(get_db)):
+    return [_preset_dict(p) for p in db.query(SymbolPreset).order_by(SymbolPreset.symbol).all()]
+
+
+@app.post("/api/presets")
+def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
+    sym = (payload.symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(400, "Enter a symbol (underlying) for the preset.")
+    p = db.query(SymbolPreset).filter(SymbolPreset.symbol == sym).first()
+    if p is None:
+        p = SymbolPreset(symbol=sym)
+        db.add(p)
+    p.sl_points = max(0.0, float(payload.sl_points))
+    p.trail_sl = max(0.0, float(payload.trail_sl))
+    p.trail_mode = "ENTRY" if str(payload.trail_mode).upper() == "ENTRY" else "CONTINUE"
+    p.target_points = max(0.0, float(payload.target_points))
+    p.targets_json = json.dumps([float(x) for x in payload.targets if float(x) > 0]) \
+        if payload.targets else ""
+    p.max_profit_amt = max(0.0, float(payload.max_profit_amt))
+    p.max_loss_amt = max(0.0, float(payload.max_loss_amt))
+    p.profit_lock_json = _tiers_json([x.model_dump() for x in payload.profit_lock])
+    db.commit()
+    db.refresh(p)
+    return _preset_dict(p)
+
+
+@app.delete("/api/presets/{preset_id}")
+def delete_preset(preset_id: int, db: Session = Depends(get_db)):
+    p = db.get(SymbolPreset, preset_id)
+    if p:
+        db.delete(p)
+        db.commit()
+    return {"ok": True}
 
 
 # ---------- broker info ----------

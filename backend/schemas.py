@@ -10,6 +10,11 @@ class TargetIn(BaseModel):
     qty: int = 0            # how much quantity to exit at this target
 
 
+class LockTierIn(BaseModel):
+    activate: float = 0.0   # MTM (₹) at which the lock arms
+    lock: float = 0.0       # guaranteed minimum profit (₹)
+
+
 class TradeCreate(BaseModel):
     symbol: str
     security_id: str = ""
@@ -18,13 +23,19 @@ class TradeCreate(BaseModel):
     side: str = "BUY"
     quantity: int = 1
     lot_size: int = 1
-    entry_type: str = "MARKET"
+    entry_type: str = "MARKET"        # MARKET / LIMIT / SCHEDULED / TRIGGER
     entry_price: float = 0.0
+    scheduled_time: str = ""          # "HH:MM:SS" IST (entry_type SCHEDULED)
+    trigger_price: float = 0.0        # algo-tracked synthetic limit (entry_type TRIGGER)
+    trigger_dir: str = ""             # ABOVE / BELOW
     sl_points: float = 0.0
     target_points: float = 0.0
     trail_sl: float = 0.0             # trailing stop distance in points (0 = off)
     trail_mode: str = "CONTINUE"      # CONTINUE or ENTRY (trail only up to breakeven)
     targets: List[TargetIn] = []      # optional scale-out targets
+    max_profit_amt: float = 0.0       # trade-level square-off on MTM (₹)
+    max_loss_amt: float = 0.0
+    profit_lock: List[LockTierIn] = []   # trade-level step profit-lock tiers
     mode: str = "TEST"
     name: str = ""
 
@@ -41,6 +52,9 @@ class TradeOut(BaseModel):
     lot_size: int
     entry_type: str
     entry_price: float
+    scheduled_time: str
+    trigger_price: float
+    trigger_dir: str
     stop_loss: float
     target: float
     sl_points: float
@@ -51,6 +65,10 @@ class TradeOut(BaseModel):
     targets_json: str
     exited_qty: int
     realized_pnl: float
+    max_profit_amt: float
+    max_loss_amt: float
+    profit_lock_json: str
+    lock_floor: float
     mode: str
     status: str
     entry_fill_price: float
@@ -72,11 +90,18 @@ class ModifyTargetIn(BaseModel):
 
 
 class ModifyIn(BaseModel):
-    """Edit stop-loss / targets on a running trade, using DIRECT prices."""
+    """Edit stop-loss / targets / risk on a running or pending trade."""
     stop_loss: Optional[float] = None              # absolute price
     trail_sl: Optional[float] = None               # trailing distance in points (0 = off)
     trail_mode: Optional[str] = None               # CONTINUE or ENTRY
     targets: Optional[List[ModifyTargetIn]] = None  # absolute-price scale-out targets
+    max_profit_amt: Optional[float] = None         # trade-level MTM square-off (₹); 0 = off
+    max_loss_amt: Optional[float] = None
+    profit_lock: Optional[List[LockTierIn]] = None  # replace the trade's lock tiers
+    # Pending-only edits:
+    scheduled_time: Optional[str] = None           # "HH:MM:SS" IST
+    trigger_price: Optional[float] = None
+    trigger_dir: Optional[str] = None
 
 
 class BrokerConfigIn(BaseModel):
@@ -87,3 +112,18 @@ class BrokerConfigIn(BaseModel):
 class SettingsIn(BaseModel):
     kill_switch: Optional[bool] = None
     default_mode: Optional[str] = None
+    daily_max_profit: Optional[float] = None       # account/day square-off & halt (₹); 0 = off
+    daily_max_loss: Optional[float] = None
+    global_profit_lock: Optional[List[LockTierIn]] = None   # account-level step lock tiers
+
+
+class SymbolPresetIn(BaseModel):
+    symbol: str
+    sl_points: float = 0.0
+    trail_sl: float = 0.0
+    trail_mode: str = "CONTINUE"
+    target_points: float = 0.0
+    targets: List[float] = []        # multi-target points (cumulative), e.g. [100, 100]
+    max_profit_amt: float = 0.0
+    max_loss_amt: float = 0.0
+    profit_lock: List[LockTierIn] = []

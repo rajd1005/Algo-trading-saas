@@ -248,7 +248,7 @@ class AngelBroker:
         if not a:
             return OrderResult(ok=False, status="REJECTED",
                                error="Symbol not available / mapped on Angel One")
-        order_type = "MARKET" if trade.entry_type == "MARKET" else "LIMIT"
+        order_type = "LIMIT" if trade.entry_type == "LIMIT" else "MARKET"
         payload = {
             "variety": "NORMAL", "tradingsymbol": a["tradingsymbol"],
             "symboltoken": a["token"], "transactiontype": side,
