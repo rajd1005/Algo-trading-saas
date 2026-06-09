@@ -651,8 +651,9 @@ def instruments_status():
 
 @app.post("/api/instruments/refresh")
 def instruments_refresh():
-    instruments.refresh()
-    return {"ok": True, "message": "Refreshing symbol list in the background…"}
+    instruments.refresh()        # Dhan master (the universal picker base)
+    angel.mapper.load_async()    # Angel master (for translation)
+    return {"ok": True, "message": "Refreshing symbol lists in the background…"}
 
 
 # ---------- summary ----------
@@ -714,7 +715,9 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
 
     data_provider = get_setting(db, "data_provider", "DEMO")
     trade_provider = get_setting(db, "trade_provider", "DEMO")
+    data_acc = _account_for_provider(db, data_provider)
     trade_acc = _account_for_provider(db, trade_provider)
+    data_name = "Demo" if data_acc is None else (data_acc.label or _label(data_acc.broker, data_acc.client_id))
     broker_name = "Demo" if trade_acc is None else (trade_acc.label or _label(trade_acc.broker, trade_acc.client_id))
     trade_connected = trade_acc is not None and bool(trade_acc.connected)
     # Show the balance ONLY for the connected, currently-selected trading account.
@@ -745,7 +748,7 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
         "angel_map": angel.mapper.status(),
         "demo_direction": demo_market.direction,
         "data_provider": data_provider, "trade_provider": trade_provider,
-        "broker_name": broker_name, "balance": balance,
+        "data_name": data_name, "broker_name": broker_name, "balance": balance,
         "broker_alert": broker_alert, "alert_msg": alert_msg,
     }
 

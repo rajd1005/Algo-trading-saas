@@ -6,6 +6,7 @@ so mixing brokers (e.g. Dhan data + Angel execution) works seamlessly.
 """
 import datetime as dt
 import threading
+import time
 
 import requests
 
@@ -176,31 +177,42 @@ class AngelMarketData:
         self.last_error = ""
 
     def get_ltp_batch(self, by_segment):
-        """Input Dhan-style {NSE_FNO:[ids]}; output {(dhan_seg, id): ltp}."""
+        """Input Dhan-style {NSE_FNO:[ids]}; output {(dhan_seg, id): ltp}.
+        Angel's quote API allows ~50 tokens per call, so we chunk."""
         from instruments import store
-        # translate each dhan instrument -> angel (exchange, token), remember mapping
-        ang_tokens, back = {}, {}
+        pairs, back = [], {}      # pairs = list of (angel_exchange, token)
         for seg, ids in by_segment.items():
             for sid in ids:
                 a = mapper.translate(sid, seg, store.get_meta(sid))
                 if a:
-                    ang_tokens.setdefault(a["exchange"], []).append(a["token"])
+                    pairs.append((a["exchange"], a["token"]))
                     back[(a["exchange"], a["token"])] = (seg, str(sid))
-        if not ang_tokens:
+        if not pairs:
+            self.last_error = "No symbols could be mapped to Angel One."
             return {}
         url = f"{API_BASE}/rest/secure/angelbroking/market/v1/quote"
-        out = {}
-        try:
-            r = requests.post(url, json={"mode": "LTP", "exchangeTokens": ang_tokens},
-                              headers=_auth_headers(self.api_key, self.jwt), timeout=6)
-            d = r.json()
-            for item in d.get("data", {}).get("fetched", []):
-                key = (item.get("exchange"), str(item.get("symbolToken")))
-                if key in back:
-                    out[back[key]] = float(item.get("ltp") or 0)
-            self.last_error = "" if out else (d.get("message") or "")
-        except Exception as e:
-            self.last_error = str(e)
+        out, err = {}, ""
+        pairs = pairs[:250]      # cap to respect Angel rate limits on big chains
+        for i in range(0, len(pairs), 50):
+            if i:
+                time.sleep(0.2)  # gentle throttle between chunks
+            chunk = pairs[i:i + 50]
+            ex_tokens = {}
+            for exch, tok in chunk:
+                ex_tokens.setdefault(exch, []).append(tok)
+            try:
+                r = requests.post(url, json={"mode": "LTP", "exchangeTokens": ex_tokens},
+                                  headers=_auth_headers(self.api_key, self.jwt), timeout=6)
+                d = r.json()
+                for item in d.get("data", {}).get("fetched", []):
+                    key = (item.get("exchange"), str(item.get("symbolToken")))
+                    if key in back:
+                        out[back[key]] = float(item.get("ltp") or 0)
+                if not d.get("status", True):
+                    err = d.get("message") or err
+            except Exception as e:
+                err = str(e)
+        self.last_error = "" if out else err
         return out
 
     def get_ltp(self, exchange_segment, security_id):

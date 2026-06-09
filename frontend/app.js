@@ -120,10 +120,12 @@ async function refreshSummary() {
     banner.style.display = "none";
   }
   // broker name + balance (auto-updates every 2s with the summary)
+  const ds = document.getElementById("dataSource");
+  if (ds) ds.innerHTML = s.data_name ? `📡 Data: <b>${s.data_name}</b>` : "";
   const bs = document.getElementById("brokerStatus");
   if (bs) {
     const bal = s.balance != null ? " · Avail ₹" + Number(s.balance).toLocaleString("en-IN") : "";
-    bs.innerHTML = s.broker_name ? `<b>${s.broker_name}</b>${bal}` : "";
+    bs.innerHTML = s.broker_name ? `🧾 Trade: <b>${s.broker_name}</b>${bal}` : "";
     // micro-interaction: pulse when the live balance changes
     if (_lastBalance !== undefined && _lastBalance !== s.balance) {
       bs.classList.remove("pulse"); void bs.offsetWidth; bs.classList.add("pulse");
@@ -137,9 +139,11 @@ async function refreshSummary() {
     else ba.style.display = "none";
   }
 
-  // Angel instrument-master still syncing while Angel is an active provider?
+  // broker of the active data / trade providers (from the accounts list)
+  const accBroker = (v) => { const a = _accounts.find((x) => String(x.id) === String(v)); return a ? a.broker : "DEMO"; };
+  const dataBroker = accBroker(s.data_provider), tradeBroker = accBroker(s.trade_provider);
   window._angelSyncing = !!(s.angel_map && s.angel_map.loading) &&
-    (s.data_provider === "ANGEL" || s.trade_provider === "ANGEL");
+    (dataBroker === "ANGEL" || tradeBroker === "ANGEL");
 
   // demo direction state
   const dir = s.demo_direction || 0;
@@ -150,12 +154,19 @@ async function refreshSummary() {
     b.classList.toggle("active", on);
   });
 
-  // symbol list state (Broker tab)
+  // symbol list state (Broker tab) — reflect the active data provider
+  const am = s.angel_map || {};
   const ss = document.getElementById("symbolsState");
   if (ss) {
-    if (inst.loading) { ss.textContent = "Downloading…"; ss.className = "pill pill-off"; }
-    else if (inst.underlyings > 0) { ss.textContent = inst.underlyings.toLocaleString("en-IN") + " underlyings loaded"; ss.className = "pill pill-ok"; }
-    else { ss.textContent = "Not loaded"; ss.className = "pill pill-off"; }
+    if (dataBroker === "ANGEL") {
+      if (am.loading) { ss.textContent = "Downloading Angel…"; ss.className = "pill pill-off"; }
+      else if (am.count > 0) { ss.textContent = am.count.toLocaleString("en-IN") + " Angel instruments"; ss.className = "pill pill-ok"; }
+      else { ss.textContent = "Not loaded"; ss.className = "pill pill-off"; }
+    } else {
+      if (inst.loading) { ss.textContent = "Downloading…"; ss.className = "pill pill-off"; }
+      else if (inst.underlyings > 0) { ss.textContent = inst.underlyings.toLocaleString("en-IN") + " underlyings loaded"; ss.className = "pill pill-ok"; }
+      else { ss.textContent = "Not loaded"; ss.className = "pill pill-off"; }
+    }
   }
 }
 
