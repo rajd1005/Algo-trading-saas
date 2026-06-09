@@ -118,7 +118,10 @@
       <div id="futWrap" class="fut-wrap" style="display:none;"></div>
 
       <div id="selectedSymbol" class="selected-symbol">No symbol selected yet.</div>
-      <div><button type="button" class="btn btn-sm" id="addWatchBtn" style="margin-top:6px;">★ Add to watchlist</button></div>
+      <div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button type="button" class="btn btn-sm" id="addSymbolBtn">★ Add symbol</button>
+        <button type="button" class="btn btn-sm" id="addWatchBtn">★ Add this contract</button>
+      </div>
       <!-- these get filled automatically when you pick a contract -->
       <input type="hidden" name="symbol" /><input type="hidden" name="security_id" />
       <input type="hidden" name="exchange_segment" /><input type="hidden" name="instrument_type" />

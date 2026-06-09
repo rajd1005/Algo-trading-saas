@@ -1267,8 +1267,13 @@ function renderWatchlist(items) {
   const empty = document.getElementById("wlEmpty");
   if (!_watchlist.length) { box.innerHTML = ""; empty.style.display = ""; return; }
   empty.style.display = "none";
+  const tagOf = (w) => {
+    if (w.security_id) return "";   // specific contract — name already says it all
+    const t = { OPTION: "chain", FUTURES: "fut", EQUITY: "eq" }[w.instrument_type] || "";
+    return t ? ` <span class="wl-tag">${t}</span>` : "";
+  };
   box.innerHTML = _watchlist.map((w) =>
-    `<span class="wl-chip" data-wl="${w.id}" title="${w.exchange_segment} · id ${w.security_id}">${w.symbol}<span class="wl-x" data-wlx="${w.id}">×</span></span>`).join("");
+    `<span class="wl-chip" data-wl="${w.id}" title="${w.security_id ? w.exchange_segment + ' · id ' + w.security_id : 'opens the ' + w.instrument_type.toLowerCase() + ' picker'}">${w.symbol}${tagOf(w)}<span class="wl-x" data-wlx="${w.id}">×</span></span>`).join("");
   box.querySelectorAll(".wl-chip").forEach((el) => {
     el.onclick = (e) => { if (e.target.classList.contains("wl-x")) return;
       const w = _watchlist.find((x) => String(x.id) === el.dataset.wl); if (w) wlLoad(w); };
@@ -1283,15 +1288,37 @@ function wlLoad(item) {
   currentSeg = seg;
   document.querySelectorAll("[data-seg]").forEach((x) => x.classList.toggle("active", x.dataset.seg === seg));
   pickerHint.textContent = HINTS[seg];
-  currentUnderlying = item.underlying || null;
-  ulSearch.value = item.underlying || item.symbol;
-  pickContract({ symbol: item.symbol, security_id: item.security_id,
-    exchange_segment: item.exchange_segment, instrument_type: item.instrument_type, lot_size: item.lot_size });
   document.querySelector('.tab[data-tab="new"]').click();   // ensure the New Trade tab is open
+  if (item.security_id) {                 // a specific contract -> load it directly
+    currentUnderlying = item.underlying || null;
+    ulSearch.value = item.underlying || item.symbol;
+    pickContract({ symbol: item.symbol, security_id: item.security_id,
+      exchange_segment: item.exchange_segment, instrument_type: item.instrument_type, lot_size: item.lot_size });
+  } else {                                // a whole symbol -> open its chain / futures list
+    selectUnderlying(item.underlying || item.symbol);
+  }
 }
+document.getElementById("addSymbolBtn").onclick = async () => {
+  const msg = document.getElementById("formMsg");
+  const sym = (currentSeg === "EQUITY") ? form.symbol.value : currentUnderlying;
+  if (!sym) { msg.textContent = "❌ Search and select a symbol first, then add it."; msg.className = "msg neg"; return; }
+  try {
+    // Equity has no chain, so a "symbol" there is just the stock contract itself.
+    if (currentSeg === "EQUITY") {
+      await api.post("/api/watchlist", { symbol: form.symbol.value, security_id: form.security_id.value,
+        exchange_segment: form.exchange_segment.value, instrument_type: form.instrument_type.value,
+        underlying: form.symbol.value, lot_size: currentLotSize });
+    } else {
+      await api.post("/api/watchlist", { symbol: sym, security_id: "", exchange_segment: "",
+        instrument_type: currentSeg, underlying: sym, lot_size: 1 });
+    }
+    msg.textContent = `⭐ Added ${sym} to watchlist.`; msg.className = "msg pos";
+    await loadWatchlist();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
 document.getElementById("addWatchBtn").onclick = async () => {
   const msg = document.getElementById("formMsg");
-  if (!form.security_id.value) { msg.textContent = "❌ Pick a symbol first, then add it."; msg.className = "msg neg"; return; }
+  if (!form.security_id.value) { msg.textContent = "❌ Pick a strike / contract first, then add it."; msg.className = "msg neg"; return; }
   try {
     await api.post("/api/watchlist", {
       symbol: form.symbol.value, security_id: form.security_id.value,

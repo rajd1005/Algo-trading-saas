@@ -1022,17 +1022,25 @@ def list_watchlist(db: Session = Depends(get_db)):
 
 @app.post("/api/watchlist")
 def add_watchlist(payload: WatchlistIn, db: Session = Depends(get_db)):
-    if not payload.security_id:
+    # Two kinds of entry: a specific contract (has security_id) or a whole
+    # underlying / symbol (no security_id — loads the chain/list on tap).
+    if not payload.security_id and not (payload.underlying or payload.symbol):
         raise HTTPException(400, "Select a symbol first, then add it to the watchlist.")
-    # de-dupe on the same instrument
-    exists = (db.query(Watchlist)
-              .filter(Watchlist.security_id == payload.security_id,
-                      Watchlist.exchange_segment == payload.exchange_segment).first())
+    if payload.security_id:
+        exists = (db.query(Watchlist)
+                  .filter(Watchlist.security_id == payload.security_id,
+                          Watchlist.exchange_segment == payload.exchange_segment).first())
+    else:
+        exists = (db.query(Watchlist)
+                  .filter(Watchlist.security_id == "",
+                          Watchlist.underlying == (payload.underlying or payload.symbol),
+                          Watchlist.instrument_type == payload.instrument_type).first())
     if exists:
         return _watch_dict(exists)
     w = Watchlist(symbol=payload.symbol, security_id=payload.security_id,
                   exchange_segment=payload.exchange_segment,
-                  instrument_type=payload.instrument_type, underlying=payload.underlying,
+                  instrument_type=payload.instrument_type,
+                  underlying=(payload.underlying or payload.symbol),
                   lot_size=max(1, int(payload.lot_size or 1)))
     db.add(w)
     db.commit()
