@@ -1589,11 +1589,11 @@ let _auAccts = [];
 // show the right credential fields for the chosen broker
 function auApplyBrokerFields() {
   const b = document.getElementById("auBroker").value;
-  const show = (sel, on) => document.querySelectorAll(sel).forEach((e) => e.style.display = on ? "" : "none");
-  show(".au-dhan", b === "DHAN");
-  show(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE");
-  show(".au-zer", b === "ZERODHA");
-  show(".au-ang", b === "ANGEL");
+  const toggle = (sel, on) => document.querySelectorAll(sel).forEach((e) => e.classList.toggle("show", on));
+  toggle(".au-dhan", b === "DHAN");
+  toggle(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE");
+  toggle(".au-zer", b === "ZERODHA");
+  toggle(".au-ang", b === "ANGEL");
 }
 document.getElementById("auBroker").onchange = auApplyBrokerFields;
 function auResetForm() {

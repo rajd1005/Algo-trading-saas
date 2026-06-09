@@ -236,10 +236,11 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .rte-edit h3 { color: var(--accent); margin: 8px 0 4px; }
 
 /* admin user inspector (big) */
-.modal-xl { max-width: 1080px; width: 96vw; max-height: 92vh; overflow: auto; }
+.modal.modal-xl { max-width: 1080px; width: 96vw; max-height: 92vh; overflow: auto; }
 .au-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; margin-top: 6px; }
 @media (max-width: 820px) { .au-grid { grid-template-columns: 1fr; } }
 .au-f { display: none; }
+.au-f.show { display: flex; flex-direction: column; gap: 5px; }
 
 /* toast notifications */
 .toast-host { position: fixed; top: 16px; right: 16px; z-index: 9999;
