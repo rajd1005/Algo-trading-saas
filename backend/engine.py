@@ -48,6 +48,7 @@ class TradingEngine:
         self._rest_cooldown = 0.0      # back off REST until this time (after a 429)
         self._demo = False             # DEMO mode (simulated prices + fake broker)
         self._demo_trade = True        # is the trading provider DEMO (paper)?
+        self._trade_account_id = 0
         self._warned_no_broker = False
         self._last_feed_err = ""       # de-dupe feed errors in the log
         self._last_rest_err = ""
@@ -181,7 +182,9 @@ class TradingEngine:
             active = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
 
             data_provider, trade_provider = self._providers(db)
-            self._demo_trade = self._provider_account(db, trade_provider) is None
+            _trade_acc = self._provider_account(db, trade_provider)
+            self._demo_trade = _trade_acc is None
+            self._trade_account_id = _trade_acc.id if _trade_acc else 0
             instruments = list({(t.exchange_segment, str(t.security_id))
                                 for t in active if t.security_id})
 
@@ -355,6 +358,7 @@ class TradingEngine:
         t.status = "OPEN"
         t.entry_fill_price = fill_price
         t.broker = broker.name
+        t.account_id = self._trade_account_id
         self._apply_levels(t)
         self._log(db, f"ENTRY {t.side} {t.symbol} x{t.quantity} @ {fill_price} "
                       f"[{t.mode}/{broker.name}]", "INFO", t.id)

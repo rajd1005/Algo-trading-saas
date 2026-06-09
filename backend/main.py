@@ -178,6 +178,16 @@ def _account_for_provider(db, provider_value):
         return None
 
 
+def _account_id_for_broker(db, broker):
+    """Pick the account id to attribute an external order to (prefer the active
+    trading account of that broker, else the first such account)."""
+    tp = _account_for_provider(db, get_setting(db, "trade_provider", "DEMO"))
+    if tp and tp.broker == broker:
+        return tp.id
+    a = db.query(Account).filter(Account.broker == broker).first()
+    return a.id if a else 0
+
+
 def _broker_from_account(a):
     if a is None:
         return None
@@ -322,7 +332,7 @@ def _broker_monitor_loop():
                 else:
                     set_setting(db, "broker_health", "error")
                 try:
-                    _sync_external_orders(db, b.get_orders())
+                    _sync_external_orders(db, b.get_orders(), acc.broker, acc.id)
                 except Exception:
                     pass
             db.commit()
@@ -339,7 +349,7 @@ _EXT_STATUS_MAP = {
 }
 
 
-def _sync_external_orders(db, orders):
+def _sync_external_orders(db, orders, broker="DHAN", account_id=0):
     """Mirror the broker's ENTIRE order book into our system — every order placed
     on the broker terminal (filled, pending, rejected, cancelled) shows up here,
     and its status is kept up to date."""
@@ -385,7 +395,7 @@ def _sync_external_orders(db, orders):
         t = Trade(symbol=sym, name=sym, security_id=sec, exchange_segment=seg, instrument_type=itype,
                   side=side, quantity=qty, lot_size=1, mode="LIVE", status=mapped,
                   entry_fill_price=(avg or 0) if mapped == "OPEN" else 0, entry_price=price,
-                  broker="DHAN", source="EXTERNAL", broker_order_id=oid,
+                  broker=broker, account_id=account_id, source="EXTERNAL", broker_order_id=oid,
                   exit_reason="REJECTED" if mapped == "REJECTED" else "")
         db.add(t)
         db.add(LogEntry(message=f"Synced external order: {sym} {side} x{qty} [{raw}]"
@@ -703,14 +713,23 @@ def _metrics(trades):
 @app.get("/api/summary")
 def summary(broker: str = "ALL", db: Session = Depends(get_db)):
     trades = db.query(Trade).all()
-    buckets = {"PAPER": [], "DHAN": [], "ANGEL": []}
+    # Group P&L per ACCOUNT (0 = Demo/paper) — accounts are not merged by broker.
+    groups = {}
     for t in trades:
-        buckets.setdefault(_trade_env(t), []).append(t)
-    flt = (broker or "ALL").upper()
-    selected = buckets.get(flt, trades) if flt in buckets else trades
-
+        groups.setdefault(t.account_id or 0, []).append(t)
+    flt = (broker or "ALL")
+    if flt == "ALL":
+        selected = trades
+    else:
+        try:
+            selected = groups.get(int(flt), [])
+        except Exception:
+            selected = trades
     pnl = _metrics(selected)
-    breakdown = {k: _metrics(v)["net"] for k, v in buckets.items()}
+    breakdown = [{"key": "0", "label": "Demo / Paper", "net": _metrics(groups.get(0, []))["net"]}]
+    for a in db.query(Account).order_by(Account.id).all():
+        breakdown.append({"key": str(a.id), "label": a.label or _label(a.broker, a.client_id),
+                          "net": _metrics(groups.get(a.id, []))["net"]})
     active = sum(1 for t in trades if t.status in ("OPEN", "PENDING"))
 
     data_provider = get_setting(db, "data_provider", "DEMO")
@@ -878,7 +897,7 @@ async def dhan_postback(request: Request, db: Session = Depends(get_db)):
     try:
         payload = await request.json()
         orders = payload if isinstance(payload, list) else [payload]
-        _sync_external_orders(db, orders)
+        _sync_external_orders(db, orders, "DHAN", _account_id_for_broker(db, "DHAN"))
         db.commit()
     except Exception as e:
         db.add(LogEntry(message=f"Postback error: {e}", level="ERROR"))
@@ -962,7 +981,8 @@ async def angel_postback(request: Request, db: Session = Depends(get_db)):
     try:
         payload = await request.json()
         orders = payload if isinstance(payload, list) else [payload]
-        _sync_external_orders(db, [angel.normalize_order(o) for o in orders])
+        _sync_external_orders(db, [angel.normalize_order(o) for o in orders],
+                              "ANGEL", _account_id_for_broker(db, "ANGEL"))
         db.commit()
     except Exception as e:
         db.add(LogEntry(message=f"Angel postback error: {e}", level="ERROR"))

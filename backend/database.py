@@ -48,6 +48,7 @@ _MIGRATIONS = {
         "trail_mode": "TEXT DEFAULT 'CONTINUE'",
         "hwm": "REAL DEFAULT 0",
         "broker": "TEXT DEFAULT ''",
+        "account_id": "INTEGER DEFAULT 0",
         "source": "TEXT DEFAULT 'ALGO'",
     },
     "logs": {

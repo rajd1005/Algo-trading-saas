@@ -72,7 +72,8 @@ class Trade(Base):
     exit_reason = Column(String, default="")       # TARGET / STOPLOSS / MANUAL / KILL
 
     broker_order_id = Column(String, default="")   # id returned by broker (LIVE)
-    broker = Column(String, default="")             # which broker executed it (PAPER/DHAN)
+    broker = Column(String, default="")             # which broker executed it (PAPER/DHAN/ANGEL)
+    account_id = Column(Integer, default=0)         # which broker account (0 = Demo/paper)
     source = Column(String, default="ALGO")         # ALGO or EXTERNAL (synced from broker)
 
     created_at = Column(DateTime, default=_now)

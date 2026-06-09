@@ -88,11 +88,11 @@ async function refreshSummary() {
   if (w) { w.textContent = (p.win_rate || 0) + "%  (" + (p.wins || 0) + "/" + (p.closed || 0) + ")"; }
   setCard("sumOpen", p.open_pnl || 0);
   setCard("sumClosed", p.closed_pnl || 0);
-  // breakdown (only meaningful in the All Brokers view)
+  // per-account breakdown (only in the All view)
   const bd = document.getElementById("pnlBreakdown");
-  const b = s.pnl_breakdown || {};
+  const list = s.pnl_breakdown || [];
   bd.innerHTML = (s.pnl_filter === "ALL")
-    ? `Demo: <span class="${cls(b.PAPER)}">${money(b.PAPER || 0)}</span> &nbsp;·&nbsp; Dhan: <span class="${cls(b.DHAN)}">${money(b.DHAN || 0)}</span>`
+    ? list.map((x) => `${x.label}: <span class="${cls(x.net)}">${money(x.net)}</span>`).join(" &nbsp;·&nbsp; ")
     : "";
   // kill switch state
   const on = s.kill_switch === "on";
@@ -758,11 +758,22 @@ async function loginAccount(id, broker) {
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 }
 
+function buildPnlFilter() {
+  const sel = document.getElementById("pnlFilter");
+  const cur = pnlFilter;
+  let html = `<option value="ALL">All Accounts</option><option value="0">Demo / Paper</option>`;
+  html += _accounts.map((a) => `<option value="${a.id}">${a.label}</option>`).join("");
+  sel.innerHTML = html;
+  sel.value = [...sel.options].some((o) => o.value === cur) ? cur : "ALL";
+  pnlFilter = sel.value;
+}
+
 async function refreshBroker() {
   const b = await api.get("/api/broker");
   _accounts = b.accounts || [];
   fillProviderSelect("dataProvider", b.data_provider || "DEMO");
   fillProviderSelect("tradeProvider", b.trade_provider || "DEMO");
+  buildPnlFilter();
   renderAccounts();
   document.getElementById("demoControls").style.display = (b.data_provider === "DEMO") ? "flex" : "none";
   document.getElementById("providerDesc").textContent =
