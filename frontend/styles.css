@@ -36,6 +36,7 @@ header h1 { font-size: 20px; margin: 0; }
 .tab { background: none; border: none; color: var(--muted); padding: 12px 16px;
   cursor: pointer; font-size: 14px; border-bottom: 2px solid transparent; }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab-ico { width: 20px; height: 20px; display: none; }   /* shown only in mobile bottom nav */
 
 .tab-panel { display: none; padding: 22px; }
 .tab-panel.active { display: block; }
@@ -320,6 +321,56 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .link { color: var(--accent); cursor: pointer; text-decoration: underline; }
 
 /* ============================================================
+   KITE-STYLE ORDER / POSITION CARDS  (mobile-first trade management)
+   ============================================================ */
+.order-filters { display: flex; gap: 8px; margin-bottom: 14px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.order-filters::-webkit-scrollbar { display: none; }
+.chip { flex: 0 0 auto; background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+  border-radius: 999px; padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.chip.active { background: rgba(47,129,247,.14); border-color: var(--accent); color: var(--accent); }
+.chip-n { font-size: 11px; opacity: .8; }
+
+.order-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.order-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  border-left: 3px solid var(--line); transition: border-color .15s; }
+.order-card.oc-OPEN { border-left-color: var(--accent); }
+.order-card.oc-PENDING { border-left-color: var(--yellow); }
+.order-card.oc-CLOSED { border-left-color: var(--muted); }
+.order-card.oc-REJECTED, .order-card.oc-CANCELLED { border-left-color: var(--red); }
+
+.oc-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.oc-sym { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.oc-tag { width: 22px; height: 22px; flex: 0 0 auto; border-radius: 5px; font-size: 12px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center; color: #fff; }
+.oc-tag.tag-BUY { background: var(--green); }
+.oc-tag.tag-SELL { background: var(--red); }
+.oc-name { font-weight: 700; font-size: 15px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mode-chip { flex: 0 0 auto; font-size: 9px; font-weight: 700; letter-spacing: .04em; padding: 2px 6px; border-radius: 4px; }
+.mode-chip.m-TEST { background: rgba(46,160,67,.16); color: var(--green); }
+.mode-chip.m-LIVE { background: rgba(248,81,73,.18); color: var(--red); }
+.oc-status { flex: 0 0 auto; font-size: 10px; font-weight: 700; letter-spacing: .03em; padding: 3px 8px; border-radius: 999px; }
+.st-OPEN { background: rgba(47,129,247,.16); color: var(--accent); }
+.st-PENDING { background: rgba(210,153,34,.18); color: var(--yellow); }
+.st-CLOSED { background: rgba(139,152,165,.16); color: var(--muted); }
+.st-REJECTED, .st-CANCELLED { background: rgba(248,81,73,.18); color: var(--red); }
+
+.oc-mid { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
+.oc-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12.5px; color: var(--muted); }
+.oc-meta b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.oc-pnl { font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.oc-arr { font-size: 11px; }
+.oc-sub { font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.oc-sub .dot { opacity: .5; }
+.oc-actions { display: flex; gap: 8px; }
+.oc-actions:empty { display: none; }
+.oc-btn { flex: 1; min-height: 38px; font-weight: 600; }
+.oc-btn-exit { border-color: var(--red); color: var(--red); }
+.oc-btn-exit:hover { background: var(--red); color: #fff; border-color: var(--red); }
+.order-empty { text-align: center; color: var(--muted); padding: 40px 16px; font-size: 14px;
+  border: 1px dashed var(--line); border-radius: 12px; line-height: 1.9; }
+
+/* ============================================================
    MOBILE-FIRST RESPONSIVE LAYER  (90% of users are on mobile)
    Applies the ui-ux-pro-max rules: 44px touch targets, 16px
    inputs (no iOS auto-zoom), bottom nav, scrollable data tables,
@@ -367,11 +418,19 @@ img, svg, canvas { max-width: 100%; }
   }
   .tabs::-webkit-scrollbar { display: none; }
   .tab {
-    flex: 1 0 auto; min-width: 70px; text-align: center;
-    padding: 11px 8px; font-size: 12px; white-space: nowrap;
+    flex: 1 0 auto; min-width: 60px; display: flex; flex-direction: column;
+    align-items: center; gap: 3px; padding: 7px 6px 6px;
+    font-size: 10px; white-space: nowrap; color: var(--muted);
     border-bottom: none; border-top: 2px solid transparent;
   }
-  .tab.active { border-top-color: var(--accent); border-bottom-color: transparent; }
+  .tab.active { border-top-color: var(--accent); border-bottom-color: transparent; color: var(--accent); }
+  .tab-ico { display: block; }
+  .tab-lbl { font-size: 10px; line-height: 1; }
+  /* single-column cards on phones */
+  .order-list { grid-template-columns: 1fr; gap: 10px; }
+  .order-card { padding: 13px; }
+  .oc-name { font-size: 14.5px; }
+  .oc-pnl { font-size: 17px; }
 
   /* ----- DATA TABLES: horizontal scroll instead of page overflow ----- */
   table.data {

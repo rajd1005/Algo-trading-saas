@@ -247,100 +247,114 @@ async function refreshSummary() {
   }
 }
 
-// ---- trades table ----
+// ---- orders / positions (Kite-style cards) ----
 let tradesById = {};
-function showTradesSkeleton(n = 4) {
+let orderFilter = "ALL";
+function showTradesSkeleton(n = 3) {
   document.getElementById("tradesBody").innerHTML = Array.from({ length: n })
-    .map(() => `<tr class="skel-row"><td colspan="13"><div class="skel-bar"></div></td></tr>`).join("");
+    .map(() => `<div class="order-card skel"><div class="skel-bar" style="width:55%"></div><div class="skel-bar" style="width:35%;margin-top:12px"></div></div>`).join("");
 }
+const _entryCond = (t) => {
+  if (t.entry_type === "SCHEDULED" && t.scheduled_time) return "Time " + t.scheduled_time;
+  if (t.entry_type === "TRIGGER" && t.trigger_price)
+    return "Trig " + (t.trigger_dir === "ABOVE" ? "≥" : t.trigger_dir === "BELOW" ? "≤" : "@") + " " + t.trigger_price;
+  if (t.entry_type === "LIMIT") return "Limit ₹" + t.entry_price;
+  return "Market";
+};
+const _targetText = (t) => {
+  if (t.targets_json && t.targets_json !== "[]") {
+    try { const ts = JSON.parse(t.targets_json); return `multi ${ts.filter((x) => x.hit).length}/${ts.length}`; } catch (e) {}
+  }
+  return t.target ? "₹" + t.target : (t.target_points ? t.target_points + "p" : "");
+};
+const _brokerText = (t) => (t.broker === "PAPER" ? "Paper" : (t.broker || (t.mode === "TEST" ? "Paper" : "—"))) + (t.source === "EXTERNAL" ? " · EXT" : "");
+
+function tradeCard(t) {
+  const isPending = t.status === "PENDING";
+  const isDone = ["CLOSED", "CANCELLED", "REJECTED"].includes(t.status);
+  const exited = t.exited_qty || 0;
+  const qtyTxt = (exited > 0 && t.status === "OPEN") ? `${t.quantity - exited}/${t.quantity}` : t.quantity;
+  const avg = t.entry_fill_price || t.entry_price || 0;
+  const ltp = t.last_price || 0;
+  const arrow = t.pnl > 0 ? "▲" : t.pnl < 0 ? "▼" : "";
+
+  const statusBadge = (t.status === "CLOSED" && t.exit_reason)
+    ? `<span class="oc-status st-CLOSED">DONE · ${t.exit_reason}</span>`
+    : `<span class="oc-status st-${t.status}">${t.status}</span>`;
+
+  let meta;
+  if (isPending) {
+    meta = `<span>Qty&nbsp;<b>${t.quantity}</b></span><span>Entry&nbsp;<b>${_entryCond(t)}</b></span>`;
+  } else {
+    meta = `<span>Qty&nbsp;<b>${qtyTxt}</b></span><span>Avg&nbsp;<b>${avg ? "₹" + avg : "—"}</b></span><span>LTP&nbsp;<b>${ltp ? "₹" + ltp : "—"}</b></span>`;
+  }
+
+  const sub = [];
+  if (!isPending && (t.stop_loss > 0 || t.sl_points > 0)) sub.push(`SL ${t.stop_loss || t.sl_points + "p"}`);
+  const tg = _targetText(t); if (!isPending && tg) sub.push(`Tgt ${tg}`);
+  sub.push(_brokerText(t));
+
+  const pnlBlock = (isPending || (!avg && !isDone)) ? "" : `<div class="oc-pnl ${cls(t.pnl)}">${money(t.pnl)} <span class="oc-arr">${arrow}</span></div>`;
+
+  return `<div class="order-card oc-${t.status}" data-id="${t.id}">
+    <div class="oc-top">
+      <div class="oc-sym">
+        <span class="oc-tag tag-${t.side}">${t.side === "BUY" ? "B" : "S"}</span>
+        <span class="oc-name">${esc(t.symbol)}</span>
+        <span class="mode-chip m-${t.mode}">${t.mode}</span>
+      </div>
+      ${statusBadge}
+    </div>
+    <div class="oc-mid">
+      <div class="oc-meta">${meta}</div>
+      ${pnlBlock}
+    </div>
+    <div class="oc-sub">${sub.join(`<span class="dot">·</span>`)}</div>
+    <div class="oc-actions">${actionsFor(t)}</div>
+  </div>`;
+}
+
 async function refreshTrades() {
   const rows = await api.get("/api/trades?date=" + encodeURIComponent(dateFilter));
   tradesById = {};
   rows.forEach((t) => (tradesById[t.id] = t));
+  const counts = { ALL: rows.length, OPEN: 0, PENDING: 0, CLOSED: 0 };
+  rows.forEach((t) => { if (t.status === "OPEN") counts.OPEN++; else if (t.status === "PENDING") counts.PENDING++; else counts.CLOSED++; });
+  document.querySelectorAll("[data-cn]").forEach((el) => { const n = counts[el.dataset.cn] || 0; el.textContent = n ? n : ""; });
+
+  const inFilter = (t) => orderFilter === "ALL" ? true
+    : orderFilter === "CLOSED" ? ["CLOSED", "CANCELLED", "REJECTED"].includes(t.status)
+      : t.status === orderFilter;
+  const filtered = rows.filter(inFilter);
   const body = document.getElementById("tradesBody");
-  body.innerHTML = "";
-  for (const t of rows) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${t.id}</td>
-      <td>${t.symbol}</td>
-      <td><span class="badge b-${t.mode}">${t.mode}</span></td>
-      <td>${brokerLabel(t)}</td>
-      <td>${t.side}</td>
-      <td>${qtyCell(t)}</td>
-      <td>${entryCell(t)}</td>
-      <td>${t.stop_loss || (t.sl_points ? t.sl_points + "p" : "-")}</td>
-      <td>${targetCell(t)}</td>
-      <td>${t.last_price || "-"}</td>
-      <td class="${cls(t.pnl)}">${money(t.pnl)}</td>
-      <td>${statusCell(t)}</td>
-      <td>${actionsFor(t)}</td>`;
-    body.appendChild(tr);
+  if (!filtered.length) {
+    const lbl = orderFilter === "ALL" ? "orders" : orderFilter === "CLOSED" ? "completed orders" : orderFilter.toLowerCase() + " orders";
+    body.innerHTML = `<div class="order-empty">📭 No ${lbl}${dateFilter ? " for " + dateFilter : ""}.<br><span class="link" id="emptyNew">+ Place a new trade</span></div>`;
+    const e = document.getElementById("emptyNew"); if (e) e.onclick = () => document.querySelector('.tab[data-tab="new"]').click();
+    return;
   }
-  // wire action buttons
-  body.querySelectorAll("[data-act]").forEach((b) => {
-    b.onclick = () => {
-      if (b.dataset.act === "modify") openModify(b.dataset.id);
-      else doAction(b.dataset.act, b.dataset.id);
-    };
+  body.innerHTML = filtered.map(tradeCard).join("");
+  body.querySelectorAll("[data-act]").forEach((b) => b.onclick = () => {
+    if (b.dataset.act === "modify") openModify(b.dataset.id); else doAction(b.dataset.act, b.dataset.id);
   });
 }
-
-function brokerLabel(t) {
-  const name = t.broker === "PAPER" ? "Paper" : (t.broker || (t.mode === "TEST" ? "Paper" : "—"));
-  const ext = t.source === "EXTERNAL" ? ' <span class="rbadge r-MANUAL">EXT</span>' : "";
-  return name + ext;
-}
-
-function entryCell(t) {
-  if (t.status === "PENDING") {
-    if (t.entry_type === "SCHEDULED" && t.scheduled_time)
-      return `<span title="scheduled market order">⏱ ${t.scheduled_time}</span>`;
-    if (t.entry_type === "TRIGGER" && t.trigger_price)
-      return `<span title="algo trigger">🎯 ${t.trigger_dir === "ABOVE" ? "≥" : t.trigger_dir === "BELOW" ? "≤" : "@"} ${t.trigger_price}</span>`;
-  }
-  return t.entry_fill_price || t.entry_price || "-";
-}
-
-function qtyCell(t) {
-  // Show remaining vs total once some quantity has been booked via targets.
-  const exited = t.exited_qty || 0;
-  if (exited > 0 && t.status === "OPEN") {
-    return `<span title="remaining / total">${t.quantity - exited} / ${t.quantity}</span>`;
-  }
-  return t.quantity;
-}
-
-function statusCell(t) {
-  // For closed trades, show WHY it exited (TARGET / TRAIL / STOPLOSS / ...).
-  if (t.status === "CLOSED" && t.exit_reason) {
-    return `<span class="badge b-CLOSED">CLOSED</span> <span class="rbadge r-${t.exit_reason}">${t.exit_reason}</span>`;
-  }
-  return `<span class="badge b-${t.status}">${t.status}</span>`;
-}
-
-function targetCell(t) {
-  if (t.targets_json && t.targets_json !== "[]") {
-    try {
-      const ts = JSON.parse(t.targets_json);
-      const done = ts.filter((x) => x.hit).length;
-      return `multi ${done}/${ts.length}`;
-    } catch (e) { /* fall through */ }
-  }
-  return t.target || (t.target_points ? t.target_points + "p" : "-");
-}
-
 function actionsFor(t) {
   let h = "";
   if (t.status === "PENDING")
-    h += `<button class="btn btn-sm" data-act="cancel" data-id="${t.id}">Cancel</button> `;
+    h += `<button class="btn btn-sm oc-btn" data-act="cancel" data-id="${t.id}">Cancel</button>`;
   if (t.status === "OPEN")
-    h += `<button class="btn btn-sm" data-act="modify" data-id="${t.id}">SL/TP</button> `
-       + `<button class="btn btn-sm" data-act="close" data-id="${t.id}">Close</button> `;
+    h += `<button class="btn btn-sm oc-btn" data-act="modify" data-id="${t.id}">Modify</button>`
+       + `<button class="btn btn-sm oc-btn oc-btn-exit" data-act="close" data-id="${t.id}">Exit</button>`;
   if (t.status === "CLOSED" || t.status === "CANCELLED" || t.status === "REJECTED")
-    h += `<button class="btn btn-sm" data-act="del" data-id="${t.id}">Delete</button>`;
+    h += `<button class="btn btn-sm oc-btn" data-act="del" data-id="${t.id}">Delete</button>`;
   return h;
 }
+// filter chips
+document.querySelectorAll("[data-of]").forEach((c) => c.onclick = () => {
+  orderFilter = c.dataset.of;
+  document.querySelectorAll("[data-of]").forEach((x) => x.classList.toggle("active", x === c));
+  refreshTrades();
+});
 
 async function doAction(act, id, sym) {
   try {
