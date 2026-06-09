@@ -30,7 +30,8 @@ header h1 { font-size: 20px; margin: 0; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .card-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-.card-value { font-size: 24px; font-weight: 700; margin-top: 6px; }
+.card-value { font-size: 24px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.lbl-short, .kb-short { display: none; }   /* compact mobile labels */
 
 .tabs { display: flex; gap: 6px; padding: 0 22px; border-bottom: 1px solid var(--line); }
 .tab { background: none; border: none; color: var(--muted); padding: 12px 16px;
@@ -391,22 +392,30 @@ img, svg, canvas { max-width: 100%; }
   .pnl-section { padding: 12px 12px 2px; }
   .banner, .alert-banner { margin-left: 12px; margin-right: 12px; }
 
-  /* ----- header: logo row + wrapping status chips ----- */
-  header { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
-  header h1 { font-size: 17px; }
-  .header-right { gap: 8px; flex-wrap: wrap; width: 100%; }
-  .broker-status { font-size: 11px; padding: 5px 9px; }
-  #userId { order: -1; }                 /* who-am-i first */
-  .pill { font-size: 11px; }
+  /* ----- COMPACT HEADER: single row, drop bulky/redundant chips ----- */
+  header { padding: 9px 12px; gap: 8px; flex-wrap: nowrap; }
+  header h1 { font-size: 16px; white-space: nowrap; }
+  header h1 .muted, header h1 .brand-rest { display: none; }   /* "⚡ Algo" only */
+  .kb-full { display: none; }
+  .kb-short { display: inline; }
+  .header-right { gap: 6px; flex-wrap: nowrap; width: auto; }
+  #dataSource, #brokerStatus, #killState, #userId { display: none; }  /* declutter */
+  #syncIndicator .txt { display: none; }             /* keep just the spinner */
+  #planPill { font-size: 10px; padding: 3px 8px; }
+  .header-right .btn { padding: 7px 11px; font-size: 12px; min-height: 36px; }
 
-  /* ----- P&L cards: 2-up, Total full width ----- */
-  .cards { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .card { padding: 12px 13px; }
-  .card-value { font-size: 20px; }
-  .card-total { grid-column: 1 / -1; }
-  .pnl-title { font-size: 15px; }
-  .pnl-head { gap: 8px; }
-  .pnl-head select, .pnl-head input[type=date] { flex: 1 1 auto; min-width: 0; }
+  /* ----- P&L: only on the Orders tab, compact 3-up strip ----- */
+  body:not([data-tab="dashboard"]) .pnl-section { display: none; }
+  .pnl-title, #pnlBreakdown, #dateScope { display: none; }
+  .pnl-head { gap: 6px; margin-bottom: 8px; }
+  .pnl-head select, .pnl-head input[type=date] { flex: 1 1 auto; min-width: 0; font-size: 13px; min-height: 38px; }
+  .cards { grid-template-columns: repeat(3, 1fr); gap: 7px; }
+  .card { padding: 9px 8px; border-radius: 9px; }
+  .card-total { grid-column: auto; }                 /* 3-up, not full width */
+  .card-label { font-size: 9.5px; letter-spacing: 0; }
+  .lbl-full { display: none; }
+  .lbl-short { display: inline; }
+  .card-value { font-size: 15px; margin-top: 3px; }
 
   /* ----- TABS -> fixed bottom navigation (thumb reach) ----- */
   .tabs {
@@ -481,9 +490,12 @@ img, svg, canvas { max-width: 100%; }
 
 /* very small phones */
 @media (max-width: 380px) {
-  .cards { grid-template-columns: 1fr; }
-  header h1 { font-size: 16px; }
-  .tab { min-width: 62px; font-size: 11px; padding: 10px 6px; }
+  .card-value { font-size: 14px; }
+  .card-label { font-size: 9px; }
+  header h1 { font-size: 15px; }
+  #planPill { display: none; }            /* extra room on tiny screens */
+  .tab { min-width: 58px; }
+  .tab-lbl { font-size: 9px; }
 }
 
 /* respect reduced-motion (accessibility) */

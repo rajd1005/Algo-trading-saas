@@ -6,9 +6,9 @@
   <title>Algo Trading — India</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body>
+<body data-tab="dashboard">
   <header>
-    <h1>⚡ Algo Trading <span class="muted">— India</span></h1>
+    <h1>⚡ Algo<span class="brand-rest"> Trading</span><span class="muted"> — India</span></h1>
     <div class="header-right">
       <span id="syncIndicator" class="syncing" title="Click to retry"><span class="spinner"></span> <span class="txt">Syncing with Broker…</span></span>
       <span id="userId" class="broker-status"></span>
@@ -16,7 +16,7 @@
       <span id="dataSource" class="broker-status" title="Market data source"></span>
       <span id="brokerStatus" class="broker-status"></span>
       <span id="killState" class="pill pill-off">KILL: OFF</span>
-      <button id="killBtn" class="btn btn-danger">Kill Switch</button>
+      <button id="killBtn" class="btn btn-danger"><span class="kb-full">Kill Switch</span><span class="kb-short">Kill</span></button>
       <button id="logoutBtn" class="btn">Logout</button>
     </div>
   </header>
@@ -40,9 +40,9 @@
       <span id="pnlBreakdown" class="muted" style="font-size:12px;"></span>
     </div>
     <div class="cards">
-      <div class="card"><div class="card-label">Booked P&L (Realized)</div><div id="sumBooked" class="card-value">₹0</div></div>
-      <div class="card"><div class="card-label">Active P&L (MTM)</div><div id="sumActive" class="card-value">₹0</div></div>
-      <div class="card card-total"><div class="card-label">Total P&L</div><div id="sumTotal" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label"><span class="lbl-full">Booked P&L (Realized)</span><span class="lbl-short">Booked</span></div><div id="sumBooked" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label"><span class="lbl-full">Active P&L (MTM)</span><span class="lbl-short">Active</span></div><div id="sumActive" class="card-value">₹0</div></div>
+      <div class="card card-total"><div class="card-label"><span class="lbl-full">Total P&L</span><span class="lbl-short">Total</span></div><div id="sumTotal" class="card-value">₹0</div></div>
     </div>
   </section>
 

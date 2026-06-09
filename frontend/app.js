@@ -83,6 +83,8 @@ document.querySelectorAll(".tab").forEach((t) => {
     document.querySelectorAll(".tab-panel").forEach((x) => x.classList.remove("active"));
     t.classList.add("active");
     document.getElementById("tab-" + t.dataset.tab).classList.add("active");
+    document.body.setAttribute("data-tab", t.dataset.tab);   // drives P&L visibility on mobile
+    window.scrollTo({ top: 0 });
   };
 });
 
