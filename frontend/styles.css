@@ -372,6 +372,41 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
   border: 1px dashed var(--line); border-radius: 12px; line-height: 1.9; }
 
 /* ============================================================
+   REDESIGN: centering · watchlist accordion · popups · trade form
+   ============================================================ */
+/* (3) centre content on desktop, full-width on mobile */
+.form { margin: 0 auto; }
+.watchlist-acc { max-width: 820px; margin: 0 auto 16px; }
+
+/* (2) watchlist accordion */
+.watchlist-acc { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.watchlist-acc > summary { list-style: none; cursor: pointer; padding: 12px 14px; font-weight: 700;
+  font-size: 14px; display: flex; align-items: center; justify-content: space-between; }
+.watchlist-acc > summary::-webkit-details-marker { display: none; }
+.acc-caret { color: var(--muted); font-size: 13px; transition: transform .2s; }
+.watchlist-acc[open] .acc-caret { transform: rotate(180deg); }
+.wl-body { padding: 0 14px 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* (5) trade form: full-width segmented toggles + prominent submit */
+.field .btn-group { display: flex; width: 100%; }
+.field .btn-group .opt { flex: 1 1 auto; min-width: 0; padding: 11px 10px; text-align: center; }
+.stepper input { width: 84px; font-size: 16px; }
+.step { width: 46px; }
+#tradeForm > button[type=submit] { width: 100%; padding: 14px; font-size: 16px; font-weight: 700; margin-top: 4px; }
+#tradeForm input:focus, #tradeForm select:focus, .modal input:focus, .modal select:focus, .modal textarea:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,129,247,.15); }
+
+/* (4) popups / modals — consistent inputs + clean header */
+.modal h3 { margin: 0 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 17px; }
+.modal input, .modal select, .modal textarea {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 9px; padding: 10px 12px; font-size: 15px; }
+.modal .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.modal .row label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); flex: 1; min-width: 130px; }
+.modal .row label > input, .modal .row label > select, .modal .row label > textarea { width: 100%; }
+.modal .lock-rule input { width: auto; }
+
+/* ============================================================
    MOBILE-FIRST RESPONSIVE LAYER  (90% of users are on mobile)
    Applies the ui-ux-pro-max rules: 44px touch targets, 16px
    inputs (no iOS auto-zoom), bottom nav, scrollable data tables,
@@ -460,9 +495,13 @@ img, svg, canvas { max-width: 100%; }
   .btn { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; }
   .btn-sm { min-height: 34px; padding: 6px 11px; }
   .btn-group { flex-wrap: wrap; }
-  .opt, .seg, .fut-btn, .step { min-height: 42px; }
+  .opt, .seg, .fut-btn, .step { min-height: 44px; }
   .seg-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; }
-  .seg { white-space: nowrap; }
+  .seg { white-space: nowrap; flex: 1 1 auto; text-align: center; }
+  /* full-width accordion + single-column modal fields on phones */
+  .watchlist-acc { max-width: 100%; margin-bottom: 12px; }
+  .modal .row label { min-width: 100%; }
+  .modal h3 { font-size: 16px; }
 
   /* ----- OPTION CHAIN: tighter strike column, bigger tap rows ----- */
   .chain-head, .chain-row { grid-template-columns: 1fr 56px 1fr; }

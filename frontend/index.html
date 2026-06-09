@@ -86,16 +86,27 @@
       <button type="button" class="chip" data-of="PENDING">Pending <span class="chip-n" data-cn="PENDING"></span></button>
       <button type="button" class="chip" data-of="CLOSED">Done <span class="chip-n" data-cn="CLOSED"></span></button>
     </div>
-    <div id="tradesBody" class="order-list"></div>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>ID</th><th>Symbol</th><th>Mode</th><th>Broker</th><th>Side</th><th>Qty</th>
+          <th>Entry</th><th>SL</th><th>Target</th><th>LTP</th><th>P&L</th>
+          <th>Status</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tradesBody"></tbody>
+    </table>
   </section>
 
   <!-- NEW TRADE -->
   <section id="tab-new" class="tab-panel">
-    <div class="watchlist-bar">
-      <b>⭐ Watchlist</b>
-      <span id="watchlistChips" class="wl-chips"></span>
-      <span id="wlEmpty" class="muted" style="font-size:12px;">— pick a symbol below, then “★ Add to watchlist”. Tap a chip to load it instantly.</span>
-    </div>
+    <details class="watchlist-acc" open>
+      <summary><span>⭐ Watchlist</span><span class="acc-caret">▾</span></summary>
+      <div class="wl-body">
+        <span id="watchlistChips" class="wl-chips"></span>
+        <span id="wlEmpty" class="muted" style="font-size:12px;">— pick a symbol below, then “★ Add to watchlist”. Tap a chip to load it instantly.</span>
+      </div>
+    </details>
     <form id="tradeForm" class="form">
       <div class="row">
         <div class="field" style="max-width:320px;">
