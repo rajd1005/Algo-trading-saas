@@ -1507,13 +1507,13 @@ async function adminLoadUsers() {
       return `<tr><td><b>${esc(u.email)}</b> ${u.online ? "🟢" : ""}</td><td>${u.role === "SUPER_ADMIN" ? "Admin" : "User"}</td>
         <td>${esc(u.plan_name || "")}</td><td>${exp}</td><td>${st}</td><td>${u.accounts}</td>
         <td>
-          <button class="btn btn-sm" data-au-view="${u.id}" data-email="${esc(u.email)}">Inspect</button>
+          <button class="btn btn-sm" data-au-view="${u.id}" data-email="${esc(u.email)}" data-uuid="${u.uuid}">Inspect</button>
           ${isAdmin ? "" : `<button class="btn btn-sm" data-au-plan="${u.id}">+Days</button>
           <button class="btn btn-sm" data-au-block="${u.id}" data-on="${u.status === "BLOCKED" ? 1 : 0}">${u.status === "BLOCKED" ? "Unblock" : "Block"}</button>
           <button class="btn btn-sm" data-au-del="${u.id}">✕</button>`}
         </td></tr>`;
     }).join("") + "</tbody></table>";
-  box.querySelectorAll("[data-au-view]").forEach((b) => b.onclick = () => adminInspect(b.dataset.auView, b.dataset.email));
+  box.querySelectorAll("[data-au-view]").forEach((b) => b.onclick = () => adminInspect(b.dataset.auView, b.dataset.email, b.dataset.uuid));
   box.querySelectorAll("[data-au-block]").forEach((b) => b.onclick = async () => {
     await api.post(`/api/admin/users/${b.dataset.auBlock}/status`, { blocked: b.dataset.on !== "1" });
     toast("User updated", "info"); adminLoadUsers();
@@ -1537,18 +1537,22 @@ document.getElementById("adCreateUser").onclick = async () => {
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
 
-// remote inspector
-let _auId = null;
-async function adminInspect(uid, email) {
-  _auId = uid;
-  document.getElementById("auTitle").textContent = email;
+// ---- remote inspector (full broker control on behalf of a user) ----
+let _auId = null, _auUuid = "", _auTimer = null;
+const AU_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
+async function adminInspect(uid, email, uuid) {
+  _auId = uid; _auUuid = uuid || "";
+  document.getElementById("auTitle").textContent = "🛠️ " + email;
   document.getElementById("adminUserModal").style.display = "flex";
   document.getElementById("auMsg").textContent = "";
+  auResetForm();
+  const base = location.origin;
+  document.getElementById("auRedirect").textContent = base + "/api/dhan/callback  ·  " + base + "/api/zerodha/callback";
+  document.getElementById("auHook").textContent = `${base}/api/webhook/${_auUuid}/{dhan|angel|zerodha|aliceblue}`;
   await auRefresh();
   if (_auTimer) clearInterval(_auTimer);
-  _auTimer = setInterval(auRefresh, 3000);   // live, auto-updating balance / P&L
+  _auTimer = setInterval(auRefresh, 3000);   // live balance / P&L / accounts
 }
-let _auTimer = null;
 async function auRefresh() {
   const uid = _auId; if (!uid) return;
   try {
@@ -1558,33 +1562,77 @@ async function auRefresh() {
     document.getElementById("auOpen").textContent = `${s.open} / ${s.pending}`;
   } catch (e) {}
   try {
-    const l = await api.get(`/api/admin/users/${uid}/logs`);
-    document.getElementById("auLogs").innerHTML = l.logs.map((r) =>
-      `<div><span class="muted">${fmtIST(r.time)}</span> <b>${r.level}</b> — ${esc(r.message)}</div>`).join("") || "<div class='muted'>No logs.</div>";
-  } catch (e) {}
-  try {
     const ts = await api.get(`/api/admin/users/${uid}/trades`);
     document.getElementById("auTrades").innerHTML = ts.length ? (`<table class="data"><thead><tr><th>Sym</th><th>Side</th><th>Mode</th><th>Status</th><th>P&L</th></tr></thead><tbody>`
       + ts.map((t) => `<tr><td>${esc(t.symbol)}</td><td>${t.side}</td><td>${t.mode}</td><td>${t.status}${t.exit_reason ? " · " + t.exit_reason : ""}</td><td class="${cls(t.pnl)}">${money(t.pnl)}</td></tr>`).join("") + "</tbody></table>")
       : "<div class='muted'>No trades.</div>";
   } catch (e) {}
   try {
-    const accs = await api.get(`/api/admin/users/${uid}/accounts`);
-    document.getElementById("auAccounts").innerHTML = accs.length ? accs.map((a) =>
-      `<div class="acct-row"><span class="acct-name">${esc(a.label)}</span><span class="pill ${a.connected ? "pill-ok" : "pill-off"}">${a.connected ? "Connected" : "Not connected"}</span><span style="flex:1;"></span><button class="btn btn-sm" data-au-rm="${a.id}">Remove</button></div>`).join("")
-      : "<div class='muted'>No broker accounts.</div>";
-    document.getElementById("auAccounts").querySelectorAll("[data-au-rm]").forEach((b) => b.onclick = async () => {
-      await api.del(`/api/admin/users/${uid}/accounts/${b.dataset.auRm}`); toast("Broker removed", "info"); auRefresh();
+    _auAccts = await api.get(`/api/admin/users/${uid}/accounts`);
+    document.getElementById("auAccounts").innerHTML = _auAccts.length ? _auAccts.map((a) =>
+      `<div class="acct-row"><span class="acct-name">${esc(a.label)}</span>
+        <span class="pill ${a.connected ? "pill-ok" : "pill-off"}">${a.connected ? (a.token_hours_left != null ? `Connected ~${a.token_hours_left}h` : "Connected") : "Not connected"}</span>
+        <span style="flex:1;"></span>
+        <button class="btn btn-sm" data-au-login="${a.id}" data-broker="${a.broker}">Login</button>
+        <button class="btn btn-sm" data-au-edit="${a.id}">Edit</button>
+        <button class="btn btn-sm" data-au-rm="${a.id}">✕</button></div>`).join("")
+      : "<div class='muted'>No broker accounts yet — add one below.</div>";
+    const box = document.getElementById("auAccounts");
+    box.querySelectorAll("[data-au-login]").forEach((b) => b.onclick = () => auLogin(b.dataset.auLogin, b.dataset.broker));
+    box.querySelectorAll("[data-au-edit]").forEach((b) => b.onclick = () => auEdit(b.dataset.auEdit));
+    box.querySelectorAll("[data-au-rm]").forEach((b) => b.onclick = async () => {
+      if (confirm("Remove this broker account?")) { await api.del(`/api/admin/users/${uid}/accounts/${b.dataset.auRm}`); toast("Broker removed", "info"); auRefresh(); }
     });
   } catch (e) {}
 }
-document.getElementById("auAddAcct").onclick = async () => {
+let _auAccts = [];
+// show the right credential fields for the chosen broker
+function auApplyBrokerFields() {
+  const b = document.getElementById("auBroker").value;
+  const show = (sel, on) => document.querySelectorAll(sel).forEach((e) => e.style.display = on ? "" : "none");
+  show(".au-dhan", b === "DHAN");
+  show(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE");
+  show(".au-zer", b === "ZERODHA");
+  show(".au-ang", b === "ANGEL");
+}
+document.getElementById("auBroker").onchange = auApplyBrokerFields;
+function auResetForm() {
+  document.getElementById("auFormTitle").textContent = "Add a broker account";
+  ["auAcctId", "auClient", "auAppId", "auAppSecret", "auApiKey", "auApiSecret", "auPin", "auTotp"].forEach((i) => document.getElementById(i).value = "");
+  auApplyBrokerFields();
+}
+document.getElementById("auFormReset").onclick = auResetForm;
+function auEdit(aid) {
+  const a = _auAccts.find((x) => String(x.id) === String(aid)); if (!a) return;
+  document.getElementById("auFormTitle").textContent = "Edit " + (AU_NAME[a.broker] || a.broker) + " account";
+  document.getElementById("auAcctId").value = a.id;
+  document.getElementById("auBroker").value = a.broker;
+  document.getElementById("auClient").value = a.client_id || "";
+  ["auAppSecret", "auApiKey", "auApiSecret", "auPin", "auTotp"].forEach((i) => document.getElementById(i).value = "");
+  document.getElementById("auAppId").value = "";
+  auApplyBrokerFields();
+}
+document.getElementById("auSaveAcct").onclick = async () => {
+  const payload = { id: document.getElementById("auAcctId").value || undefined,
+    broker: document.getElementById("auBroker").value,
+    client_id: document.getElementById("auClient").value.trim(),
+    app_id: document.getElementById("auAppId").value, app_secret: document.getElementById("auAppSecret").value,
+    api_key: document.getElementById("auApiKey").value, api_secret: document.getElementById("auApiSecret").value,
+    pin: document.getElementById("auPin").value, totp_secret: document.getElementById("auTotp").value };
   try {
-    await api.post(`/api/admin/users/${_auId}/accounts`, { broker: document.getElementById("auBroker").value,
-      client_id: document.getElementById("auClient").value.trim() });
-    document.getElementById("auClient").value = ""; toast("✅ Broker added", "pos"); auRefresh();
-  } catch (e) { toast("❌ " + e.message, "neg"); }
+    await api.post(`/api/admin/users/${_auId}/accounts`, payload);
+    toast("✅ Broker account saved", "pos"); auResetForm(); auRefresh();
+  } catch (e) { document.getElementById("auAcctMsg").textContent = "❌ " + e.message; document.getElementById("auAcctMsg").className = "msg neg"; }
 };
+async function auLogin(aid, broker) {
+  const msg = document.getElementById("auAcctMsg");
+  try {
+    const r = await api.get(`/api/admin/users/${_auId}/accounts/${aid}/login`);
+    if (r && r.login_url) { window.location.href = r.login_url; return; }   // Dhan / Zerodha OAuth
+    msg.textContent = `✅ Logged in to ${AU_NAME[broker] || broker}.`; msg.className = "msg pos";
+    toast("✅ Broker connected", "pos"); auRefresh();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; toast("❌ " + e.message, "neg"); }
+}
 document.getElementById("auClose").onclick = () => {
   document.getElementById("adminUserModal").style.display = "none";
   if (_auTimer) { clearInterval(_auTimer); _auTimer = null; } _auId = null;

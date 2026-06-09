@@ -1396,6 +1396,16 @@ def _my_account(db, account_id, uid, broker=None):
     return a
 
 
+def _pending_account(db, me):
+    """The account a broker OAuth callback is completing — the caller's own, or
+    any account when the caller is the Super Admin (admin-assisted setup)."""
+    pid = uget(db, me.id, "pending_login_account", "")
+    a = db.get(Account, int(pid)) if str(pid).isdigit() else None
+    if a and (a.user_id == me.id or me.role == "SUPER_ADMIN"):
+        return a
+    return None
+
+
 # ---------- Zerodha (Kite Connect) login ----------
 @app.get("/api/zerodha/login")
 def zerodha_login(request: Request, account_id: int = 0, db: Session = Depends(get_db)):
@@ -1412,13 +1422,13 @@ def zerodha_login(request: Request, account_id: int = 0, db: Session = Depends(g
 @app.get("/api/zerodha/callback")
 def zerodha_callback(request: Request, request_token: str = "", db: Session = Depends(get_db)):
     me = current_user(request)
-    a = _account_for_provider(db, uget(db, me.id, "pending_login_account", ""), me.id)
+    a = _pending_account(db, me)
     if a is None or a.broker != "ZERODHA" or not request_token:
         return RedirectResponse(url="/?login=failed")
     creds = _acc_creds(a)
-    if a.client_id and _broker_in_use_elsewhere(db, "ZERODHA", a.client_id, me.id):
+    if a.client_id and _broker_in_use_elsewhere(db, "ZERODHA", a.client_id, a.user_id):
         db.add(LogEntry(message="Zerodha login blocked: account already linked to another user.",
-                        level="ERROR", user_id=me.id))
+                        level="ERROR", user_id=a.user_id))
         db.commit()
         return RedirectResponse(url="/?login=failed")
     ok, res = zerodha.exchange_request_token(creds.get("api_key", ""), creds.get("api_secret", ""), request_token)
@@ -1427,10 +1437,10 @@ def zerodha_callback(request: Request, request_token: str = "", db: Session = De
         a.connected = 1
         a.token_time = dt.datetime.utcnow()
         a.label = _label("ZERODHA", a.client_id)
-        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=a.user_id))
         db.commit()
         return RedirectResponse(url="/?login=ok")
-    db.add(LogEntry(message=f"Zerodha login failed: {res}", level="ERROR", user_id=me.id))
+    db.add(LogEntry(message=f"Zerodha login failed: {res}", level="ERROR", user_id=a.user_id))
     db.commit()
     return RedirectResponse(url="/?login=failed")
 
@@ -1460,7 +1470,7 @@ def dhan_login(request: Request, account_id: int = 0, db: Session = Depends(get_
 @app.get("/api/dhan/callback")
 def dhan_callback(request: Request, tokenId: str = "", db: Session = Depends(get_db)):
     me = current_user(request)
-    a = _account_for_provider(db, uget(db, me.id, "pending_login_account", ""), me.id)
+    a = _pending_account(db, me)
     if a is None or not tokenId:
         return RedirectResponse(url="/?login=failed")
     creds = _acc_creds(a)
@@ -1468,7 +1478,7 @@ def dhan_callback(request: Request, tokenId: str = "", db: Session = Depends(get
         token, client_id, _ = dhan_auth.consume_consent(creds.get("app_id", ""), creds.get("app_secret", ""), tokenId)
         if not token:
             raise RuntimeError("no access token returned")
-        if client_id and _broker_in_use_elsewhere(db, "DHAN", client_id, me.id):
+        if client_id and _broker_in_use_elsewhere(db, "DHAN", client_id, a.user_id):
             raise RuntimeError("this Dhan account is already linked to another user")
         _set_acc_creds(a, access_token=token)
         if client_id:
@@ -1476,11 +1486,11 @@ def dhan_callback(request: Request, tokenId: str = "", db: Session = Depends(get
         a.connected = 1
         a.token_time = dt.datetime.utcnow()
         a.label = _label("DHAN", a.client_id)
-        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=a.user_id))
         db.commit()
         return RedirectResponse(url="/?login=ok")
     except Exception as e:
-        db.add(LogEntry(message=f"Dhan login callback failed: {e}", level="ERROR", user_id=me.id))
+        db.add(LogEntry(message=f"Dhan login callback failed: {e}", level="ERROR", user_id=a.user_id))
         db.commit()
         return RedirectResponse(url="/?login=failed")
 
@@ -1602,7 +1612,7 @@ def get_howto(db: Session = Depends(get_db)):
 # ---------- Super Admin control panel ----------
 def _user_dict(db, u):
     return {
-        "id": u.id, "email": u.email, "role": u.role, "status": u.status,
+        "id": u.id, "email": u.email, "role": u.role, "status": u.status, "uuid": u.uuid,
         "plan_name": u.plan_name,
         "plan_expiry": u.plan_expiry.isoformat() if u.plan_expiry else None,
         "expired": u.role != "SUPER_ADMIN" and _plan_expired(u),
@@ -1770,7 +1780,8 @@ def admin_user_accounts(uid: int, request: Request, db: Session = Depends(get_db
 
 @app.post("/api/admin/users/{uid}/accounts")
 def admin_add_account(uid: int, payload: dict, request: Request, db: Session = Depends(get_db)):
-    """Broker override: admin adds a broker account into a user's profile."""
+    """Broker override: admin adds OR edits a broker account in a user's profile,
+    with the full credential set (same as the user's own Broker tab)."""
     require_admin(request)
     u = db.get(User, uid)
     if not u:
@@ -1781,15 +1792,76 @@ def admin_add_account(uid: int, payload: dict, request: Request, db: Session = D
     client_id = str(payload.get("client_id", "")).strip()
     if client_id and _broker_in_use_elsewhere(db, broker, client_id, uid):
         raise HTTPException(400, "That broker Client ID is already linked to another user.")
-    a = Account(user_id=uid, broker=broker, client_id=client_id)
+    aid = payload.get("id")
+    a = db.get(Account, int(aid)) if aid else None
+    if a is not None and a.user_id != uid:
+        raise HTTPException(403, "Not this user's account.")
+    is_new = a is None
+    if a is None:
+        a = Account(user_id=uid, broker=broker)
+        db.add(a)
+    a.broker = broker
+    if client_id:
+        a.client_id = client_id
     _set_acc_creds(a, app_id=payload.get("app_id"), app_secret=payload.get("app_secret"),
                    api_key=payload.get("api_key"), api_secret=payload.get("api_secret"),
                    totp_secret=payload.get("totp_secret"), pin=payload.get("pin"))
-    a.label = _label(broker, client_id)
-    db.add(a)
-    db.add(LogEntry(message=f"ADMIN added a {broker} broker account.", level="WARN", user_id=uid))
+    a.label = _label(broker, a.client_id)
+    db.add(LogEntry(message=f"ADMIN {'added' if is_new else 'updated'} a {broker} broker account.",
+                    level="WARN", user_id=uid))
     db.commit(); db.refresh(a)
     return _account_dict(a)
+
+
+@app.get("/api/admin/users/{uid}/accounts/{aid}/login")
+def admin_account_login(uid: int, aid: int, request: Request, db: Session = Depends(get_db)):
+    """Authenticate a user's broker ON THEIR BEHALF. Angel/Alice log in
+    programmatically; Dhan/Zerodha return an OAuth URL the admin opens & approves."""
+    me = require_admin(request)
+    a = db.get(Account, aid)
+    if not a or a.user_id != uid:
+        raise HTTPException(404, "Account not found")
+    creds = _acc_creds(a)
+    if a.client_id and _broker_in_use_elsewhere(db, a.broker, a.client_id, uid):
+        raise HTTPException(400, "This broker Client ID is already linked to another user.")
+    if a.broker == "ANGEL":
+        if not all([a.client_id, creds.get("pin"), creds.get("api_key"), creds.get("totp_secret")]):
+            raise HTTPException(400, "Fill Client ID, PIN, API Key and TOTP secret first.")
+        ok, data = angel.login(a.client_id, creds["pin"], creds["api_key"], creds["totp_secret"])
+        if not ok:
+            raise HTTPException(400, f"Angel login failed: {data}")
+        _set_acc_creds(a, jwt=data["jwt"], refresh=data.get("refresh", ""), feed=data.get("feed", ""))
+    elif a.broker == "ALICE":
+        if not a.client_id or not creds.get("api_key"):
+            raise HTTPException(400, "Fill User ID and API Key first.")
+        ok, res = aliceblue.login(a.client_id, creds["api_key"])
+        if not ok:
+            raise HTTPException(400, f"Alice Blue login failed: {res}")
+        _set_acc_creds(a, session_id=res)
+    elif a.broker == "ZERODHA":
+        if not creds.get("api_key"):
+            raise HTTPException(400, "Enter the Zerodha API Key & Secret first.")
+        uset(db, me.id, "pending_login_account", str(a.id)); db.commit()
+        return {"login_url": zerodha.login_url(creds["api_key"])}
+    elif a.broker == "DHAN":
+        if not all([creds.get("app_id"), creds.get("app_secret"), a.client_id]):
+            raise HTTPException(400, "Enter App ID, App Secret and Client ID first.")
+        try:
+            consent = dhan_auth.generate_consent(creds["app_id"], creds["app_secret"], a.client_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Could not start Dhan login: {e}")
+        if not consent:
+            raise HTTPException(400, "Dhan did not return a consent id. Check App ID/Secret.")
+        uset(db, me.id, "pending_login_account", str(a.id)); db.commit()
+        return {"login_url": dhan_auth.login_url(consent)}
+    a.connected = 1
+    a.token_time = dt.datetime.utcnow()
+    a.label = _label(a.broker, a.client_id)
+    db.add(LogEntry(message=f"ADMIN logged in {a.label} on the user's behalf.", level="WARN", user_id=uid))
+    db.commit()
+    return {"connected": True}
 
 
 @app.delete("/api/admin/users/{uid}/accounts/{aid}")
