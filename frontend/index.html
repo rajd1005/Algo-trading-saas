@@ -28,6 +28,7 @@
         <option value="ALL">All Brokers</option>
         <option value="PAPER">Demo (paper)</option>
         <option value="DHAN">Dhan (live)</option>
+        <option value="ANGEL">Angel One (live)</option>
       </select>
       <span id="pnlBreakdown" class="muted" style="font-size:12px;"></span>
     </div>
@@ -185,11 +186,23 @@
   <!-- BROKER -->
   <section id="tab-broker" class="tab-panel">
     <div class="form">
-      <div class="seg-tabs">
-        <button type="button" class="seg" id="modeDemo" data-mode="DEMO">🧪 Demo (simulated)</button>
-        <button type="button" class="seg" id="modeDhan" data-mode="DHAN">Dhan (real)</button>
+      <div class="row">
+        <label>Data Provider
+          <select id="dataProvider">
+            <option value="DEMO">🧪 Demo (simulated)</option>
+            <option value="DHAN">Dhan</option>
+            <option value="ANGEL">Angel One</option>
+          </select>
+        </label>
+        <label>Trading Provider
+          <select id="tradeProvider">
+            <option value="DEMO">🧪 Demo (simulated)</option>
+            <option value="DHAN">Dhan</option>
+            <option value="ANGEL">Angel One</option>
+          </select>
+        </label>
       </div>
-      <p class="muted" id="modeDesc"></p>
+      <p class="muted" id="providerDesc" style="font-size:12px;"></p>
 
       <div id="dhanFields">
         <label class="check" style="margin-bottom:12px;">
@@ -243,6 +256,27 @@
           </div>
         </details>
       </div>
+      <!-- Angel One (SmartAPI) -->
+      <div id="angelFields" style="display:none;">
+        <div class="acct-panel">
+          <div class="acct-title">Angel One — SmartAPI</div>
+          <div class="row">
+            <label>Client ID <input id="angelClientId" placeholder="A12345" /></label>
+            <label>API Key <input id="angelApiKey" placeholder="SmartAPI key" /></label>
+          </div>
+          <div class="row">
+            <label>PIN <input id="angelPin" type="password" placeholder="login PIN" /></label>
+            <label>TOTP Secret <input id="angelTotp" type="password" placeholder="TOTP secret key" /></label>
+          </div>
+          <div class="row">
+            <button class="btn" id="saveAngelBtn">Save</button>
+            <button class="btn btn-primary" id="loginAngelBtn">🔐 Login to Angel One</button>
+            <span id="angelStatus" class="pill pill-off">Not connected</span>
+          </div>
+          <div class="muted" style="font-size:11px;">Angel tokens expire daily; the app auto-renews while running.</div>
+        </div>
+      </div>
+
       <div class="row" style="margin-top:10px;">
         <span id="brokerState" class="pill pill-off">Not connected</span>
       </div>

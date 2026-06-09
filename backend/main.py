@@ -139,7 +139,13 @@ def _startup():
     if db.get(Setting, "default_mode") is None:
         set_setting(db, "default_mode", "TEST")
     if db.get(Setting, "broker_mode") is None:
-        set_setting(db, "broker_mode", "DEMO")   # start in safe Demo mode
+        set_setting(db, "broker_mode", "DEMO")   # legacy; kept for back-compat
+    # Data/Trading providers (Demo / Dhan / Angel). Migrate from broker_mode.
+    if db.get(Setting, "data_provider") is None or db.get(Setting, "trade_provider") is None:
+        legacy = get_setting(db, "broker_mode", "DEMO")
+        prov = "DHAN" if legacy == "DHAN" else "DEMO"
+        set_setting(db, "data_provider", prov)
+        set_setting(db, "trade_provider", prov)
     db.close()
     instruments.load_async()   # download Dhan's symbol list in the background
     angel.mapper.load_async()  # download Angel One master + build the symbol map
@@ -155,22 +161,30 @@ def _broker_monitor_loop():
         time.sleep(12)
         try:
             db = SessionLocal()
-            if get_setting(db, "broker_mode", "DHAN") == "DHAN":
-                cid = get_setting(db, "dhan_client_id", "")
-                tok = get_setting(db, "dhan_access_token", "")
+            tp = get_setting(db, "trade_provider", "DEMO")
+            b = None
+            if tp == "DHAN":
+                cid, tok = get_trade_creds(db)
                 if cid and tok:
                     b = DhanBroker(cid, tok)
-                    ok, bal = b.fund_limit()
-                    if ok:
-                        set_setting(db, "dhan_balance", str(bal))
-                        set_setting(db, "broker_health", "ok")
-                        set_setting(db, "broker_health_time", dt.datetime.utcnow().isoformat())
-                    else:
-                        set_setting(db, "broker_health", "error")
-                    try:
-                        _sync_external_orders(db, b.get_orders())
-                    except Exception:
-                        pass
+            elif tp == "ANGEL":
+                cid = get_setting(db, "angel_client_id", "")
+                key = get_setting(db, "angel_api_key", "")
+                jwt = get_setting(db, "angel_jwt", "")
+                if cid and key and jwt:
+                    b = angel.AngelBroker(cid, key, jwt)
+            if b is not None:
+                ok, bal = b.fund_limit()
+                if ok:
+                    set_setting(db, "broker_balance", str(bal))
+                    set_setting(db, "broker_health", "ok")
+                    set_setting(db, "broker_health_time", dt.datetime.utcnow().isoformat())
+                else:
+                    set_setting(db, "broker_health", "error")
+                try:
+                    _sync_external_orders(db, b.get_orders())
+                except Exception:
+                    pass
             db.commit()
             db.close()
         except Exception:
@@ -262,6 +276,25 @@ def _auto_renew_loop():
                         db.add(LogEntry(message="Dhan token auto-renew failed — please Login with Dhan again.",
                                         level="WARN"))
                     db.commit()
+            # Angel One token renewal
+            a_jwt = get_setting(db, "angel_jwt", "")
+            a_key = get_setting(db, "angel_api_key", "")
+            a_ref = get_setting(db, "angel_refresh", "")
+            a_time = get_setting(db, "angel_token_time", "")
+            if a_jwt and a_key and a_ref and a_time:
+                try:
+                    age = (dt.datetime.utcnow() - dt.datetime.fromisoformat(a_time)).total_seconds() / 3600
+                    if age >= 20:
+                        ok, new = angel.renew(a_key, a_jwt, a_ref)
+                        if ok:
+                            set_setting(db, "angel_jwt", new)
+                            set_setting(db, "angel_token_time", dt.datetime.utcnow().isoformat())
+                            db.add(LogEntry(message="Angel One token auto-renewed.", level="INFO"))
+                        else:
+                            db.add(LogEntry(message="Angel token renew failed — log in to Angel again.", level="WARN"))
+                        db.commit()
+                except Exception:
+                    pass
             db.close()
         except Exception:
             pass
@@ -447,19 +480,28 @@ def ltp(payload: dict, db: Session = Depends(get_db)):
         if seg and sid:
             by_seg.setdefault(seg, []).append(sid)
 
-    if get_setting(db, "broker_mode", "DHAN") == "DEMO":
+    dp = get_setting(db, "data_provider", "DEMO")
+    if dp == "DEMO":
         res = demo_market.get_ltp_batch(by_seg)
         return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()}}
-
-    cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-    tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
-    if not cid or not tok or not by_seg:
-        return {"connected": bool(cid and tok), "prices": {}}
-    dcid, dtok = get_data_creds(db)        # market data uses the DATA account
-    md = DhanMarketData(dcid or cid, dtok or tok)
+    if dp == "ANGEL":
+        acid = get_setting(db, "angel_client_id", "")
+        akey = get_setting(db, "angel_api_key", "")
+        ajwt = get_setting(db, "angel_jwt", "")
+        if not (acid and akey and ajwt) or not by_seg:
+            return {"connected": bool(acid and akey and ajwt), "prices": {}}
+        md = angel.AngelMarketData(acid, akey, ajwt)
+        res = md.get_ltp_batch(by_seg)
+        return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()},
+                "error": md.last_error}
+    # Dhan
+    dcid, dtok = get_data_creds(db)
+    if not dcid or not dtok or not by_seg:
+        return {"connected": bool(dcid and dtok), "prices": {}}
+    md = DhanMarketData(dcid, dtok)
     res = md.get_ltp_batch(by_seg)
-    prices = {sid: px for (seg, sid), px in res.items()}
-    return {"connected": True, "prices": prices, "error": md.last_error}
+    return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()},
+            "error": md.last_error}
 
 
 # ---------- demo controls (push price up/down, reset) ----------
@@ -492,7 +534,7 @@ def instruments_refresh():
 # ---------- summary ----------
 # ---------- summary / P&L ----------
 def _trade_env(t):
-    """Which environment a trade belongs to: PAPER (demo) or DHAN (live)."""
+    """Which environment a trade belongs to: PAPER (demo) / DHAN / ANGEL."""
     if t.broker:
         return t.broker
     return "PAPER" if t.mode == "TEST" else "DHAN"
@@ -536,53 +578,51 @@ def _metrics(trades):
 @app.get("/api/summary")
 def summary(broker: str = "ALL", db: Session = Depends(get_db)):
     trades = db.query(Trade).all()
-    paper = [t for t in trades if _trade_env(t) == "PAPER"]
-    dhan = [t for t in trades if _trade_env(t) == "DHAN"]
+    buckets = {"PAPER": [], "DHAN": [], "ANGEL": []}
+    for t in trades:
+        buckets.setdefault(_trade_env(t), []).append(t)
     flt = (broker or "ALL").upper()
-    selected = paper if flt == "PAPER" else dhan if flt == "DHAN" else trades
+    selected = buckets.get(flt, trades) if flt in buckets else trades
 
     pnl = _metrics(selected)
-    breakdown = {"PAPER": _metrics(paper)["net"], "DHAN": _metrics(dhan)["net"]}
+    breakdown = {k: _metrics(v)["net"] for k, v in buckets.items()}
     active = sum(1 for t in trades if t.status in ("OPEN", "PENDING"))
 
-    mode = get_setting(db, "broker_mode", "DHAN")
-    if mode == "DEMO":
-        broker_name, balance = "Demo (simulated)", None
+    data_provider = get_setting(db, "data_provider", "DEMO")
+    trade_provider = get_setting(db, "trade_provider", "DEMO")
+    PNAME = {"DEMO": "Demo", "DHAN": "Dhan", "ANGEL": "Angel One"}
+    broker_name = PNAME.get(trade_provider, trade_provider)
+    if trade_provider == "DEMO":
+        balance = None
     else:
-        broker_name = "Dhan"
-        bal = get_setting(db, "dhan_balance", "")
+        bal = get_setting(db, "broker_balance", "")
         balance = float(bal) if bal else None
 
     # Connection-lost warning while trades are running.
     broker_alert, alert_msg = False, ""
-    if mode == "DHAN" and active > 0:
-        if get_setting(db, "dhan_connected", "no") != "yes":
+    if trade_provider != "DEMO" and active > 0:
+        connected = (get_setting(db, "dhan_connected", "no") == "yes") if trade_provider == "DHAN" \
+            else bool(get_setting(db, "angel_jwt", ""))
+        if not connected:
             broker_alert = True
-            alert_msg = "Dhan is NOT connected but trades are running — re-login on the Broker tab now."
+            alert_msg = f"{broker_name} is NOT connected but trades are running — reconnect on the Broker tab."
         elif get_setting(db, "broker_health", "") == "error":
             broker_alert = True
-            alert_msg = "Lost connection to Dhan — stop-loss/target exits may not fire. Check the Broker tab."
+            alert_msg = f"Lost connection to {broker_name} — exits may not fire. Check the Broker tab."
 
     return {
         "total_trades": len(trades),
-        "pending": pnl["pending"],
-        "open": pnl["open"],
-        "closed": pnl["closed"],
-        "open_pnl": pnl["open_pnl"],
-        "closed_pnl": pnl["closed_pnl"],
-        "total_pnl": pnl["net"],
-        "pnl": pnl,                       # full metric set for the selected filter
-        "pnl_filter": flt,
-        "pnl_breakdown": breakdown,       # net P&L split: {PAPER, DHAN}
+        "pending": pnl["pending"], "open": pnl["open"], "closed": pnl["closed"],
+        "open_pnl": pnl["open_pnl"], "closed_pnl": pnl["closed_pnl"], "total_pnl": pnl["net"],
+        "pnl": pnl, "pnl_filter": flt, "pnl_breakdown": breakdown,
         "kill_switch": get_setting(db, "kill_switch", "off"),
         "md_status": get_setting(db, "md_status", ""),
         "instruments": instruments.status(),
         "angel_map": angel.mapper.status(),
         "demo_direction": demo_market.direction,
-        "broker_name": broker_name,
-        "balance": balance,
-        "broker_alert": broker_alert,
-        "alert_msg": alert_msg,
+        "data_provider": data_provider, "trade_provider": trade_provider,
+        "broker_name": broker_name, "balance": balance,
+        "broker_alert": broker_alert, "alert_msg": alert_msg,
     }
 
 
@@ -651,19 +691,52 @@ def _account_info(db, pre):
     }
 
 
+def _angel_account_info(db):
+    tt = get_setting(db, "angel_token_time", "")
+    hours_left = None
+    if tt:
+        try:
+            age = (dt.datetime.utcnow() - dt.datetime.fromisoformat(tt)).total_seconds() / 3600
+            hours_left = round(max(0, 24 - age), 1)
+        except Exception:
+            pass
+    return {
+        "client_id": get_setting(db, "angel_client_id", ""),
+        "has_api_key": bool(get_setting(db, "angel_api_key", "")),
+        "has_totp": bool(get_setting(db, "angel_totp_secret", "")),
+        "connected": bool(get_setting(db, "angel_jwt", "")),
+        "token_hours_left": hours_left,
+    }
+
+
 @app.get("/api/broker")
 def get_broker(request: Request, db: Session = Depends(get_db)):
     mode = get_setting(db, "broker_mode", "DHAN")
     same = get_setting(db, "use_same_account", "yes") == "yes"
     trade = _account_info(db, "dhan_")
     data = trade if same else _account_info(db, "data_")
-    connected = mode == "DEMO" or (trade["connected"] and (same or data["connected"]))
+    angel_acct = _angel_account_info(db)
+    data_provider = get_setting(db, "data_provider", "DEMO")
+    trade_provider = get_setting(db, "trade_provider", "DEMO")
+
+    def _conn(p):
+        if p == "DEMO":
+            return True
+        if p == "ANGEL":
+            return angel_acct["connected"]
+        return trade["connected"]   # DHAN
+    connected = _conn(data_provider) and _conn(trade_provider)
     base = str(request.base_url).rstrip("/")
     return {
         "mode": mode,
+        "data_provider": data_provider,
+        "trade_provider": trade_provider,
         "use_same_account": same,
         "trade": trade,
         "data": data,
+        "angel": angel_acct,
+        "data_connected": _conn(data_provider),
+        "trade_connected": _conn(trade_provider),
         "connected": connected,
         # back-compat fields (trading account)
         "dhan_client_id": trade["client_id"],
@@ -771,18 +844,76 @@ async def dhan_postback(request: Request, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+_PROVIDERS = {"DEMO", "DHAN", "ANGEL"}
+
+
+@app.post("/api/providers")
+def set_providers(payload: dict, db: Session = Depends(get_db)):
+    """Set the Data and Trading providers (DEMO / DHAN / ANGEL)."""
+    new_data = str(payload.get("data_provider", "")).upper()
+    new_trade = str(payload.get("trade_provider", "")).upper()
+    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
+    cur_data = get_setting(db, "data_provider", "DEMO")
+    cur_trade = get_setting(db, "trade_provider", "DEMO")
+    if active > 0 and ((new_data and new_data != cur_data) or (new_trade and new_trade != cur_trade)):
+        raise HTTPException(400, f"{active} trade(s) are running — close them before switching providers.")
+    if new_data in _PROVIDERS:
+        set_setting(db, "data_provider", new_data)
+    if new_trade in _PROVIDERS:
+        set_setting(db, "trade_provider", new_trade)
+    # keep legacy broker_mode roughly in sync
+    tp = get_setting(db, "trade_provider", "DEMO")
+    set_setting(db, "broker_mode", "DEMO" if tp == "DEMO" else "DHAN")
+    db.commit()
+    return {"data_provider": get_setting(db, "data_provider", "DEMO"),
+            "trade_provider": get_setting(db, "trade_provider", "DEMO")}
+
+
+# legacy endpoint kept for safety
 @app.post("/api/broker/mode")
 def set_broker_mode(payload: dict, db: Session = Depends(get_db)):
     mode = "DEMO" if str(payload.get("mode", "")).upper() == "DEMO" else "DHAN"
-    # Active-trade lock: don't let the broker change while trades are running.
     active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
     if active > 0 and mode != get_setting(db, "broker_mode", "DHAN"):
-        raise HTTPException(400, f"{active} trade(s) are running — close them before "
-                                 f"switching the broker.")
+        raise HTTPException(400, f"{active} trade(s) are running — close them before switching.")
     set_setting(db, "broker_mode", mode)
-    db.add(LogEntry(message=f"Broker mode set to {mode}", level="WARN"))
+    set_setting(db, "data_provider", mode)
+    set_setting(db, "trade_provider", mode)
     db.commit()
     return {"mode": mode}
+
+
+# ---------- Angel One ----------
+@app.post("/api/angel/app")
+def save_angel_app(payload: dict, db: Session = Depends(get_db)):
+    """Save Angel One SmartAPI credentials."""
+    for k in ("client_id", "api_key", "totp_secret", "pin"):
+        if payload.get(k):
+            set_setting(db, "angel_" + k, str(payload[k]).strip())
+    return {"ok": True}
+
+
+@app.post("/api/angel/login")
+def angel_login(db: Session = Depends(get_db)):
+    """Log in to Angel One (password + TOTP) and store the session token."""
+    cid = get_setting(db, "angel_client_id", "")
+    pin = get_setting(db, "angel_pin", "")
+    key = get_setting(db, "angel_api_key", "")
+    totp = get_setting(db, "angel_totp_secret", "")
+    if not all([cid, pin, key, totp]):
+        raise HTTPException(400, "Enter Angel Client ID, PIN, API Key and TOTP secret first.")
+    ok, data = angel.login(cid, pin, key, totp)
+    if ok:
+        set_setting(db, "angel_jwt", data["jwt"])
+        set_setting(db, "angel_refresh", data.get("refresh", ""))
+        set_setting(db, "angel_feed", data.get("feed", ""))
+        set_setting(db, "angel_token_time", dt.datetime.utcnow().isoformat())
+        db.add(LogEntry(message="Logged in to Angel One.", level="INFO"))
+        db.commit()
+        return {"connected": True}
+    db.add(LogEntry(message=f"Angel One login failed: {data}", level="ERROR"))
+    db.commit()
+    raise HTTPException(400, f"Angel login failed: {data}")
 
 
 @app.post("/api/broker")

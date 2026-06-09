@@ -25,6 +25,7 @@ from models import Trade, LogEntry, Setting
 from market_data import DhanMarketData, demo_market
 from live_feed import feed
 from brokers import PaperBroker, DhanBroker
+from angel import AngelBroker, AngelMarketData
 import config
 
 
@@ -46,6 +47,8 @@ class TradingEngine:
         self._rest_cache = {}          # last REST prices (warmup / fallback)
         self._rest_cooldown = 0.0      # back off REST until this time (after a 429)
         self._demo = False             # DEMO mode (simulated prices + fake broker)
+        self._trade_provider = "DEMO"  # DEMO / DHAN / ANGEL
+        self._warned_no_broker = False
         self._last_feed_err = ""       # de-dupe feed errors in the log
         self._last_rest_err = ""
 
@@ -116,35 +119,68 @@ class TradingEngine:
                     pass
             time.sleep(config.ENGINE_INTERVAL_MS / 1000.0)
 
+    def _providers(self, db):
+        return (self._get_setting(db, "data_provider", "DEMO"),
+                self._get_setting(db, "trade_provider", "DEMO"))
+
+    def _angel_creds(self, db):
+        return (self._get_setting(db, "angel_client_id", ""),
+                self._get_setting(db, "angel_api_key", ""),
+                self._get_setting(db, "angel_jwt", ""))
+
+    def _trade_broker(self, db, provider):
+        if provider == "DHAN":
+            cid, tok = self._trade_creds(db)
+            return DhanBroker(cid, tok) if cid and tok else None
+        if provider == "ANGEL":
+            cid, key, jwt = self._angel_creds(db)
+            return AngelBroker(cid, key, jwt) if cid and key and jwt else None
+        return None  # DEMO -> paper
+
+    def _fetch_prices(self, db, provider, instruments, active):
+        by_seg = {}
+        for seg, sid in instruments:
+            by_seg.setdefault(seg, []).append(sid)
+        if provider == "DEMO":
+            if active:
+                self._set_setting(db, "md_status", "ok:demo")
+            return demo_market.get_ltp_batch(by_seg)
+        if provider == "DHAN":
+            cid, tok = self._data_creds(db)
+            if not cid or not tok:
+                if active:
+                    self._set_setting(db, "md_status", "Data (Dhan) not connected — connect on the Broker tab.")
+                return {}
+            return self._collect_prices(db, cid, tok, instruments)
+        if provider == "ANGEL":
+            cid, key, jwt = self._angel_creds(db)
+            if not cid or not key or not jwt:
+                if active:
+                    self._set_setting(db, "md_status", "Data (Angel) not connected — connect on the Broker tab.")
+                return {}
+            md = AngelMarketData(cid, key, jwt)
+            prices = md.get_ltp_batch(by_seg)
+            if active:
+                if prices:
+                    self._set_setting(db, "md_status", "ok:angel")
+                elif md.last_error:
+                    self._set_setting(db, "md_status", f"Angel data error: {md.last_error[:160]}")
+            return prices
+        return {}
+
     def _tick(self):
         db = SessionLocal()
         try:
             active = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
 
-            self._demo = self._get_setting(db, "broker_mode", "DHAN") == "DEMO"
+            data_provider, trade_provider = self._providers(db)
+            self._trade_provider = trade_provider
             instruments = list({(t.exchange_segment, str(t.security_id))
                                 for t in active if t.security_id})
 
-            if self._demo:
-                by_seg = {}
-                for seg, sid in instruments:
-                    by_seg.setdefault(seg, []).append(sid)
-                prices = demo_market.get_ltp_batch(by_seg)
-                if active:
-                    self._set_setting(db, "md_status", "ok:demo")
-            else:
-                # Market data uses the DATA account (may differ from trading).
-                cid, tok = self._data_creds(db)
-                if not cid or not tok:
-                    if active:
-                        self._set_setting(db, "md_status",
-                                          "Data account not connected — connect on the Broker tab to get prices.")
-                    db.commit()
-                    return
-                prices = self._collect_prices(db, cid, tok, instruments)
-
+            prices = self._fetch_prices(db, data_provider, instruments, active)
             kill = self._kill_switch_on(db)
-            live_broker = self._live_broker(db)
+            live_broker = self._trade_broker(db, trade_provider)
 
             for t in active:
                 if not t.security_id:
@@ -219,10 +255,10 @@ class TradingEngine:
         return prices
 
     def _broker_for(self, t, live_broker):
-        # DEMO mode never sends real orders; TEST mode is always paper.
-        if self._demo or t.mode == "TEST":
+        # TEST trades and the DEMO trading provider always use the paper broker.
+        if t.mode == "TEST" or self._trade_provider == "DEMO":
             return self.paper
-        return live_broker
+        return live_broker     # DhanBroker / AngelBroker (None if not connected)
 
     def _place_confirmed(self, db, t, broker, is_exit, qty):
         """Place an order and (for live Dhan) confirm what ACTUALLY happened.
@@ -243,9 +279,9 @@ class TradingEngine:
                       "WARN", t.id)             # ERROR -> retryable
         if not res.ok:
             return res
-        if broker.name != "DHAN":
+        if broker.name == "PAPER":
             return res                          # paper/demo: filled at live price
-        # Verify with Dhan what really happened.
+        # Verify with the live broker (Dhan/Angel) what really happened.
         status, traded_price, _, reason = broker.confirm(res.order_id)
         res.status = status or res.status
         if status == "TRADED":
@@ -273,10 +309,15 @@ class TradingEngine:
             return
 
         broker = self._broker_for(t, live_broker)
+        if broker is None:
+            if not self._warned_no_broker:
+                self._warned_no_broker = True
+                self._log(db, "Trading provider not connected — cannot place orders.", "WARN", t.id)
+            return
 
         # If we already placed a live entry order, just CONFIRM it (never place
         # a second order) — this prevents duplicate/ghost trades.
-        if t.broker_order_id and broker.name == "DHAN":
+        if t.broker_order_id and broker.name in ("DHAN", "ANGEL"):
             status, traded_price, _, reason = broker.order_status(t.broker_order_id)
             if status == "TRADED":
                 self._open_trade(db, t, traded_price or t.last_price, broker)
@@ -387,6 +428,9 @@ class TradingEngine:
             t.status = "CLOSED"
             return
         broker = self._broker_for(t, live_broker)
+        if broker is None:
+            self._update_pnl(t, price)     # keep P&L live even if exits can't fire
+            return
 
         # 0) Trailing stop-loss: each time the price advances another trail-step,
         #    raise the stop-loss by the same step (it RESPECTS the fixed SL, which

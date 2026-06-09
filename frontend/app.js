@@ -134,6 +134,10 @@ async function refreshSummary() {
     else ba.style.display = "none";
   }
 
+  // Angel instrument-master still syncing while Angel is an active provider?
+  window._angelSyncing = !!(s.angel_map && s.angel_map.loading) &&
+    (s.data_provider === "ANGEL" || s.trade_provider === "ANGEL");
+
   // demo direction state
   const dir = s.demo_direction || 0;
   const dirState = document.getElementById("demoDirState");
@@ -465,8 +469,10 @@ ulSearch.addEventListener("input", () => {
 });
 
 function renderUlResults(rows) {
+  const syncNote = window._angelSyncing
+    ? `<div class="item"><div class="meta"><span class="spinner"></span> Syncing Angel instruments… some strikes may not be visible yet</div></div>` : "";
   if (!rows.length) {
-    ulResults.innerHTML = `<div class="item"><div class="meta">No matches.</div></div>`;
+    ulResults.innerHTML = syncNote || `<div class="item"><div class="meta">No matches.</div></div>`;
   } else if (currentSeg === "EQUITY") {
     ulResults.innerHTML = rows.map((r, i) => `<div class="item" data-i="${i}">
       <div class="sym">${r.symbol}</div>
@@ -684,17 +690,19 @@ document.getElementById("killBtn").onclick = async () => {
   await refreshAll();
 };
 
-// ---- broker ----
-const MODE_DESC = {
-  DEMO: "🧪 Demo mode: everything is simulated — prices, the option chain, and orders. No Dhan, no subscription, no real money. Perfect for testing all features.",
-  DHAN: "Dhan mode: real live prices and (in LIVE trades) real orders on your Dhan account.",
-};
-function applyBrokerMode(mode) {
-  document.getElementById("modeDemo").classList.toggle("active", mode === "DEMO");
-  document.getElementById("modeDhan").classList.toggle("active", mode === "DHAN");
-  document.getElementById("dhanFields").style.display = mode === "DEMO" ? "none" : "block";
-  document.getElementById("modeDesc").textContent = MODE_DESC[mode] || "";
-  document.getElementById("demoControls").style.display = mode === "DEMO" ? "flex" : "none";
+// ---- broker / providers ----
+const PNAME = { DEMO: "Demo", DHAN: "Dhan", ANGEL: "Angel One" };
+function applyProviders(dataP, tradeP) {
+  document.getElementById("dataProvider").value = dataP;
+  document.getElementById("tradeProvider").value = tradeP;
+  const usesDhan = dataP === "DHAN" || tradeP === "DHAN";
+  const usesAngel = dataP === "ANGEL" || tradeP === "ANGEL";
+  document.getElementById("dhanFields").style.display = usesDhan ? "block" : "none";
+  document.getElementById("angelFields").style.display = usesAngel ? "block" : "none";
+  document.getElementById("demoControls").style.display = dataP === "DEMO" ? "flex" : "none";
+  document.getElementById("providerDesc").textContent =
+    `Data from ${PNAME[dataP]}, orders to ${PNAME[tradeP]}.` +
+    (dataP !== tradeP ? " Symbols are auto-translated between brokers." : "");
 }
 
 // Demo price controls (push up/down/flat, reset)
@@ -732,30 +740,75 @@ function setAcctStatus(acct, info, same) {
   } else { st.textContent = "Not connected"; st.className = "pill pill-off"; }
 }
 
+function setAngelStatus(a) {
+  const cidEl = document.getElementById("angelClientId");
+  if (document.activeElement !== cidEl) cidEl.value = a.client_id || "";
+  const keyEl = document.getElementById("angelApiKey");
+  if (a.has_api_key && !keyEl.value && document.activeElement !== keyEl) keyEl.placeholder = "•••••• saved";
+  const totpEl = document.getElementById("angelTotp");
+  if (a.has_totp && !totpEl.value && document.activeElement !== totpEl) totpEl.placeholder = "•••••• saved";
+  const st = document.getElementById("angelStatus");
+  if (a.connected) {
+    st.textContent = a.token_hours_left != null ? `Connected · ~${a.token_hours_left}h left` : "Connected";
+    st.className = "pill pill-ok";
+  } else { st.textContent = "Not connected"; st.className = "pill pill-off"; }
+}
+
 async function refreshBroker() {
   const b = await api.get("/api/broker");
-  applyBrokerMode(b.mode || "DHAN");
-  // same-account toggle + panels
+  applyProviders(b.data_provider || "DEMO", b.trade_provider || "DEMO");
+  // Dhan same-account toggle + panels
   document.getElementById("sameAcct").checked = !!b.use_same_account;
   document.getElementById("acctData").style.display = b.use_same_account ? "none" : "block";
   document.getElementById("tradeTitle").textContent =
     b.use_same_account ? "Account (Data & Execution)" : "Trading / Execution account";
   setAcctStatus("TRADE", b.trade || {}, b.use_same_account);
   if (!b.use_same_account) setAcctStatus("DATA", b.data || {}, false);
-  // webhook URLs
+  setAngelStatus(b.angel || {});
   document.getElementById("redirectUrl").textContent = b.redirect_url || "—";
   document.getElementById("postbackUrl").textContent = b.postback_url || "—";
-  // unified vs split status pill (top of broker tab)
+  // split provider status pill
   const st = document.getElementById("brokerState");
-  if (b.mode === "DEMO") { st.textContent = "Demo connected"; st.className = "pill pill-ok"; }
-  else if (b.use_same_account) {
-    st.textContent = b.connected ? "Connected (Data & Execution)" : "Not connected";
-    st.className = "pill " + (b.connected ? "pill-ok" : "pill-off");
-  } else {
-    const d = (b.data || {}).connected, x = (b.trade || {}).connected;
-    st.innerHTML = `Data: ${d ? "✅" : "❌"} &nbsp; Execution: ${x ? "✅" : "❌"}`;
-    st.className = "pill " + (d && x ? "pill-ok" : "pill-off");
-  }
+  const dot = (ok) => (ok ? "🟢" : "🔴");
+  st.innerHTML = `${dot(b.data_connected)} Data: ${PNAME[b.data_provider]} &nbsp;|&nbsp; ${dot(b.trade_connected)} Trading: ${PNAME[b.trade_provider]}`;
+  st.className = "pill " + (b.data_connected && b.trade_connected ? "pill-ok" : "pill-off");
+}
+
+// provider dropdowns
+["dataProvider", "tradeProvider"].forEach((id) => {
+  document.getElementById(id).onchange = async () => {
+    const msg = document.getElementById("brokerMsg");
+    try {
+      await api.post("/api/providers", {
+        data_provider: document.getElementById("dataProvider").value,
+        trade_provider: document.getElementById("tradeProvider").value,
+      });
+      msg.textContent = "";
+      await refreshBroker();
+    } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; await refreshBroker(); }
+  };
+});
+
+// Angel save + login
+document.getElementById("saveAngelBtn").onclick = async () => {
+  await api.post("/api/angel/app", angelPayload());
+  document.getElementById("brokerMsg").textContent = "Saved.";
+  await refreshBroker();
+};
+document.getElementById("loginAngelBtn").onclick = async () => {
+  const msg = document.getElementById("brokerMsg");
+  await api.post("/api/angel/app", angelPayload());
+  try {
+    await api.post("/api/angel/login");
+    msg.textContent = "✅ Logged in to Angel One."; msg.className = "msg pos";
+    await refreshBroker();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+function angelPayload() {
+  return { client_id: document.getElementById("angelClientId").value,
+           api_key: document.getElementById("angelApiKey").value,
+           pin: document.getElementById("angelPin").value,
+           totp_secret: document.getElementById("angelTotp").value };
 }
 
 // same-account toggle
@@ -791,21 +844,6 @@ document.querySelectorAll("[data-login]").forEach((b) => {
   else if (p.get("login") === "failed") { const m = document.getElementById("brokerMsg"); if (m) { m.textContent = "❌ Dhan login failed — check App ID/Secret and try again."; m.className = "msg neg"; } }
 })();
 
-["modeDemo", "modeDhan"].forEach((id) => {
-  document.getElementById(id).onclick = async () => {
-    const mode = document.getElementById(id).dataset.mode;
-    const msg = document.getElementById("brokerMsg");
-    try {
-      await api.post("/api/broker/mode", { mode });
-      applyBrokerMode(mode);
-      msg.textContent = "";
-      await refreshBroker();
-    } catch (e) {
-      msg.textContent = "❌ " + e.message; msg.className = "msg neg";
-      await refreshBroker();   // revert the buttons to the real mode
-    }
-  };
-});
 document.getElementById("saveBrokerBtn").onclick = async () => {
   await api.post("/api/broker", {
     dhan_client_id: document.getElementById("dhanClientId").value,
