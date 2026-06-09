@@ -97,3 +97,17 @@ class Setting(Base):
 
     key = Column(String, primary_key=True)
     value = Column(Text, default="")
+
+
+class Account(Base):
+    """A configured broker login (Dhan or Angel). Users can add several."""
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    broker = Column(String, default="DHAN")        # DHAN / ANGEL
+    client_id = Column(String, default="")
+    label = Column(String, default="")             # e.g. "Dhan · 1100000000"
+    creds_json = Column(Text, default="{}")        # broker-specific secrets/tokens
+    connected = Column(Integer, default=0)
+    token_time = Column(DateTime, default=None, nullable=True)
+    created_at = Column(DateTime, default=_now)

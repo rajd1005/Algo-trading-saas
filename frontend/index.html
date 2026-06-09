@@ -187,101 +187,45 @@
   <section id="tab-broker" class="tab-panel">
     <div class="form">
       <div class="row">
-        <label>Data Provider
-          <select id="dataProvider">
-            <option value="DEMO">🧪 Demo (simulated)</option>
-            <option value="DHAN">Dhan</option>
-            <option value="ANGEL">Angel One</option>
-          </select>
-        </label>
-        <label>Trading Provider
-          <select id="tradeProvider">
-            <option value="DEMO">🧪 Demo (simulated)</option>
-            <option value="DHAN">Dhan</option>
-            <option value="ANGEL">Angel One</option>
-          </select>
-        </label>
+        <label>Data Provider <select id="dataProvider"></select></label>
+        <label>Trading Provider <select id="tradeProvider"></select></label>
       </div>
       <p class="muted" id="providerDesc" style="font-size:12px;"></p>
 
-      <div id="dhanFields">
-        <label class="check" style="margin-bottom:12px;">
-          <input type="checkbox" id="sameAcct" checked /> Use the same account for Data and Trading
-        </label>
-
-        <!-- Trading (or shared) account -->
-        <div class="acct-panel">
-          <div class="acct-title" id="tradeTitle">Account (Data &amp; Execution)</div>
-          <div class="row">
-            <label>Client ID <input id="dhanClientId" placeholder="1000000000" /></label>
-            <label>App ID <input id="dhanAppId" placeholder="app id" /></label>
-            <label>App Secret <input id="dhanAppSecret" type="password" placeholder="app secret" /></label>
-          </div>
-          <div class="row">
-            <button class="btn" data-save="TRADE">Save</button>
-            <button class="btn btn-primary" data-login="TRADE">🔐 Login with Dhan</button>
-            <span id="tradeStatus" class="pill pill-off">Not connected</span>
-          </div>
-        </div>
-
-        <!-- Data account (only when separate) -->
-        <div id="acctData" class="acct-panel" style="display:none;">
-          <div class="acct-title">Data / Feed account</div>
-          <div class="row">
-            <label>Client ID <input id="dataClientId" placeholder="1000000000" /></label>
-            <label>App ID <input id="dataAppId" placeholder="app id" /></label>
-            <label>App Secret <input id="dataAppSecret" type="password" placeholder="app secret" /></label>
-          </div>
-          <div class="row">
-            <button class="btn" data-save="DATA">Save</button>
-            <button class="btn btn-primary" data-login="DATA">🔐 Login (Data)</button>
-            <span id="dataStatus" class="pill pill-off">Not connected</span>
-          </div>
-        </div>
-
-        <div class="webhook-box">
-          <div class="muted" style="margin-bottom:4px;">Configure these on your Dhan app(s):</div>
-          <div>Redirect URL: <code id="redirectUrl">—</code></div>
-          <div>Order Postback URL: <code id="postbackUrl">—</code></div>
-          <div>Static IP to whitelist: <code id="staticIp">—</code></div>
-        </div>
-
-        <details style="margin-top:12px;">
-          <summary class="muted" style="cursor:pointer;">Advanced: paste a 24h trading token manually</summary>
-          <div class="row" style="margin-top:8px;">
-            <label>Access Token <input id="dhanToken" type="password" placeholder="paste token" /></label>
-          </div>
-          <div class="row">
-            <button id="saveBrokerBtn" class="btn">Save token</button>
-            <button id="connectBrokerBtn" class="btn">Connect / Verify</button>
-          </div>
-        </details>
+      <hr style="border-color:#2a3441; margin:14px 0;" />
+      <div class="acct-title">Broker accounts</div>
+      <div id="accountsList"></div>
+      <div class="row" style="align-items:center; gap:8px;">
+        <select id="newAcctBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option></select>
+        <button type="button" class="btn" id="addAcctBtn">+ Add account</button>
       </div>
-      <!-- Angel One (SmartAPI) -->
-      <div id="angelFields" style="display:none;">
-        <div class="acct-panel">
-          <div class="acct-title">Angel One — SmartAPI</div>
-          <div class="row">
-            <label>Client ID <input id="angelClientId" placeholder="A12345" /></label>
-            <label>API Key <input id="angelApiKey" placeholder="SmartAPI key" /></label>
-          </div>
-          <div class="row">
-            <label>PIN <input id="angelPin" type="password" placeholder="login PIN" /></label>
-            <label>TOTP Secret <input id="angelTotp" type="password" placeholder="TOTP secret key" /></label>
-          </div>
-          <div class="row">
-            <button class="btn" id="saveAngelBtn">Save</button>
-            <button class="btn btn-primary" id="loginAngelBtn">🔐 Login to Angel One</button>
-            <span id="angelStatus" class="pill pill-off">Not connected</span>
-          </div>
-          <div class="muted" style="font-size:11px;">Angel tokens expire daily; the app auto-renews while running.</div>
-          <div class="webhook-box" style="margin-top:10px;">
-            <div class="muted" style="margin-bottom:4px;">Configure these on your Angel SmartAPI app:</div>
-            <div>Redirect URL: <code id="angelRedirectUrl">—</code></div>
-            <div>Postback URL: <code id="angelPostbackUrl">—</code></div>
-            <div>Static IP to whitelist: <code id="angelStaticIp">—</code></div>
-          </div>
+
+      <!-- add/edit account form -->
+      <div id="acctForm" class="acct-panel" style="display:none; margin-top:12px;">
+        <div class="acct-title" id="acctFormTitle">New account</div>
+        <input type="hidden" id="acctId" />
+        <input type="hidden" id="acctBroker" />
+        <div class="row">
+          <label>Client ID <input id="acctClientId" placeholder="client id" /></label>
+          <label class="dhan-f">App ID <input id="acctAppId" placeholder="Dhan app id" /></label>
+          <label class="dhan-f">App Secret <input id="acctAppSecret" type="password" placeholder="Dhan app secret" /></label>
+          <label class="angel-f">API Key <input id="acctApiKey" placeholder="SmartAPI key" /></label>
+          <label class="angel-f">PIN <input id="acctPin" type="password" placeholder="login PIN" /></label>
+          <label class="angel-f">TOTP Secret <input id="acctTotp" type="password" placeholder="TOTP secret" /></label>
         </div>
+        <div class="row">
+          <button type="button" class="btn btn-primary" id="acctSaveBtn">Save account</button>
+          <button type="button" class="btn" id="acctCancelBtn">Cancel</button>
+        </div>
+      </div>
+
+      <div class="webhook-box" style="margin-top:12px;">
+        <div class="muted" style="margin-bottom:4px;">Configure these on your broker app (Dhan &amp; Angel):</div>
+        <div>Dhan Redirect URL: <code id="redirectUrl">—</code></div>
+        <div>Dhan Postback URL: <code id="postbackUrl">—</code></div>
+        <div>Angel Redirect URL: <code id="angelRedirectUrl">—</code></div>
+        <div>Angel Postback URL: <code id="angelPostbackUrl">—</code></div>
+        <div>Static IP to whitelist (both): <code id="staticIp">—</code></div>
       </div>
 
       <div class="row" style="margin-top:10px;">

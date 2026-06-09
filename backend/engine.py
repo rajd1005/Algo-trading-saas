@@ -21,7 +21,7 @@ import threading
 import time
 
 from database import SessionLocal
-from models import Trade, LogEntry, Setting
+from models import Trade, LogEntry, Setting, Account
 from market_data import DhanMarketData, demo_market
 from live_feed import feed
 from brokers import PaperBroker, DhanBroker
@@ -47,7 +47,7 @@ class TradingEngine:
         self._rest_cache = {}          # last REST prices (warmup / fallback)
         self._rest_cooldown = 0.0      # back off REST until this time (after a 429)
         self._demo = False             # DEMO mode (simulated prices + fake broker)
-        self._trade_provider = "DEMO"  # DEMO / DHAN / ANGEL
+        self._demo_trade = True        # is the trading provider DEMO (paper)?
         self._warned_no_broker = False
         self._last_feed_err = ""       # de-dupe feed errors in the log
         self._last_rest_err = ""
@@ -123,37 +123,44 @@ class TradingEngine:
         return (self._get_setting(db, "data_provider", "DEMO"),
                 self._get_setting(db, "trade_provider", "DEMO"))
 
-    def _angel_creds(self, db):
-        return (self._get_setting(db, "angel_client_id", ""),
-                self._get_setting(db, "angel_api_key", ""),
-                self._get_setting(db, "angel_jwt", ""))
+    def _provider_account(self, db, value):
+        if not value or value == "DEMO":
+            return None
+        try:
+            return db.get(Account, int(value))
+        except Exception:
+            return None
 
-    def _trade_broker(self, db, provider):
-        if provider == "DHAN":
-            cid, tok = self._trade_creds(db)
-            return DhanBroker(cid, tok) if cid and tok else None
-        if provider == "ANGEL":
-            cid, key, jwt = self._angel_creds(db)
-            return AngelBroker(cid, key, jwt) if cid and key and jwt else None
-        return None  # DEMO -> paper
+    def _trade_broker(self, db, value):
+        acc = self._provider_account(db, value)
+        if acc is None:
+            return None     # DEMO -> paper
+        creds = json.loads(acc.creds_json or "{}")
+        if acc.broker == "DHAN" and creds.get("access_token"):
+            return DhanBroker(acc.client_id, creds["access_token"])
+        if acc.broker == "ANGEL" and creds.get("jwt"):
+            return AngelBroker(acc.client_id, creds.get("api_key", ""), creds["jwt"])
+        return None
 
-    def _fetch_prices(self, db, provider, instruments, active):
+    def _fetch_prices(self, db, value, instruments, active):
         by_seg = {}
         for seg, sid in instruments:
             by_seg.setdefault(seg, []).append(sid)
-        if provider == "DEMO":
+        acc = self._provider_account(db, value)
+        if acc is None:     # DEMO
             if active:
                 self._set_setting(db, "md_status", "ok:demo")
             return demo_market.get_ltp_batch(by_seg)
-        if provider == "DHAN":
-            cid, tok = self._data_creds(db)
+        creds = json.loads(acc.creds_json or "{}")
+        if acc.broker == "DHAN":
+            cid, tok = acc.client_id, creds.get("access_token", "")
             if not cid or not tok:
                 if active:
                     self._set_setting(db, "md_status", "Data (Dhan) not connected — connect on the Broker tab.")
                 return {}
             return self._collect_prices(db, cid, tok, instruments)
-        if provider == "ANGEL":
-            cid, key, jwt = self._angel_creds(db)
+        if acc.broker == "ANGEL":
+            cid, key, jwt = acc.client_id, creds.get("api_key", ""), creds.get("jwt", "")
             if not cid or not key or not jwt:
                 if active:
                     self._set_setting(db, "md_status", "Data (Angel) not connected — connect on the Broker tab.")
@@ -174,7 +181,7 @@ class TradingEngine:
             active = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
 
             data_provider, trade_provider = self._providers(db)
-            self._trade_provider = trade_provider
+            self._demo_trade = self._provider_account(db, trade_provider) is None
             instruments = list({(t.exchange_segment, str(t.security_id))
                                 for t in active if t.security_id})
 
@@ -256,7 +263,7 @@ class TradingEngine:
 
     def _broker_for(self, t, live_broker):
         # TEST trades and the DEMO trading provider always use the paper broker.
-        if t.mode == "TEST" or self._trade_provider == "DEMO":
+        if t.mode == "TEST" or self._demo_trade:
             return self.paper
         return live_broker     # DhanBroker / AngelBroker (None if not connected)
 

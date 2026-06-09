@@ -693,188 +693,138 @@ document.getElementById("killBtn").onclick = async () => {
   await refreshAll();
 };
 
-// ---- broker / providers ----
-const PNAME = { DEMO: "Demo", DHAN: "Dhan", ANGEL: "Angel One" };
-function applyProviders(dataP, tradeP) {
-  document.getElementById("dataProvider").value = dataP;
-  document.getElementById("tradeProvider").value = tradeP;
-  const usesDhan = dataP === "DHAN" || tradeP === "DHAN";
-  const usesAngel = dataP === "ANGEL" || tradeP === "ANGEL";
-  document.getElementById("dhanFields").style.display = usesDhan ? "block" : "none";
-  document.getElementById("angelFields").style.display = usesAngel ? "block" : "none";
-  document.getElementById("demoControls").style.display = dataP === "DEMO" ? "flex" : "none";
-  document.getElementById("providerDesc").textContent =
-    `Data from ${PNAME[dataP]}, orders to ${PNAME[tradeP]}.` +
-    (dataP !== tradeP ? " Symbols are auto-translated between brokers." : "");
+// ---- broker / providers / accounts ----
+let _accounts = [];
+function provLabel(value) {
+  if (value === "DEMO") return "🧪 Demo (simulated)";
+  const a = _accounts.find((x) => String(x.id) === String(value));
+  return a ? a.label : "—";
+}
+function fillProviderSelect(id, value) {
+  const sel = document.getElementById(id);
+  let html = `<option value="DEMO">🧪 Demo (simulated)</option>`;
+  html += _accounts.map((a) => `<option value="${a.id}">${a.label}${a.connected ? " ✓" : ""}</option>`).join("");
+  sel.innerHTML = html;
+  sel.value = value;
 }
 
-// Demo price controls (push up/down/flat, reset)
+// Demo price controls
 document.querySelectorAll("[data-dir]").forEach((b) => {
   b.onclick = async () => { await api.post("/api/demo/direction", { direction: b.dataset.dir }); await refreshSummary(); };
 });
-document.getElementById("demoReset").onclick = async () => {
-  await api.post("/api/demo/reset"); await refreshAll();
-};
+document.getElementById("demoReset").onclick = async () => { await api.post("/api/demo/reset"); await refreshAll(); };
 
-// per-account field ids
-const ACCT_FIELDS = {
-  TRADE: { cid: "dhanClientId", appId: "dhanAppId", secret: "dhanAppSecret", status: "tradeStatus" },
-  DATA: { cid: "dataClientId", appId: "dataAppId", secret: "dataAppSecret", status: "dataStatus" },
-};
-function acctPayload(acct) {
-  const f = ACCT_FIELDS[acct];
-  return { account: acct, client_id: document.getElementById(f.cid).value,
-           app_id: document.getElementById(f.appId).value,
-           app_secret: document.getElementById(f.secret).value };
-}
-function setAcctStatus(acct, info, same) {
-  const f = ACCT_FIELDS[acct];
-  const cidEl = document.getElementById(f.cid);
-  if (document.activeElement !== cidEl) cidEl.value = info.client_id || "";
-  const appEl = document.getElementById(f.appId);
-  if (document.activeElement !== appEl) appEl.value = info.app_id || "";
-  const secEl = document.getElementById(f.secret);
-  if (info.has_app_secret && !secEl.value && document.activeElement !== secEl)
-    secEl.placeholder = "•••••• saved";
-  const st = document.getElementById(f.status);
-  if (info.connected) {
-    st.textContent = info.token_hours_left != null ? `Connected · ~${info.token_hours_left}h left` : "Connected";
-    st.className = "pill pill-ok";
-  } else { st.textContent = "Not connected"; st.className = "pill pill-off"; }
+function renderAccounts() {
+  const box = document.getElementById("accountsList");
+  if (!_accounts.length) { box.innerHTML = `<div class="muted" style="margin-bottom:8px;">No accounts yet — add one below.</div>`; return; }
+  box.innerHTML = _accounts.map((a) => `
+    <div class="acct-row">
+      <span class="acct-name">${a.label}</span>
+      <span class="pill ${a.connected ? "pill-ok" : "pill-off"}">${a.connected ? (a.token_hours_left != null ? `Connected · ~${a.token_hours_left}h` : "Connected") : "Not connected"}</span>
+      <span style="flex:1;"></span>
+      <button class="btn btn-sm" data-login-acc="${a.id}" data-broker="${a.broker}">🔐 Login</button>
+      <button class="btn btn-sm" data-edit-acc="${a.id}">Edit</button>
+      <button class="btn btn-sm" data-del-acc="${a.id}">✕</button>
+    </div>`).join("");
+  box.querySelectorAll("[data-login-acc]").forEach((b) => b.onclick = () => loginAccount(b.dataset.loginAcc, b.dataset.broker));
+  box.querySelectorAll("[data-edit-acc]").forEach((b) => b.onclick = () => editAccount(b.dataset.editAcc));
+  box.querySelectorAll("[data-del-acc]").forEach((b) => b.onclick = async () => {
+    if (confirm("Delete this account?")) { await api.del("/api/accounts/" + b.dataset.delAcc); await refreshBroker(); }
+  });
 }
 
-function setAngelStatus(a) {
-  const cidEl = document.getElementById("angelClientId");
-  if (document.activeElement !== cidEl) cidEl.value = a.client_id || "";
-  const keyEl = document.getElementById("angelApiKey");
-  if (a.has_api_key && !keyEl.value && document.activeElement !== keyEl) keyEl.placeholder = "•••••• saved";
-  const totpEl = document.getElementById("angelTotp");
-  if (a.has_totp && !totpEl.value && document.activeElement !== totpEl) totpEl.placeholder = "•••••• saved";
-  const st = document.getElementById("angelStatus");
-  if (a.connected) {
-    st.textContent = a.token_hours_left != null ? `Connected · ~${a.token_hours_left}h left` : "Connected";
-    st.className = "pill pill-ok";
-  } else { st.textContent = "Not connected"; st.className = "pill pill-off"; }
+async function loginAccount(id, broker) {
+  const msg = document.getElementById("brokerMsg");
+  try {
+    if (broker === "DHAN") {
+      const r = await api.get("/api/dhan/login?account_id=" + id);
+      window.location.href = r.login_url;       // redirect to Dhan
+    } else {
+      await api.post("/api/angel/login", { account_id: Number(id) });
+      msg.textContent = "✅ Logged in to Angel One."; msg.className = "msg pos";
+      await refreshBroker();
+    }
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 }
 
 async function refreshBroker() {
   const b = await api.get("/api/broker");
-  applyProviders(b.data_provider || "DEMO", b.trade_provider || "DEMO");
-  // Dhan same-account toggle + panels
-  document.getElementById("sameAcct").checked = !!b.use_same_account;
-  document.getElementById("acctData").style.display = b.use_same_account ? "none" : "block";
-  document.getElementById("tradeTitle").textContent =
-    b.use_same_account ? "Account (Data & Execution)" : "Trading / Execution account";
-  setAcctStatus("TRADE", b.trade || {}, b.use_same_account);
-  if (!b.use_same_account) setAcctStatus("DATA", b.data || {}, false);
-  setAngelStatus(b.angel || {});
+  _accounts = b.accounts || [];
+  fillProviderSelect("dataProvider", b.data_provider || "DEMO");
+  fillProviderSelect("tradeProvider", b.trade_provider || "DEMO");
+  renderAccounts();
+  document.getElementById("demoControls").style.display = (b.data_provider === "DEMO") ? "flex" : "none";
+  document.getElementById("providerDesc").textContent =
+    `Data from ${provLabel(b.data_provider)}, orders to ${provLabel(b.trade_provider)}.` +
+    (b.data_provider !== b.trade_provider ? " Symbols are auto-translated between brokers." : "");
   document.getElementById("redirectUrl").textContent = b.redirect_url || "—";
   document.getElementById("postbackUrl").textContent = b.postback_url || "—";
-  document.getElementById("staticIp").textContent = b.static_ip || "detecting…";
   document.getElementById("angelRedirectUrl").textContent = b.angel_redirect_url || "—";
   document.getElementById("angelPostbackUrl").textContent = b.angel_postback_url || "—";
-  document.getElementById("angelStaticIp").textContent = b.static_ip || "detecting…";
-  // split provider status pill
+  document.getElementById("staticIp").textContent = b.static_ip || "detecting…";
   const st = document.getElementById("brokerState");
   const dot = (ok) => (ok ? "🟢" : "🔴");
-  st.innerHTML = `${dot(b.data_connected)} Data: ${PNAME[b.data_provider]} &nbsp;|&nbsp; ${dot(b.trade_connected)} Trading: ${PNAME[b.trade_provider]}`;
+  st.innerHTML = `${dot(b.data_connected)} Data: ${provLabel(b.data_provider)} &nbsp;|&nbsp; ${dot(b.trade_connected)} Trading: ${provLabel(b.trade_provider)}`;
   st.className = "pill " + (b.data_connected && b.trade_connected ? "pill-ok" : "pill-off");
 }
 
-// provider dropdowns (Demo is all-or-nothing — it can't be mixed with a live broker)
+// provider dropdowns (Demo is all-or-nothing)
 ["dataProvider", "tradeProvider"].forEach((id) => {
   document.getElementById(id).onchange = async () => {
     let dp = document.getElementById("dataProvider").value;
     let tp = document.getElementById("tradeProvider").value;
-    if (id === "dataProvider") {
-      if (dp === "DEMO") tp = "DEMO"; else if (tp === "DEMO") tp = dp;
-    } else {
-      if (tp === "DEMO") dp = "DEMO"; else if (dp === "DEMO") dp = tp;
-    }
-    document.getElementById("dataProvider").value = dp;
-    document.getElementById("tradeProvider").value = tp;
+    if (id === "dataProvider") { if (dp === "DEMO") tp = "DEMO"; else if (tp === "DEMO") tp = dp; }
+    else { if (tp === "DEMO") dp = "DEMO"; else if (dp === "DEMO") dp = tp; }
     const msg = document.getElementById("brokerMsg");
     try {
       await api.post("/api/providers", { data_provider: dp, trade_provider: tp });
-      msg.textContent = "";
-      await refreshBroker();
+      msg.textContent = ""; await refreshBroker();
     } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; await refreshBroker(); }
   };
 });
 
-// Angel save + login
-document.getElementById("saveAngelBtn").onclick = async () => {
-  await api.post("/api/angel/app", angelPayload());
-  document.getElementById("brokerMsg").textContent = "Saved.";
-  await refreshBroker();
-};
-document.getElementById("loginAngelBtn").onclick = async () => {
-  const msg = document.getElementById("brokerMsg");
-  await api.post("/api/angel/app", angelPayload());
-  try {
-    await api.post("/api/angel/login");
-    msg.textContent = "✅ Logged in to Angel One."; msg.className = "msg pos";
-    await refreshBroker();
-  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
-};
-function angelPayload() {
-  return { client_id: document.getElementById("angelClientId").value,
-           api_key: document.getElementById("angelApiKey").value,
-           pin: document.getElementById("angelPin").value,
-           totp_secret: document.getElementById("angelTotp").value };
+// add / edit account form
+function showAcctForm(broker, acc) {
+  document.getElementById("acctForm").style.display = "block";
+  document.getElementById("acctBroker").value = broker;
+  document.getElementById("acctId").value = acc ? acc.id : "";
+  document.getElementById("acctFormTitle").textContent = (acc ? "Edit " : "New ") + (broker === "DHAN" ? "Dhan" : "Angel One") + " account";
+  document.querySelectorAll(".dhan-f").forEach((e) => e.style.display = broker === "DHAN" ? "" : "none");
+  document.querySelectorAll(".angel-f").forEach((e) => e.style.display = broker === "ANGEL" ? "" : "none");
+  ["acctClientId", "acctAppId", "acctAppSecret", "acctApiKey", "acctPin", "acctTotp"].forEach((i) => document.getElementById(i).value = "");
+  document.getElementById("acctClientId").value = acc ? acc.client_id : "";
+  if (acc && acc.has_secret) {
+    (broker === "DHAN" ? document.getElementById("acctAppSecret") : document.getElementById("acctApiKey")).placeholder = "•••••• saved (blank = keep)";
+  }
 }
-
-// same-account toggle
-document.getElementById("sameAcct").onchange = async (e) => {
-  await api.post("/api/broker/same", { same: e.target.checked });
+document.getElementById("addAcctBtn").onclick = () => showAcctForm(document.getElementById("newAcctBroker").value, null);
+function editAccount(id) { const a = _accounts.find((x) => String(x.id) === String(id)); if (a) showAcctForm(a.broker, a); }
+document.getElementById("acctCancelBtn").onclick = () => document.getElementById("acctForm").style.display = "none";
+document.getElementById("acctSaveBtn").onclick = async () => {
+  const broker = document.getElementById("acctBroker").value;
+  const payload = { broker, id: document.getElementById("acctId").value || undefined,
+    client_id: document.getElementById("acctClientId").value };
+  if (broker === "DHAN") {
+    payload.app_id = document.getElementById("acctAppId").value;
+    payload.app_secret = document.getElementById("acctAppSecret").value;
+  } else {
+    payload.api_key = document.getElementById("acctApiKey").value;
+    payload.pin = document.getElementById("acctPin").value;
+    payload.totp_secret = document.getElementById("acctTotp").value;
+  }
+  await api.post("/api/accounts", payload);
+  document.getElementById("acctForm").style.display = "none";
+  document.getElementById("brokerMsg").textContent = "Account saved.";
   await refreshBroker();
 };
 
-// per-account Save + Login buttons
-document.querySelectorAll("[data-save]").forEach((b) => {
-  b.onclick = async () => {
-    await api.post("/api/dhan/app", acctPayload(b.dataset.save));
-    document.getElementById("brokerMsg").textContent = "Saved.";
-    await refreshBroker();
-  };
-});
-document.querySelectorAll("[data-login]").forEach((b) => {
-  b.onclick = async () => {
-    const acct = b.dataset.login;
-    const msg = document.getElementById("brokerMsg");
-    await api.post("/api/dhan/app", acctPayload(acct));   // save latest first
-    try {
-      const r = await api.get("/api/dhan/login?account=" + acct);
-      window.location.href = r.login_url;
-    } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
-  };
-});
-
-// Show a message after returning from the Dhan login redirect
+// message after returning from a broker login redirect
 (function () {
   const p = new URLSearchParams(location.search);
-  if (p.get("login") === "ok") { const m = document.getElementById("brokerMsg"); if (m) { m.textContent = "✅ Logged in to Dhan."; m.className = "msg pos"; } }
-  else if (p.get("login") === "failed") { const m = document.getElementById("brokerMsg"); if (m) { m.textContent = "❌ Dhan login failed — check App ID/Secret and try again."; m.className = "msg neg"; } }
+  const m = document.getElementById("brokerMsg");
+  if (p.get("login") === "ok" && m) { m.textContent = "✅ Logged in."; m.className = "msg pos"; }
+  else if (p.get("login") === "failed" && m) { m.textContent = "❌ Login failed — check the account details and try again."; m.className = "msg neg"; }
 })();
-
-document.getElementById("saveBrokerBtn").onclick = async () => {
-  await api.post("/api/broker", {
-    dhan_client_id: document.getElementById("dhanClientId").value,
-    dhan_access_token: document.getElementById("dhanToken").value,
-  });
-  document.getElementById("brokerMsg").textContent = "Saved.";
-  await refreshBroker();
-};
-document.getElementById("connectBrokerBtn").onclick = async () => {
-  const msg = document.getElementById("brokerMsg");
-  msg.textContent = "Connecting…";
-  try {
-    const r = await api.post("/api/broker/connect");
-    msg.textContent = (r.connected ? "✅ " : "❌ ") + r.message;
-    msg.className = "msg " + (r.connected ? "pos" : "neg");
-  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
-  await refreshBroker();
-};
 
 // ---- modify SL/Targets modal (direct prices) ----
 const modifyModal = document.getElementById("modifyModal");

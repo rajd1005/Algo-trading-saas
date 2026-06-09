@@ -154,6 +154,9 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 /* broker account panels */
 .acct-panel { border: 1px solid var(--line); border-radius: 9px; padding: 14px; margin-bottom: 12px; }
 .acct-title { font-weight: 700; font-size: 14px; margin-bottom: 10px; color: var(--text); }
+.acct-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: #11171d; flex-wrap: wrap; }
+.acct-name { font-weight: 600; font-size: 14px; }
 .webhook-box { background: #11171d; border: 1px solid var(--line); border-radius: 8px;
   padding: 10px 12px; font-size: 12px; margin-bottom: 10px; }
 .webhook-box code { color: var(--accent); word-break: break-all; }
