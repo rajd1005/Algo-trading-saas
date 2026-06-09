@@ -203,10 +203,10 @@
             <span class="muted" style="font-size:11px;">auto square-off when this trade's MTM ≤ −amount</span></label>
         </div>
         <div class="field" style="margin-top:8px;">
-          <div class="field-label">Step profit-lock (booked profit)</div>
-          <div class="muted" style="font-size:11px; margin-bottom:6px;">Arm at a profit level, then square off if MTM falls back to the locked amount. Add tiers, e.g. hit ₹10k → lock ₹5k.</div>
-          <div id="lockRows"></div>
-          <button type="button" class="btn btn-sm" id="addLock">+ Add tier</button>
+          <div class="field-label">Auto profit-lock (booked profit)</div>
+          <div class="lock-rule">for every ₹<input name="lock_step" type="number" step="1" value="0" placeholder="1000" />
+            profit, secure ₹<input name="lock_amount" type="number" step="1" value="0" placeholder="500" /></div>
+          <div class="muted" style="font-size:11px; margin-top:4px;">The lock ratchets up automatically; if MTM falls back to the locked level the position is squared off. Leave 0 to disable.</div>
         </div>
       </details>
 
@@ -228,10 +228,10 @@
       </div>
 
       <div class="field" style="margin-top:10px;">
-        <div class="field-label">Account-level step profit-lock</div>
-        <div class="muted" style="font-size:12px; margin-bottom:6px;">Applies to the combined day P&L. Arm at a threshold, then secure the locked amount if it reverses. Multiple tiers allowed.</div>
-        <div id="globalLockRows"></div>
-        <button type="button" class="btn btn-sm" id="addGlobalLock">+ Add tier</button>
+        <div class="field-label">Account-level auto profit-lock</div>
+        <div class="muted" style="font-size:12px; margin-bottom:6px;">Applies to the combined day P&L of the selected trading account. The lock ratchets up automatically; if the day's P&L reverses to the locked level, open positions are squared off.</div>
+        <div class="lock-rule">for every ₹<input id="globalLockStep" type="number" step="1" value="0" placeholder="1000" />
+          day profit, secure ₹<input id="globalLockAmount" type="number" step="1" value="0" placeholder="500" /></div>
       </div>
       <div class="row" style="margin-top:10px;">
         <button type="button" class="btn btn-primary" id="saveSettingsBtn">Save settings</button>
@@ -244,7 +244,13 @@
       <p class="muted" style="font-size:12px;">Save default SL / trailing / targets / max profit-loss per symbol. When you pick that symbol in New Trade, these auto-fill.</p>
       <div class="acct-panel">
         <div class="row">
-          <label>Symbol (underlying) <input id="prSymbol" placeholder="BANKNIFTY" /></label>
+          <label style="position:relative; flex:2;">Symbol (underlying)
+            <input id="prSymbol" autocomplete="off" placeholder="Search NIFTY, BANKNIFTY, RELIANCE, GOLD…" />
+            <div id="prResults" class="dropdown"></div>
+          </label>
+          <label style="max-width:120px;">Lots <input id="prLots" type="number" min="0" value="0" placeholder="0" /></label>
+        </div>
+        <div class="row">
           <label>Stop-loss (pts) <input id="prSl" type="number" step="0.05" value="0" /></label>
           <label>Trailing SL (pts)
             <input id="prTrail" type="number" step="0.05" value="0" />
@@ -263,9 +269,9 @@
           <label>Max Loss (₹) <input id="prMaxLoss" type="number" step="1" value="0" /></label>
         </div>
         <div class="field">
-          <div class="field-label">Profit-lock tiers</div>
-          <div id="prLockRows"></div>
-          <button type="button" class="btn btn-sm" id="prAddLock">+ Add tier</button>
+          <div class="field-label">Auto profit-lock</div>
+          <div class="lock-rule">for every ₹<input id="prLockStep" type="number" step="1" value="0" placeholder="1000" />
+            profit, secure ₹<input id="prLockAmount" type="number" step="1" value="0" placeholder="500" /></div>
         </div>
         <div class="row" style="margin-top:8px;">
           <button type="button" class="btn btn-primary" id="savePresetBtn">Save preset</button>
@@ -432,9 +438,9 @@
         <label>Max Loss (₹) <input id="modMaxLoss" type="number" step="1" value="0" /></label>
       </div>
       <div class="field" style="margin-top:8px;">
-        <div class="field-label">Step profit-lock tiers</div>
-        <div id="modLockRows"></div>
-        <button type="button" class="btn btn-sm" id="modAddLock">+ Add tier</button>
+        <div class="field-label">Auto profit-lock</div>
+        <div class="lock-rule">for every ₹<input id="modLockStep" type="number" step="1" value="0" placeholder="1000" />
+          profit, secure ₹<input id="modLockAmount" type="number" step="1" value="0" placeholder="500" /></div>
       </div>
       <div class="row" style="margin-top:14px;">
         <button class="btn btn-primary" id="modSave">Save</button>

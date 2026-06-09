@@ -57,7 +57,10 @@ class Trade(Base):
     # --- Trade-level monetary risk (on this trade's live MTM) ---
     max_profit_amt = Column(Float, default=0.0)    # auto square-off if MTM >= this (₹)
     max_loss_amt = Column(Float, default=0.0)      # auto square-off if MTM <= -this (₹)
-    profit_lock_json = Column(Text, default="")    # tiers [{"activate":x,"lock":y}]
+    # Auto step profit-lock: "for every ₹lock_step profit, secure ₹lock_amount".
+    lock_step = Column(Float, default=0.0)
+    lock_amount = Column(Float, default=0.0)
+    profit_lock_json = Column(Text, default="")    # legacy (tiers); no longer used
     lock_floor = Column(Float, default=0.0)        # currently-armed locked-profit floor (₹)
 
     # Stop-loss / target are entered as POINTS; the absolute prices above are
@@ -131,6 +134,7 @@ class SymbolPreset(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String, index=True, default="")    # underlying, UPPER (BANKNIFTY…)
+    lots = Column(Integer, default=0)                  # default lots to pre-fill (0 = keep)
     sl_points = Column(Float, default=0.0)
     trail_sl = Column(Float, default=0.0)
     trail_mode = Column(String, default="CONTINUE")
@@ -138,5 +142,7 @@ class SymbolPreset(Base):
     targets_json = Column(Text, default="")            # multi-target points list, e.g. [100,100]
     max_profit_amt = Column(Float, default=0.0)
     max_loss_amt = Column(Float, default=0.0)
-    profit_lock_json = Column(Text, default="")        # tiers [{"activate":x,"lock":y}]
+    lock_step = Column(Float, default=0.0)             # auto profit-lock: every ₹step…
+    lock_amount = Column(Float, default=0.0)           # …secure ₹amount
+    profit_lock_json = Column(Text, default="")        # legacy (tiers); no longer used
     created_at = Column(DateTime, default=_now)

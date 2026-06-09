@@ -130,20 +130,6 @@ def _daily_halted(db) -> bool:
             and get_setting(db, "daily_halt_date", "") == _ist_today())
 
 
-def _tiers_json(raw_list) -> str:
-    """Clean a list of {activate, lock} dicts -> JSON (drops empty/invalid tiers)."""
-    tiers = []
-    for x in (raw_list or []):
-        try:
-            a, l = float(x.get("activate", 0)), float(x.get("lock", 0))
-        except Exception:
-            continue
-        if a > 0 and l > 0:
-            tiers.append({"activate": a, "lock": l})
-    tiers.sort(key=lambda t: t["activate"])
-    return json.dumps(tiers) if tiers else ""
-
-
 def get_trade_creds(db):
     """Credentials used for ORDER execution + account info (balance/positions)."""
     return (get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID),
@@ -506,11 +492,9 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
                                  "(so we know its Security ID for live prices).")
     data = payload.model_dump()
     raw_targets = data.pop("targets", [])
-    raw_lock = data.pop("profit_lock", [])
     targets = [{"points": float(x["points"]), "qty": int(x["qty"]), "hit": False}
                for x in raw_targets if float(x.get("points", 0)) > 0 and int(x.get("qty", 0)) > 0]
     t = Trade(**data)
-    t.profit_lock_json = _tiers_json(raw_lock)
     t.name = data.get("name") or data["symbol"]
     t.targets_json = json.dumps(targets) if targets else ""
     # Provisional SL/target prices for display before entry (final ones computed at fill).
@@ -521,7 +505,14 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
     db.add(t)
     db.commit()
     db.refresh(t)
-    db.add(LogEntry(message=f"Trade created: {t.symbol} [{t.mode}]", trade_id=t.id))
+    # Detailed creation log with the target broker / account + entry style.
+    tp = _account_for_provider(db, get_setting(db, "trade_provider", "DEMO"))
+    broker_txt = "Demo/Paper" if (t.mode == "TEST" or tp is None) else (tp.label or _label(tp.broker, tp.client_id))
+    entry_txt = {"MARKET": "market", "LIMIT": f"limit @{t.entry_price}",
+                 "SCHEDULED": f"scheduled {t.scheduled_time} IST",
+                 "TRIGGER": f"trigger {t.trigger_dir or 'auto'} @{t.trigger_price}"}.get(t.entry_type, t.entry_type)
+    db.add(LogEntry(message=f"Trade #{t.id} created: {t.side} {t.symbol} x{t.quantity} "
+                            f"[{t.mode}] entry={entry_txt} via {broker_txt}", trade_id=t.id))
     db.commit()
     return t
 
@@ -547,10 +538,14 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
     if payload.max_loss_amt is not None:
         t.max_loss_amt = max(0.0, float(payload.max_loss_amt))
         changes.append(f"Max loss: {'₹%.0f' % t.max_loss_amt if t.max_loss_amt else 'off'}")
-    if payload.profit_lock is not None:
-        t.profit_lock_json = _tiers_json([x.model_dump() for x in payload.profit_lock])
-        t.lock_floor = 0.0       # re-arm against the new tiers
-        changes.append("Profit-lock tiers updated" if t.profit_lock_json else "Profit-lock removed")
+    if payload.lock_step is not None or payload.lock_amount is not None:
+        if payload.lock_step is not None:
+            t.lock_step = max(0.0, float(payload.lock_step))
+        if payload.lock_amount is not None:
+            t.lock_amount = max(0.0, float(payload.lock_amount))
+        t.lock_floor = 0.0       # re-arm against the new rule
+        changes.append(f"Profit-lock: every ₹{t.lock_step:.0f} secure ₹{t.lock_amount:.0f}"
+                       if (t.lock_step and t.lock_amount) else "Profit-lock removed")
 
     # Pending-only edits: scheduled time / algo trigger price.
     if t.status == "PENDING":
@@ -637,6 +632,7 @@ def cancel_trade(trade_id: int, db: Session = Depends(get_db)):
         raise HTTPException(400, "Only PENDING trades can be cancelled.")
     t.status = "CANCELLED"
     t.exit_reason = "MANUAL"
+    db.add(LogEntry(message=f"Trade #{t.id} cancelled (was pending): {t.symbol}", trade_id=t.id))
     db.commit()
     db.refresh(t)
     return t
@@ -894,16 +890,13 @@ def _num_setting(db, key):
 
 @app.get("/api/settings")
 def get_settings(db: Session = Depends(get_db)):
-    try:
-        lock_tiers = json.loads(get_setting(db, "global_profit_lock_json", "") or "[]")
-    except Exception:
-        lock_tiers = []
     return {
         "kill_switch": get_setting(db, "kill_switch", "off"),
         "default_mode": get_setting(db, "default_mode", "TEST"),
         "daily_max_profit": _num_setting(db, "daily_max_profit"),
         "daily_max_loss": _num_setting(db, "daily_max_loss"),
-        "global_profit_lock": lock_tiers,
+        "global_lock_step": _num_setting(db, "global_lock_step"),
+        "global_lock_amount": _num_setting(db, "global_lock_amount"),
         "daily_halt": _daily_halted(db),
         "daily_halt_reason": get_setting(db, "daily_halt_reason", ""),
     }
@@ -911,6 +904,7 @@ def get_settings(db: Session = Depends(get_db)):
 
 @app.post("/api/settings")
 def update_settings(payload: SettingsIn, db: Session = Depends(get_db)):
+    changed = []
     if payload.kill_switch is not None:
         set_setting(db, "kill_switch", "on" if payload.kill_switch else "off")
         db.add(LogEntry(message=f"Kill switch set to "
@@ -920,11 +914,20 @@ def update_settings(payload: SettingsIn, db: Session = Depends(get_db)):
         set_setting(db, "default_mode", payload.default_mode)
     if payload.daily_max_profit is not None:
         set_setting(db, "daily_max_profit", str(max(0.0, float(payload.daily_max_profit))))
+        changed.append(f"daily max profit ₹{max(0.0, float(payload.daily_max_profit)):.0f}")
     if payload.daily_max_loss is not None:
         set_setting(db, "daily_max_loss", str(max(0.0, float(payload.daily_max_loss))))
-    if payload.global_profit_lock is not None:
-        set_setting(db, "global_profit_lock_json",
-                    _tiers_json([x.model_dump() for x in payload.global_profit_lock]))
+        changed.append(f"daily max loss ₹{max(0.0, float(payload.daily_max_loss)):.0f}")
+    if payload.global_lock_step is not None:
+        set_setting(db, "global_lock_step", str(max(0.0, float(payload.global_lock_step))))
+    if payload.global_lock_amount is not None:
+        set_setting(db, "global_lock_amount", str(max(0.0, float(payload.global_lock_amount))))
+    if payload.global_lock_step is not None or payload.global_lock_amount is not None:
+        changed.append(f"account profit-lock every ₹{_num_setting(db, 'global_lock_step'):.0f} "
+                       f"secure ₹{_num_setting(db, 'global_lock_amount'):.0f}")
+    if changed:
+        db.add(LogEntry(message="Settings updated: " + ", ".join(changed), level="INFO"))
+        db.commit()
     return get_settings(db)
 
 
@@ -946,14 +949,12 @@ def _preset_dict(p):
         targets = json.loads(p.targets_json or "[]")
     except Exception:
         targets = []
-    try:
-        lock = json.loads(p.profit_lock_json or "[]")
-    except Exception:
-        lock = []
     return {
-        "id": p.id, "symbol": p.symbol, "sl_points": p.sl_points, "trail_sl": p.trail_sl,
+        "id": p.id, "symbol": p.symbol, "lots": p.lots or 0,
+        "sl_points": p.sl_points, "trail_sl": p.trail_sl,
         "trail_mode": p.trail_mode, "target_points": p.target_points, "targets": targets,
-        "max_profit_amt": p.max_profit_amt, "max_loss_amt": p.max_loss_amt, "profit_lock": lock,
+        "max_profit_amt": p.max_profit_amt, "max_loss_amt": p.max_loss_amt,
+        "lock_step": p.lock_step or 0.0, "lock_amount": p.lock_amount or 0.0,
     }
 
 
@@ -968,9 +969,11 @@ def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
     if not sym:
         raise HTTPException(400, "Enter a symbol (underlying) for the preset.")
     p = db.query(SymbolPreset).filter(SymbolPreset.symbol == sym).first()
+    is_new = p is None
     if p is None:
         p = SymbolPreset(symbol=sym)
         db.add(p)
+    p.lots = max(0, int(payload.lots or 0))
     p.sl_points = max(0.0, float(payload.sl_points))
     p.trail_sl = max(0.0, float(payload.trail_sl))
     p.trail_mode = "ENTRY" if str(payload.trail_mode).upper() == "ENTRY" else "CONTINUE"
@@ -979,9 +982,12 @@ def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
         if payload.targets else ""
     p.max_profit_amt = max(0.0, float(payload.max_profit_amt))
     p.max_loss_amt = max(0.0, float(payload.max_loss_amt))
-    p.profit_lock_json = _tiers_json([x.model_dump() for x in payload.profit_lock])
+    p.lock_step = max(0.0, float(payload.lock_step))
+    p.lock_amount = max(0.0, float(payload.lock_amount))
     db.commit()
     db.refresh(p)
+    db.add(LogEntry(message=f"Symbol preset {'created' if is_new else 'updated'}: {sym}", level="INFO"))
+    db.commit()
     return _preset_dict(p)
 
 
@@ -989,7 +995,9 @@ def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
 def delete_preset(preset_id: int, db: Session = Depends(get_db)):
     p = db.get(SymbolPreset, preset_id)
     if p:
+        sym = p.symbol
         db.delete(p)
+        db.add(LogEntry(message=f"Symbol preset deleted: {sym}", level="INFO"))
         db.commit()
     return {"ok": True}
 
@@ -1152,11 +1160,18 @@ def set_providers(payload: dict, db: Session = Depends(get_db)):
     active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
     if active > 0 and (new_data != cur_data or new_trade != cur_trade):
         raise HTTPException(400, f"{active} trade(s) are running — close them before switching providers.")
+    changed = (new_data != cur_data or new_trade != cur_trade)
     set_setting(db, "data_provider", new_data)
     set_setting(db, "trade_provider", new_trade)
     set_setting(db, "broker_mode", "DEMO" if new_trade == "DEMO" else "DHAN")
     for k in ("broker_balance", "broker_balance_provider", "broker_health", "md_status"):
         set_setting(db, k, "")
+    if changed:
+        da = _account_for_provider(db, new_data)
+        ta = _account_for_provider(db, new_trade)
+        dn = "Demo" if da is None else (da.label or _label(da.broker, da.client_id))
+        tn = "Demo" if ta is None else (ta.label or _label(ta.broker, ta.client_id))
+        db.add(LogEntry(message=f"Providers switched — Data: {dn}, Trading: {tn}", level="INFO"))
     db.commit()
     return {"data_provider": new_data, "trade_provider": new_trade}
 

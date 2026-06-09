@@ -402,33 +402,9 @@ function applyEntryType(et) {
 document.querySelectorAll("[data-et]").forEach((b) => { b.onclick = () => applyEntryType(b.dataset.et); });
 applyEntryType("MARKET");   // normalize the optional entry fields on load
 
-// ---- profit-lock tier rows (reused in New Trade, Settings, Presets, Modify) ----
-function addLockRow(container, activate = "", lock = "") {
-  const div = document.createElement("div");
-  div.className = "lockrow";
-  div.innerHTML = `<input class="lk-a" type="number" step="1" placeholder="activate ₹" value="${activate}" />
-    <span class="muted">→ lock</span>
-    <input class="lk-l" type="number" step="1" placeholder="lock ₹" value="${lock}" />
-    <button type="button" class="step lk-rm">×</button>`;
-  div.querySelector(".lk-rm").onclick = () => div.remove();
-  container.appendChild(div);
-}
-function readLockRows(container) {
-  return [...container.querySelectorAll(".lockrow")].map((r) => ({
-    activate: parseFloat(r.querySelector(".lk-a").value) || 0,
-    lock: parseFloat(r.querySelector(".lk-l").value) || 0,
-  })).filter((x) => x.activate > 0 && x.lock > 0);
-}
-function setLockRows(container, tiers) {
-  if (!container) return;
-  container.innerHTML = "";
-  (tiers || []).forEach((t) => addLockRow(container, t.activate, t.lock));
-}
-const _lockBtn = (btnId, contId) => { const b = document.getElementById(btnId); if (b) b.onclick = () => addLockRow(document.getElementById(contId)); };
-_lockBtn("addLock", "lockRows");
-_lockBtn("addGlobalLock", "globalLockRows");
-_lockBtn("prAddLock", "prLockRows");
-_lockBtn("modAddLock", "modLockRows");
+// small helper: read/write a numeric input by id
+const numVal = (id) => parseFloat(document.getElementById(id).value) || 0;
+const setVal = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
 
 const multiToggle = document.getElementById("multiToggle");
 const multiWrap = document.getElementById("multiWrap");
@@ -512,7 +488,8 @@ function resetOrderForm() {
   document.getElementById("targetRows").innerHTML = "";
   if (form.max_profit_amt) form.max_profit_amt.value = 0;
   if (form.max_loss_amt) form.max_loss_amt.value = 0;
-  setLockRows(document.getElementById("lockRows"), []);
+  if (form.lock_step) form.lock_step.value = 0;
+  if (form.lock_amount) form.lock_amount.value = 0;
   currentLotSize = 1; lotsInput.value = 1; updateQty();
 }
 const HINTS = { OPTION: "— search index / stock / commodity (NIFTY, RELIANCE, GOLD…), then pick a strike",
@@ -734,11 +711,11 @@ form.onsubmit = async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
   const payload = Object.fromEntries(fd.entries());
-  ["entry_price", "sl_points", "target_points", "trail_sl", "trigger_price", "max_profit_amt", "max_loss_amt"]
+  ["entry_price", "sl_points", "target_points", "trail_sl", "trigger_price",
+   "max_profit_amt", "max_loss_amt", "lock_step", "lock_amount"]
     .forEach((k) => (payload[k] = parseFloat(payload[k]) || 0));
   payload.quantity = parseInt(payload.quantity) || 1;
   payload.lot_size = currentLotSize;
-  payload.profit_lock = readLockRows(document.getElementById("lockRows"));
   if (multiToggle.checked) {
     payload.targets = [...document.querySelectorAll("#targetRows .trow")].map((r) => ({
       points: parseFloat(r.querySelector(".tp").value) || 0,
@@ -995,9 +972,8 @@ function openModify(id) {
   modDistribute();
   document.getElementById("modMaxProfit").value = t.max_profit_amt || 0;
   document.getElementById("modMaxLoss").value = t.max_loss_amt || 0;
-  let lock = [];
-  try { lock = JSON.parse(t.profit_lock_json || "[]"); } catch (e) { /* ignore */ }
-  setLockRows(document.getElementById("modLockRows"), lock);
+  setVal("modLockStep", t.lock_step || 0);
+  setVal("modLockAmount", t.lock_amount || 0);
   document.getElementById("modMsg").textContent = "";
   document.getElementById("modifyInfo").innerHTML =
     `<b>${t.symbol}</b> — entry ₹${t.entry_fill_price} · LTP ₹${t.last_price} · remaining ${remainingQty} qty (${modRemainingLots} lots, lot size ${modLotSize})`;
@@ -1017,7 +993,8 @@ document.getElementById("modSave").onclick = async () => {
       targets,
       max_profit_amt: parseFloat(document.getElementById("modMaxProfit").value) || 0,
       max_loss_amt: parseFloat(document.getElementById("modMaxLoss").value) || 0,
-      profit_lock: readLockRows(document.getElementById("modLockRows")),
+      lock_step: numVal("modLockStep"),
+      lock_amount: numVal("modLockAmount"),
     });
     modifyModal.style.display = "none";
     await refreshAll();
@@ -1048,6 +1025,7 @@ function applyPreset(key) {
   if (!key) return;
   const p = _presets[String(key).toUpperCase()];
   if (!p) return;
+  if (p.lots && p.lots > 0) { lotsInput.value = p.lots; updateQty(); }
   form.sl_points.value = p.sl_points || 0;
   form.trail_sl.value = p.trail_sl || 0;
   if (form.trail_mode) form.trail_mode.value = p.trail_mode || "CONTINUE";
@@ -1065,7 +1043,8 @@ function applyPreset(key) {
   }
   if (form.max_profit_amt) form.max_profit_amt.value = p.max_profit_amt || 0;
   if (form.max_loss_amt) form.max_loss_amt.value = p.max_loss_amt || 0;
-  setLockRows(document.getElementById("lockRows"), p.profit_lock || []);
+  if (form.lock_step) form.lock_step.value = p.lock_step || 0;
+  if (form.lock_amount) form.lock_amount.value = p.lock_amount || 0;
   const msg = document.getElementById("formMsg");
   msg.textContent = `↺ Preset applied for ${p.symbol}.`; msg.className = "msg pos";
 }
@@ -1073,11 +1052,11 @@ function renderPresets(rows) {
   const box = document.getElementById("presetList");
   if (!box) return;
   if (!rows.length) { box.innerHTML = `<p class="muted" style="font-size:12px;">No presets saved yet.</p>`; return; }
-  box.innerHTML = `<table class="data"><thead><tr><th>Symbol</th><th>SL</th><th>Trail</th><th>Targets</th><th>Max P / L</th><th>Lock</th><th></th></tr></thead><tbody>`
+  box.innerHTML = `<table class="data"><thead><tr><th>Symbol</th><th>Lots</th><th>SL</th><th>Trail</th><th>Targets</th><th>Max P / L</th><th>Lock</th><th></th></tr></thead><tbody>`
     + rows.map((p) => {
       const tg = (p.targets && p.targets.length) ? p.targets.join(", ") + "p" : (p.target_points ? p.target_points + "p" : "-");
-      const lock = (p.profit_lock && p.profit_lock.length) ? p.profit_lock.map((t) => `${t.activate}/${t.lock}`).join(", ") : "-";
-      return `<tr><td><b>${p.symbol}</b></td><td>${p.sl_points || "-"}</td><td>${p.trail_sl || "-"}</td><td>${tg}</td>
+      const lock = (p.lock_step && p.lock_amount) ? `₹${p.lock_step}→₹${p.lock_amount}` : "-";
+      return `<tr><td><b>${p.symbol}</b></td><td>${p.lots || "-"}</td><td>${p.sl_points || "-"}</td><td>${p.trail_sl || "-"}</td><td>${tg}</td>
         <td>${p.max_profit_amt || "-"} / ${p.max_loss_amt || "-"}</td><td>${lock}</td>
         <td><button class="btn btn-sm" data-pr-edit="${p.id}">Edit</button> <button class="btn btn-sm" data-pr-del="${p.id}">✕</button></td></tr>`;
     }).join("") + `</tbody></table>`;
@@ -1088,23 +1067,20 @@ function renderPresets(rows) {
 }
 function editPreset(p) {
   if (!p) return;
-  document.getElementById("prSymbol").value = p.symbol;
-  document.getElementById("prSl").value = p.sl_points || 0;
-  document.getElementById("prTrail").value = p.trail_sl || 0;
+  setVal("prSymbol", p.symbol); setVal("prLots", p.lots || 0);
+  setVal("prSl", p.sl_points || 0); setVal("prTrail", p.trail_sl || 0);
   document.getElementById("prTrailMode").value = p.trail_mode || "CONTINUE";
-  document.getElementById("prTarget").value = p.target_points || 0;
-  document.getElementById("prTargets").value = (p.targets || []).join(", ");
-  document.getElementById("prMaxProfit").value = p.max_profit_amt || 0;
-  document.getElementById("prMaxLoss").value = p.max_loss_amt || 0;
-  setLockRows(document.getElementById("prLockRows"), p.profit_lock || []);
+  setVal("prTarget", p.target_points || 0);
+  setVal("prTargets", (p.targets || []).join(", "));
+  setVal("prMaxProfit", p.max_profit_amt || 0); setVal("prMaxLoss", p.max_loss_amt || 0);
+  setVal("prLockStep", p.lock_step || 0); setVal("prLockAmount", p.lock_amount || 0);
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 function clearPresetForm() {
-  ["prSymbol", "prSl", "prTrail", "prTarget", "prTargets", "prMaxProfit", "prMaxLoss"].forEach((id) => {
-    const e = document.getElementById(id); if (e) e.value = (id === "prSymbol" || id === "prTargets") ? "" : 0;
-  });
+  ["prSl", "prTrail", "prTarget", "prMaxProfit", "prMaxLoss", "prLockStep", "prLockAmount", "prLots"]
+    .forEach((id) => setVal(id, 0));
+  setVal("prSymbol", ""); setVal("prTargets", "");
   document.getElementById("prTrailMode").value = "CONTINUE";
-  setLockRows(document.getElementById("prLockRows"), []);
 }
 document.getElementById("clearPresetBtn").onclick = clearPresetForm;
 document.getElementById("savePresetBtn").onclick = async () => {
@@ -1113,36 +1089,64 @@ document.getElementById("savePresetBtn").onclick = async () => {
   try {
     await api.post("/api/presets", {
       symbol: document.getElementById("prSymbol").value,
-      sl_points: parseFloat(document.getElementById("prSl").value) || 0,
-      trail_sl: parseFloat(document.getElementById("prTrail").value) || 0,
+      lots: parseInt(document.getElementById("prLots").value) || 0,
+      sl_points: numVal("prSl"), trail_sl: numVal("prTrail"),
       trail_mode: document.getElementById("prTrailMode").value,
-      target_points: parseFloat(document.getElementById("prTarget").value) || 0,
-      targets,
-      max_profit_amt: parseFloat(document.getElementById("prMaxProfit").value) || 0,
-      max_loss_amt: parseFloat(document.getElementById("prMaxLoss").value) || 0,
-      profit_lock: readLockRows(document.getElementById("prLockRows")),
+      target_points: numVal("prTarget"), targets,
+      max_profit_amt: numVal("prMaxProfit"), max_loss_amt: numVal("prMaxLoss"),
+      lock_step: numVal("prLockStep"), lock_amount: numVal("prLockAmount"),
     });
     msg.textContent = "✅ Preset saved."; msg.className = "msg pos";
     clearPresetForm(); await loadPresets();
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
 
+// ---- preset symbol search (same sources as the New Trade picker) ----
+const prSymbol = document.getElementById("prSymbol");
+const prResults = document.getElementById("prResults");
+let prTimer = null;
+prSymbol.addEventListener("input", () => {
+  clearTimeout(prTimer);
+  const q = prSymbol.value.trim();
+  if (q.length < 2) { prResults.classList.remove("show"); return; }
+  prTimer = setTimeout(async () => {
+    let opt = [], eq = [];
+    try { opt = await api.get("/api/underlyings/search?kind=OPTION&q=" + encodeURIComponent(q)); } catch {}
+    try { eq = await api.get("/api/equities/search?q=" + encodeURIComponent(q)); } catch {}
+    const names = [];
+    opt.forEach((r) => names.push({ name: r.underlying, meta: (r.exchange || "") + " · options/futures" }));
+    eq.forEach((r) => { if (!names.some((n) => n.name === r.symbol)) names.push({ name: r.symbol, meta: r.exchange_segment + " · equity" }); });
+    if (!names.length) { prResults.innerHTML = `<div class="item"><div class="meta">No matches.</div></div>`; prResults.classList.add("show"); return; }
+    prResults.innerHTML = names.slice(0, 20).map((n, i) => `<div class="item" data-i="${i}">
+      <div class="sym">${n.name}</div><div class="meta">${n.meta}</div></div>`).join("");
+    prResults.querySelectorAll(".item").forEach((el) => {
+      const n = names[el.dataset.i]; if (n) el.onclick = () => { prSymbol.value = n.name; prResults.classList.remove("show"); };
+    });
+    prResults.classList.add("show");
+  }, 250);
+});
+document.addEventListener("click", (e) => {
+  if (!prSymbol.contains(e.target) && !prResults.contains(e.target)) prResults.classList.remove("show");
+});
+
 // ---- global settings (daily limits + account profit-lock) ----
 async function loadSettings() {
   try {
     const s = await api.get("/api/settings");
-    document.getElementById("dailyMaxProfit").value = s.daily_max_profit || 0;
-    document.getElementById("dailyMaxLoss").value = s.daily_max_loss || 0;
-    setLockRows(document.getElementById("globalLockRows"), s.global_profit_lock || []);
+    setVal("dailyMaxProfit", s.daily_max_profit || 0);
+    setVal("dailyMaxLoss", s.daily_max_loss || 0);
+    setVal("globalLockStep", s.global_lock_step || 0);
+    setVal("globalLockAmount", s.global_lock_amount || 0);
   } catch (e) { /* ignore */ }
 }
 document.getElementById("saveSettingsBtn").onclick = async () => {
   const msg = document.getElementById("settingsMsg");
   try {
     await api.post("/api/settings", {
-      daily_max_profit: parseFloat(document.getElementById("dailyMaxProfit").value) || 0,
-      daily_max_loss: parseFloat(document.getElementById("dailyMaxLoss").value) || 0,
-      global_profit_lock: readLockRows(document.getElementById("globalLockRows")),
+      daily_max_profit: numVal("dailyMaxProfit"),
+      daily_max_loss: numVal("dailyMaxLoss"),
+      global_lock_step: numVal("globalLockStep"),
+      global_lock_amount: numVal("globalLockAmount"),
     });
     msg.textContent = "✅ Settings saved."; msg.className = "msg pos";
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }

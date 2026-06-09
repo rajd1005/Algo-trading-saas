@@ -337,36 +337,39 @@ class TradingEngine:
                                f"Daily max profit ₹{maxp:,.0f} hit (P&L ₹{pnl:,.0f})",
                                "DAILY_PROFIT")
 
+    @staticmethod
+    def _step_lock_floor(mtm, step, amount):
+        """Auto step profit-lock: for every ₹step of profit, secure ₹amount.
+        Returns the locked floor for the current MTM (0 = not armed)."""
+        if step <= 0 or amount <= 0 or mtm <= 0:
+            return 0.0
+        return math.floor(mtm / step) * amount
+
     def _check_global_lock(self, db, active, live_broker):
         if self._daily_halted(db):
             return
-        tiers = self._parse_tiers(self._get_setting(db, "global_profit_lock_json", ""))
-        if not tiers:
+        try:
+            step = float(self._get_setting(db, "global_lock_step", "") or 0)
+            amount = float(self._get_setting(db, "global_lock_amount", "") or 0)
+        except Exception:
+            step = amount = 0.0
+        if step <= 0 or amount <= 0:
             return
         pnl = self._account_day_pnl(db, self._trade_account_id)
         try:
             floor = float(self._get_setting(db, "global_lock_floor", "0") or 0)
         except Exception:
             floor = 0.0
-        for tier in sorted(tiers, key=lambda x: x.get("activate", 0)):
-            if pnl >= tier.get("activate", 0) > 0:
-                floor = max(floor, tier.get("lock", 0))
-        if floor != 0:
+        new = self._step_lock_floor(pnl, step, amount)
+        if new > floor:                       # ratchet up only
+            floor = new
             self._set_setting(db, "global_lock_floor", str(floor))
+            self._log(db, f"Account profit-lock armed — securing ₹{floor:,.0f} "
+                          f"(day P&L ₹{pnl:,.0f}).", "INFO")
         if floor > 0 and pnl <= floor:
             self._halt_account(db, active, live_broker,
                                f"Profit lock triggered — securing ₹{floor:,.0f} (P&L ₹{pnl:,.0f})",
                                "GLOBAL_LOCK")
-
-    @staticmethod
-    def _parse_tiers(raw):
-        if not raw:
-            return []
-        try:
-            tiers = json.loads(raw)
-            return [t for t in tiers if t.get("activate", 0) > 0 and t.get("lock", 0) > 0]
-        except Exception:
-            return []
 
     def _collect_prices(self, db, cid, tok, instruments):
         """Prefer the real-time WebSocket feed; fall back to REST for anything
@@ -499,6 +502,15 @@ class TradingEngine:
 
         if kill or not self._entry_triggered(t, price):
             return
+
+        # Log why an algo-tracked entry is firing (scheduled time / synthetic trigger).
+        if t.entry_type == "SCHEDULED":
+            self._log(db, f"Trade #{t.id}: scheduled time {t.scheduled_time} reached "
+                          f"— sending {t.side} {t.symbol} market order [{broker.name}].", "INFO", t.id)
+        elif t.entry_type == "TRIGGER":
+            self._log(db, f"Trade #{t.id}: trigger hit (LTP {price} {t.trigger_dir or 'auto'} "
+                          f"{t.trigger_price}) — sending {t.side} {t.symbol} market order "
+                          f"[{broker.name}].", "INFO", t.id)
 
         res = self._place_confirmed(db, t, broker, is_exit=False, qty=t.quantity)
         if res.order_id:
@@ -640,17 +652,14 @@ class TradingEngine:
             return self._exit_all(db, t, price, broker, "MAXLOSS")
         if (t.max_profit_amt or 0) > 0 and mtm >= t.max_profit_amt:
             return self._exit_all(db, t, price, broker, "MAXPROFIT")
-        tiers = self._parse_tiers(t.profit_lock_json)
-        if tiers:
-            floor = t.lock_floor or 0
-            for tier in sorted(tiers, key=lambda x: x.get("activate", 0)):
-                if mtm >= tier.get("activate", 0) > 0:
-                    floor = max(floor, tier.get("lock", 0))
-            if floor != (t.lock_floor or 0):
-                t.lock_floor = floor
-                self._log(db, f"Trade #{t.id}: profit-lock armed — securing ₹{floor:,.0f} "
+        # Auto step profit-lock: for every ₹lock_step profit, secure ₹lock_amount.
+        if (t.lock_step or 0) > 0 and (t.lock_amount or 0) > 0:
+            new = self._step_lock_floor(mtm, t.lock_step, t.lock_amount)
+            if new > (t.lock_floor or 0):     # ratchet up only
+                t.lock_floor = new
+                self._log(db, f"Trade #{t.id}: profit-lock armed — securing ₹{new:,.0f} "
                               f"(MTM ₹{mtm:,.0f}).", "INFO", t.id)
-            if floor > 0 and mtm <= floor:
+            if (t.lock_floor or 0) > 0 and mtm <= t.lock_floor:
                 return self._exit_all(db, t, price, broker, "LOCK")
         return False
 

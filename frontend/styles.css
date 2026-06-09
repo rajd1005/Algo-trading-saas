@@ -199,10 +199,9 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .adv-box { background: #11171d; border: 1px solid var(--line); border-radius: 8px;
   padding: 8px 12px; margin: 6px 0 4px; }
 .adv-box > summary { cursor: pointer; font-weight: 700; color: var(--text); }
-.lockrow { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-.lockrow input { background: var(--bg); border: 1px solid var(--line); color: var(--text);
-  border-radius: 7px; padding: 7px 9px; font-size: 13px; max-width: 130px; }
-.lockrow .lk-rm { width: 32px; }
+.lock-rule { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.lock-rule input { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 7px 9px; font-size: 13px; max-width: 110px; }
 
 /* logs */
 .logs-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }

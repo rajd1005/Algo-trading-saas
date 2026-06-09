@@ -10,11 +10,6 @@ class TargetIn(BaseModel):
     qty: int = 0            # how much quantity to exit at this target
 
 
-class LockTierIn(BaseModel):
-    activate: float = 0.0   # MTM (₹) at which the lock arms
-    lock: float = 0.0       # guaranteed minimum profit (₹)
-
-
 class TradeCreate(BaseModel):
     symbol: str
     security_id: str = ""
@@ -35,7 +30,8 @@ class TradeCreate(BaseModel):
     targets: List[TargetIn] = []      # optional scale-out targets
     max_profit_amt: float = 0.0       # trade-level square-off on MTM (₹)
     max_loss_amt: float = 0.0
-    profit_lock: List[LockTierIn] = []   # trade-level step profit-lock tiers
+    lock_step: float = 0.0            # auto profit-lock: for every ₹lock_step profit…
+    lock_amount: float = 0.0          # …secure ₹lock_amount
     mode: str = "TEST"
     name: str = ""
 
@@ -67,7 +63,8 @@ class TradeOut(BaseModel):
     realized_pnl: float
     max_profit_amt: float
     max_loss_amt: float
-    profit_lock_json: str
+    lock_step: float
+    lock_amount: float
     lock_floor: float
     mode: str
     status: str
@@ -97,7 +94,8 @@ class ModifyIn(BaseModel):
     targets: Optional[List[ModifyTargetIn]] = None  # absolute-price scale-out targets
     max_profit_amt: Optional[float] = None         # trade-level MTM square-off (₹); 0 = off
     max_loss_amt: Optional[float] = None
-    profit_lock: Optional[List[LockTierIn]] = None  # replace the trade's lock tiers
+    lock_step: Optional[float] = None              # auto profit-lock step (₹); 0 = off
+    lock_amount: Optional[float] = None
     # Pending-only edits:
     scheduled_time: Optional[str] = None           # "HH:MM:SS" IST
     trigger_price: Optional[float] = None
@@ -114,11 +112,13 @@ class SettingsIn(BaseModel):
     default_mode: Optional[str] = None
     daily_max_profit: Optional[float] = None       # account/day square-off & halt (₹); 0 = off
     daily_max_loss: Optional[float] = None
-    global_profit_lock: Optional[List[LockTierIn]] = None   # account-level step lock tiers
+    global_lock_step: Optional[float] = None       # account-level auto profit-lock step (₹)
+    global_lock_amount: Optional[float] = None
 
 
 class SymbolPresetIn(BaseModel):
     symbol: str
+    lots: int = 0
     sl_points: float = 0.0
     trail_sl: float = 0.0
     trail_mode: str = "CONTINUE"
@@ -126,4 +126,5 @@ class SymbolPresetIn(BaseModel):
     targets: List[float] = []        # multi-target points (cumulative), e.g. [100, 100]
     max_profit_amt: float = 0.0
     max_loss_amt: float = 0.0
-    profit_lock: List[LockTierIn] = []
+    lock_step: float = 0.0
+    lock_amount: float = 0.0
