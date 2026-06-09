@@ -35,9 +35,9 @@ import aliceblue
 
 import config
 from database import init_db, get_db, SessionLocal
-from models import Trade, LogEntry, Setting, Account, SymbolPreset
+from models import Trade, LogEntry, Setting, Account, SymbolPreset, Watchlist
 from schemas import (TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn,
-                     SymbolPresetIn)
+                     SymbolPresetIn, WatchlistIn)
 from engine import engine, level_price
 from instruments import store as instruments
 from market_data import DhanMarketData, demo_market
@@ -950,7 +950,7 @@ def _preset_dict(p):
     except Exception:
         targets = []
     return {
-        "id": p.id, "symbol": p.symbol, "lots": p.lots or 0,
+        "id": p.id, "symbol": p.symbol, "kind": p.kind or "OPTION", "lots": p.lots or 0,
         "sl_points": p.sl_points, "trail_sl": p.trail_sl,
         "trail_mode": p.trail_mode, "target_points": p.target_points, "targets": targets,
         "max_profit_amt": p.max_profit_amt, "max_loss_amt": p.max_loss_amt,
@@ -966,13 +966,19 @@ def list_presets(db: Session = Depends(get_db)):
 @app.post("/api/presets")
 def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
     sym = (payload.symbol or "").strip().upper()
+    kind = str(payload.kind or "OPTION").upper()
+    if kind not in ("OPTION", "FUTURES", "EQUITY"):
+        kind = "OPTION"
     if not sym:
         raise HTTPException(400, "Enter a symbol (underlying) for the preset.")
-    p = db.query(SymbolPreset).filter(SymbolPreset.symbol == sym).first()
+    # One preset per (symbol, type) — saving for the same symbol+type updates it.
+    p = (db.query(SymbolPreset)
+         .filter(SymbolPreset.symbol == sym, SymbolPreset.kind == kind).first())
     is_new = p is None
     if p is None:
-        p = SymbolPreset(symbol=sym)
+        p = SymbolPreset(symbol=sym, kind=kind)
         db.add(p)
+    p.kind = kind
     p.lots = max(0, int(payload.lots or 0))
     p.sl_points = max(0.0, float(payload.sl_points))
     p.trail_sl = max(0.0, float(payload.trail_sl))
@@ -986,7 +992,7 @@ def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
     p.lock_amount = max(0.0, float(payload.lock_amount))
     db.commit()
     db.refresh(p)
-    db.add(LogEntry(message=f"Symbol preset {'created' if is_new else 'updated'}: {sym}", level="INFO"))
+    db.add(LogEntry(message=f"Symbol preset {'created' if is_new else 'updated'}: {sym} [{kind}]", level="INFO"))
     db.commit()
     return _preset_dict(p)
 
@@ -995,9 +1001,50 @@ def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
 def delete_preset(preset_id: int, db: Session = Depends(get_db)):
     p = db.get(SymbolPreset, preset_id)
     if p:
-        sym = p.symbol
+        sym, kind = p.symbol, p.kind
         db.delete(p)
-        db.add(LogEntry(message=f"Symbol preset deleted: {sym}", level="INFO"))
+        db.add(LogEntry(message=f"Symbol preset deleted: {sym} [{kind}]", level="INFO"))
+        db.commit()
+    return {"ok": True}
+
+
+# ---------- watchlist ----------
+def _watch_dict(w):
+    return {"id": w.id, "symbol": w.symbol, "security_id": w.security_id,
+            "exchange_segment": w.exchange_segment, "instrument_type": w.instrument_type,
+            "underlying": w.underlying, "lot_size": w.lot_size or 1}
+
+
+@app.get("/api/watchlist")
+def list_watchlist(db: Session = Depends(get_db)):
+    return [_watch_dict(w) for w in db.query(Watchlist).order_by(Watchlist.id).all()]
+
+
+@app.post("/api/watchlist")
+def add_watchlist(payload: WatchlistIn, db: Session = Depends(get_db)):
+    if not payload.security_id:
+        raise HTTPException(400, "Select a symbol first, then add it to the watchlist.")
+    # de-dupe on the same instrument
+    exists = (db.query(Watchlist)
+              .filter(Watchlist.security_id == payload.security_id,
+                      Watchlist.exchange_segment == payload.exchange_segment).first())
+    if exists:
+        return _watch_dict(exists)
+    w = Watchlist(symbol=payload.symbol, security_id=payload.security_id,
+                  exchange_segment=payload.exchange_segment,
+                  instrument_type=payload.instrument_type, underlying=payload.underlying,
+                  lot_size=max(1, int(payload.lot_size or 1)))
+    db.add(w)
+    db.commit()
+    db.refresh(w)
+    return _watch_dict(w)
+
+
+@app.delete("/api/watchlist/{item_id}")
+def delete_watchlist(item_id: int, db: Session = Depends(get_db)):
+    w = db.get(Watchlist, item_id)
+    if w:
+        db.delete(w)
         db.commit()
     return {"ok": True}
 

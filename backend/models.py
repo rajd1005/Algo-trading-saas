@@ -134,6 +134,7 @@ class SymbolPreset(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String, index=True, default="")    # underlying, UPPER (BANKNIFTY…)
+    kind = Column(String, default="OPTION")            # OPTION / FUTURES / EQUITY
     lots = Column(Integer, default=0)                  # default lots to pre-fill (0 = keep)
     sl_points = Column(Float, default=0.0)
     trail_sl = Column(Float, default=0.0)
@@ -145,4 +146,18 @@ class SymbolPreset(Base):
     lock_step = Column(Float, default=0.0)             # auto profit-lock: every ₹step…
     lock_amount = Column(Float, default=0.0)           # …secure ₹amount
     profit_lock_json = Column(Text, default="")        # legacy (tiers); no longer used
+    created_at = Column(DateTime, default=_now)
+
+
+class Watchlist(Base):
+    """Saved instruments for one-click loading into the New Trade form."""
+    __tablename__ = "watchlist"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, default="")
+    security_id = Column(String, default="")
+    exchange_segment = Column(String, default="")
+    instrument_type = Column(String, default="")       # OPTION / FUTURES / EQUITY / INDEX
+    underlying = Column(String, default="")            # for preset matching on load
+    lot_size = Column(Integer, default=1)
     created_at = Column(DateTime, default=_now)

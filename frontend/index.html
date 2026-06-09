@@ -73,6 +73,11 @@
 
   <!-- NEW TRADE -->
   <section id="tab-new" class="tab-panel">
+    <div class="watchlist-bar">
+      <b>⭐ Watchlist</b>
+      <span id="watchlistChips" class="wl-chips"></span>
+      <span id="wlEmpty" class="muted" style="font-size:12px;">— pick a symbol below, then “★ Add to watchlist”. Tap a chip to load it instantly.</span>
+    </div>
     <form id="tradeForm" class="form">
       <div class="row">
         <div class="field" style="max-width:320px;">
@@ -113,6 +118,7 @@
       <div id="futWrap" class="fut-wrap" style="display:none;"></div>
 
       <div id="selectedSymbol" class="selected-symbol">No symbol selected yet.</div>
+      <div><button type="button" class="btn btn-sm" id="addWatchBtn" style="margin-top:6px;">★ Add to watchlist</button></div>
       <!-- these get filled automatically when you pick a contract -->
       <input type="hidden" name="symbol" /><input type="hidden" name="security_id" />
       <input type="hidden" name="exchange_segment" /><input type="hidden" name="instrument_type" />
@@ -244,6 +250,15 @@
             <div id="prResults" class="dropdown"></div>
           </label>
           <label style="max-width:120px;">Lots <input id="prLots" type="number" min="0" value="0" placeholder="0" /></label>
+        </div>
+        <div class="field">
+          <div class="field-label">Apply to (instrument type)</div>
+          <div class="btn-group">
+            <button type="button" class="opt active" data-prkind="OPTION">Option</button>
+            <button type="button" class="opt" data-prkind="FUTURES">Futures</button>
+            <button type="button" class="opt" data-prkind="EQUITY">Stock</button>
+          </div>
+          <span class="muted" style="font-size:11px;">this preset only auto-fills when you pick that instrument type in New Trade</span>
         </div>
         <div class="row">
           <label>Stop-loss (pts) <input id="prSl" type="number" step="0.05" value="0" /></label>

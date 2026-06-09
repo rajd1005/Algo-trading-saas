@@ -116,8 +116,18 @@ class SettingsIn(BaseModel):
     global_lock_amount: Optional[float] = None
 
 
+class WatchlistIn(BaseModel):
+    symbol: str
+    security_id: str = ""
+    exchange_segment: str = ""
+    instrument_type: str = ""
+    underlying: str = ""
+    lot_size: int = 1
+
+
 class SymbolPresetIn(BaseModel):
     symbol: str
+    kind: str = "OPTION"        # OPTION / FUTURES / EQUITY
     lots: int = 0
     sl_points: float = 0.0
     trail_sl: float = 0.0

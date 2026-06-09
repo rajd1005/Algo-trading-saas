@@ -570,7 +570,7 @@ async function selectUnderlying(underlying) {
   currentUnderlying = underlying;
   ulSearch.value = underlying;
   ulResults.classList.remove("show");
-  applyPreset(underlying);   // auto-fill saved defaults as soon as the symbol is chosen
+  applyPreset(underlying, currentSeg);   // auto-fill saved defaults for this instrument type
   if (currentSeg === "OPTION") {
     const exps = await api.get("/api/expiries?kind=OPTION&underlying=" + encodeURIComponent(underlying));
     expirySelect.innerHTML = exps.map((e) => `<option>${e}</option>`).join("");
@@ -680,7 +680,7 @@ function pickContract(r) {
   form.instrument_type.value = r.instrument_type;
   currentLotSize = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
   updateQty();
-  applyPreset((currentSeg === "EQUITY" ? r.symbol : currentUnderlying) || r.symbol);
+  applyPreset((currentSeg === "EQUITY" ? r.symbol : currentUnderlying) || r.symbol, currentSeg);
   // Auto-fetch & live-update the LTP for stocks / futures / index right away.
   if (selLtpTimer) { clearInterval(selLtpTimer); selLtpTimer = null; }
   if (["EQUITY", "FUTURES", "INDEX"].includes(r.instrument_type)) {
@@ -1031,15 +1031,16 @@ async function loadPresets() {
   try {
     const rows = await api.get("/api/presets");
     _presets = {};
-    rows.forEach((p) => { _presets[String(p.symbol).toUpperCase()] = p; });
+    rows.forEach((p) => { _presets[`${p.kind || "OPTION"}|${String(p.symbol).toUpperCase()}`] = p; });
     renderPresets(rows);
   } catch (e) { /* ignore */ }
 }
-function applyPreset(key) {
-  if (!key) return;
-  const norm = String(key).trim().toUpperCase();
-  // Try the exact underlying, then its first word (e.g. "NIFTY 50" -> "NIFTY").
-  const p = _presets[norm] || _presets[norm.split(/\s+/)[0]];
+function applyPreset(symbol, kind) {
+  if (!symbol) return;
+  kind = kind || currentSeg;       // OPTION / FUTURES / EQUITY
+  const norm = String(symbol).trim().toUpperCase();
+  // Match this instrument type only; try exact underlying then its first word.
+  const p = _presets[`${kind}|${norm}`] || _presets[`${kind}|${norm.split(/\s+/)[0]}`];
   if (!p) return;
   if (p.lots && p.lots > 0) { lotsInput.value = p.lots; updateQty(); }
   form.sl_points.value = p.sl_points || 0;
@@ -1068,11 +1069,12 @@ function renderPresets(rows) {
   const box = document.getElementById("presetList");
   if (!box) return;
   if (!rows.length) { box.innerHTML = `<p class="muted" style="font-size:12px;">No presets saved yet.</p>`; return; }
-  box.innerHTML = `<table class="data"><thead><tr><th>Symbol</th><th>Lots</th><th>SL</th><th>Trail</th><th>Targets</th><th>Max P / L</th><th>Lock</th><th></th></tr></thead><tbody>`
+  const kindLabel = { OPTION: "Option", FUTURES: "Futures", EQUITY: "Stock" };
+  box.innerHTML = `<table class="data"><thead><tr><th>Symbol</th><th>Type</th><th>Lots</th><th>SL</th><th>Trail</th><th>Targets</th><th>Max P / L</th><th>Lock</th><th></th></tr></thead><tbody>`
     + rows.map((p) => {
       const tg = (p.targets && p.targets.length) ? p.targets.join(", ") + "p" : (p.target_points ? p.target_points + "p" : "-");
       const lock = (p.lock_step && p.lock_amount) ? `₹${p.lock_step}→₹${p.lock_amount}` : "-";
-      return `<tr><td><b>${p.symbol}</b></td><td>${p.lots || "-"}</td><td>${p.sl_points || "-"}</td><td>${p.trail_sl || "-"}</td><td>${tg}</td>
+      return `<tr><td><b>${p.symbol}</b></td><td>${kindLabel[p.kind] || p.kind || "Option"}</td><td>${p.lots || "-"}</td><td>${p.sl_points || "-"}</td><td>${p.trail_sl || "-"}</td><td>${tg}</td>
         <td>${p.max_profit_amt || "-"} / ${p.max_loss_amt || "-"}</td><td>${lock}</td>
         <td><button class="btn btn-sm" data-pr-edit="${p.id}">Edit</button> <button class="btn btn-sm" data-pr-del="${p.id}">✕</button></td></tr>`;
     }).join("") + `</tbody></table>`;
@@ -1141,8 +1143,17 @@ document.getElementById("prGenLegs").onclick = () => {
   for (let i = 0; i < legs; i++) prAddTargetRow(per);
 };
 
+// preset instrument-type selector (Option / Futures / Stock)
+let prKind = "OPTION";
+function setPrKind(k) {
+  prKind = k;
+  document.querySelectorAll("[data-prkind]").forEach((x) => x.classList.toggle("active", x.dataset.prkind === k));
+}
+document.querySelectorAll("[data-prkind]").forEach((b) => { b.onclick = () => setPrKind(b.dataset.prkind); });
+
 function editPreset(p) {
   if (!p) return;
+  setPrKind(p.kind || "OPTION");
   setVal("prSymbol", p.symbol); setVal("prLots", p.lots || 0);
   setVal("prSl", p.sl_points || 0); setVal("prTrail", p.trail_sl || 0);
   document.getElementById("prTrailMode").value = p.trail_mode || "CONTINUE";
@@ -1163,7 +1174,7 @@ function editPreset(p) {
 function clearPresetForm() {
   ["prSl", "prTrail", "prTarget", "prMaxProfit", "prMaxLoss", "prLockStep", "prLockAmount", "prLots"]
     .forEach((id) => setVal(id, 0));
-  setVal("prSymbol", "");
+  setVal("prSymbol", ""); setPrKind("OPTION");
   document.getElementById("prTrailMode").value = "CONTINUE";
   prMulti.checked = false; prMultiWrap.style.display = "none"; prSingleWrap.style.display = "block";
   document.getElementById("prTargetRows").innerHTML = "";
@@ -1181,6 +1192,7 @@ document.getElementById("savePresetBtn").onclick = async () => {
   try {
     await api.post("/api/presets", {
       symbol: document.getElementById("prSymbol").value,
+      kind: prKind,
       lots: parseInt(document.getElementById("prLots").value) || 0,
       sl_points: numVal("prSl"), trail_sl: numVal("prTrail"),
       trail_mode: document.getElementById("prTrailMode").value,
@@ -1244,6 +1256,54 @@ document.getElementById("saveSettingsBtn").onclick = async () => {
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
 
+// ---- watchlist (one-click load into the New Trade form) ----
+let _watchlist = [];
+async function loadWatchlist() {
+  try { renderWatchlist(await api.get("/api/watchlist")); } catch (e) { /* ignore */ }
+}
+function renderWatchlist(items) {
+  _watchlist = items || [];
+  const box = document.getElementById("watchlistChips");
+  const empty = document.getElementById("wlEmpty");
+  if (!_watchlist.length) { box.innerHTML = ""; empty.style.display = ""; return; }
+  empty.style.display = "none";
+  box.innerHTML = _watchlist.map((w) =>
+    `<span class="wl-chip" data-wl="${w.id}" title="${w.exchange_segment} · id ${w.security_id}">${w.symbol}<span class="wl-x" data-wlx="${w.id}">×</span></span>`).join("");
+  box.querySelectorAll(".wl-chip").forEach((el) => {
+    el.onclick = (e) => { if (e.target.classList.contains("wl-x")) return;
+      const w = _watchlist.find((x) => String(x.id) === el.dataset.wl); if (w) wlLoad(w); };
+  });
+  box.querySelectorAll(".wl-x").forEach((x) => {
+    x.onclick = async (e) => { e.stopPropagation(); await api.del("/api/watchlist/" + x.dataset.wlx); await loadWatchlist(); };
+  });
+}
+function wlLoad(item) {
+  const seg = item.instrument_type === "FUTURES" ? "FUTURES"
+            : (item.instrument_type === "OPTION" ? "OPTION" : "EQUITY");
+  currentSeg = seg;
+  document.querySelectorAll("[data-seg]").forEach((x) => x.classList.toggle("active", x.dataset.seg === seg));
+  pickerHint.textContent = HINTS[seg];
+  currentUnderlying = item.underlying || null;
+  ulSearch.value = item.underlying || item.symbol;
+  pickContract({ symbol: item.symbol, security_id: item.security_id,
+    exchange_segment: item.exchange_segment, instrument_type: item.instrument_type, lot_size: item.lot_size });
+  document.querySelector('.tab[data-tab="new"]').click();   // ensure the New Trade tab is open
+}
+document.getElementById("addWatchBtn").onclick = async () => {
+  const msg = document.getElementById("formMsg");
+  if (!form.security_id.value) { msg.textContent = "❌ Pick a symbol first, then add it."; msg.className = "msg neg"; return; }
+  try {
+    await api.post("/api/watchlist", {
+      symbol: form.symbol.value, security_id: form.security_id.value,
+      exchange_segment: form.exchange_segment.value, instrument_type: form.instrument_type.value,
+      underlying: (currentSeg === "EQUITY" ? form.symbol.value : (currentUnderlying || "")),
+      lot_size: currentLotSize,
+    });
+    msg.textContent = "⭐ Added to watchlist."; msg.className = "msg pos";
+    await loadWatchlist();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+
 // ---- refresh loop ----
 async function refreshAll() {
   await Promise.all([refreshSummary(), refreshTrades(), refreshLogs(), refreshBroker()]);
@@ -1251,5 +1311,6 @@ async function refreshAll() {
 showTradesSkeleton();   // skeleton rows until the first data arrives
 loadPresets();
 loadSettings();
+loadWatchlist();
 refreshAll();
 setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); }, 2000);

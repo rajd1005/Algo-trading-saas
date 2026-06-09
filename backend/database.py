@@ -61,6 +61,7 @@ _MIGRATIONS = {
         "lock_amount": "REAL DEFAULT 0",
     },
     "symbol_presets": {
+        "kind": "TEXT DEFAULT 'OPTION'",
         "lots": "INTEGER DEFAULT 0",
         "lock_step": "REAL DEFAULT 0",
         "lock_amount": "REAL DEFAULT 0",
