@@ -80,11 +80,17 @@ class DemoMarketData:
     all behave like the real thing.
     """
     def __init__(self):
-        self._spot = {}        # underlying -> current simulated spot
-        self._base = {}        # security_id -> base price (non-options)
+        self._spot = {}        # underlying -> [price, last_update_ts]
+        self._base = {}        # security_id -> [price, last_update_ts] (non-options)
         self._lock = threading.Lock()
         self.last_error = ""
         self.direction = 0     # +1 = drift up, -1 = drift down, 0 = flat/random
+        # Real-time dynamics: prices advance with WALL-CLOCK time, not per sample,
+        # so the speed is the same no matter how often the price is polled
+        # (engine tick + option chain + selected-LTP all sample independently).
+        # Tuned to feel like the real NIFTY: gentle drift, small per-second moves.
+        self._vol_per_sec = 0.00010      # ~0.01% random move per second (index-like)
+        self._drift_per_sec = 0.00035    # directional push per second when up/down is held
 
     def set_direction(self, d):
         self.direction = 1 if d > 0 else (-1 if d < 0 else 0)
@@ -94,25 +100,33 @@ class DemoMarketData:
             self._spot.clear()
             self._base.clear()
 
-    def _drift(self):
-        # ~0.15% per tick push in the chosen direction (so SL/targets are reachable fast)
-        return 0.0015 * self.direction
+    def _advance(self, price, last_t, vol):
+        """Move a price forward by the REAL time elapsed since it was last seen."""
+        now = time.time()
+        dt = (now - last_t) if last_t else 0.0
+        dt = max(0.0, min(dt, 5.0))      # clamp idle gaps so it never jumps after a pause
+        if dt <= 0:
+            return price, now            # multiple callers in the same instant -> no extra move
+        factor = 1 + self._drift_per_sec * self.direction * dt + random.gauss(0, vol * math.sqrt(dt))
+        return max(0.05, price * factor), now
 
     def _spot_for(self, underlying):
         with self._lock:
             if underlying not in self._spot:
                 seed = store.spot_seed(underlying) or 1000.0
-                self._spot[underlying] = seed
-            # gentle random walk + optional directional drift
-            self._spot[underlying] *= (1 + self._drift() + random.uniform(-0.00025, 0.00025))
-            return self._spot[underlying]
+                self._spot[underlying] = [seed, 0.0]
+            price, t = self._advance(self._spot[underlying][0], self._spot[underlying][1], self._vol_per_sec)
+            self._spot[underlying] = [price, t]
+            return price
 
     def _base_for(self, security_id):
         with self._lock:
             if security_id not in self._base:
-                self._base[security_id] = random.uniform(100, 1500)
-            self._base[security_id] *= (1 + self._drift() + random.uniform(-0.0004, 0.0004))
-            return self._base[security_id]
+                self._base[security_id] = [random.uniform(100, 1500), 0.0]
+            # stocks/futures move a touch more than the index
+            price, t = self._advance(self._base[security_id][0], self._base[security_id][1], self._vol_per_sec * 1.4)
+            self._base[security_id] = [price, t]
+            return price
 
     def _price(self, security_id, spot_cache):
         meta = store.get_meta(security_id)
@@ -128,7 +142,8 @@ class DemoMarketData:
                 intrinsic = max(0.0, strike - spot)
             width = max(spot * 0.04, 1.0)
             tv = spot * 0.015 * math.exp(-((strike - spot) / width) ** 2) + spot * 0.002
-            price = (intrinsic + tv) * (1 + random.uniform(-0.0015, 0.0015))
+            # tiny jitter only — the real movement now comes from the (smooth) spot
+            price = (intrinsic + tv) * (1 + random.uniform(-0.0002, 0.0002))
             return round(max(0.05, price), 2)
         # equities / futures / index -> simple random walk
         return round(self._base_for(security_id), 2)
