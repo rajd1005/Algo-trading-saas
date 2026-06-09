@@ -44,6 +44,7 @@ class TradingEngine:
         self.paper = PaperBroker()
         self._last_rest = 0.0          # last time we used the REST fallback
         self._rest_cache = {}          # last REST prices (warmup / fallback)
+        self._rest_cooldown = 0.0      # back off REST until this time (after a 429)
         self._demo = False             # DEMO mode (simulated prices + fake broker)
         self._last_feed_err = ""       # de-dupe feed errors in the log
         self._last_rest_err = ""
@@ -173,9 +174,11 @@ class TradingEngine:
 
         missing = [it for it in instruments if it not in prices]
         md = DhanMarketData(cid, tok)
-        # Only hit REST about once a second to respect rate limits.
-        if missing and (time.time() - self._last_rest) >= 1.0:
-            self._last_rest = time.time()
+        now = time.time()
+        # Only hit REST every ~2s, and not at all during a 429 cool-down. The
+        # WebSocket feed is the primary source; REST is just a fallback.
+        if missing and now >= self._rest_cooldown and (now - self._last_rest) >= 2.0:
+            self._last_rest = now
             by_seg = {}
             for seg, sid in missing:
                 by_seg.setdefault(seg, []).append(sid)
@@ -183,7 +186,11 @@ class TradingEngine:
             prices.update(rest)
             self._rest_cache.update(rest)
             if md.last_error:
-                if md.last_error != self._last_rest_err:
+                if "429" in md.last_error or "Too many" in md.last_error:
+                    self._rest_cooldown = now + 30      # back off for 30s
+                    self._log(db, "Dhan rate-limited the price feed (429) — backing off REST "
+                                  "for 30s; using the WebSocket feed.", "WARN")
+                elif md.last_error != self._last_rest_err:
                     self._last_rest_err = md.last_error
                     self._log(db, f"REST price feed error: {md.last_error[:250]}", "ERROR")
                 if not prices:

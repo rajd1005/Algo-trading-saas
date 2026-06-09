@@ -434,7 +434,7 @@ async function loadChain(underlying, expiry) {
   });
   refreshChainLtp();
   if (ltpTimer) clearInterval(ltpTimer);
-  ltpTimer = setInterval(refreshChainLtp, 3000);
+  ltpTimer = setInterval(refreshChainLtp, 5000);
 }
 
 function markSelected(el) {
@@ -443,6 +443,9 @@ function markSelected(el) {
 }
 
 async function refreshChainLtp() {
+  // Don't poll Dhan for chain prices unless the New Trade tab is open (saves
+  // requests / avoids rate limits).
+  if (!document.getElementById("tab-new").classList.contains("active")) return;
   const cells = [...chainBody.querySelectorAll(".chain-cell[data-c]")].slice(0, 500);
   if (!cells.length) return;
   const items = cells.map((el) => { const c = JSON.parse(el.dataset.c);

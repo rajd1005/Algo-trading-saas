@@ -10,6 +10,16 @@ import time
 import threading
 import datetime as dt
 
+# Force ALL outbound connections to use IPv4. Dhan whitelists an IPv4 address;
+# if the VPS prefers IPv6, orders are rejected with DH-905 "Invalid IP".
+import socket as _socket
+_orig_getaddrinfo = _socket.getaddrinfo
+def _ipv4_only_getaddrinfo(host, *args, **kwargs):
+    results = _orig_getaddrinfo(host, *args, **kwargs)
+    ipv4 = [r for r in results if r[0] == _socket.AF_INET]
+    return ipv4 or results
+_socket.getaddrinfo = _ipv4_only_getaddrinfo
+
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
