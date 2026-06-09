@@ -90,7 +90,7 @@ class DemoMarketData:
         # (engine tick + option chain + selected-LTP all sample independently).
         # Tuned to feel like the real NIFTY: gentle drift, small per-second moves.
         self._vol_per_sec = 0.00010      # ~0.01% random move per second (index-like)
-        self._drift_per_sec = 0.00035    # directional push per second when up/down is held
+        self._drift_per_sec = 0.000025   # directional push: ~0.15%/min when up/down is held
 
     def set_direction(self, d):
         self.direction = 1 if d > 0 else (-1 if d < 0 else 0)
