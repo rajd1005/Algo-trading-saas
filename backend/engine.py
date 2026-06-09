@@ -483,6 +483,11 @@ class TradingEngine:
         if halted and not t.broker_order_id:
             return
 
+        # Algo trigger: on first sight, lock the direction from the reference price
+        # so "fire when the LTP reaches this price" works from either side.
+        if t.entry_type == "TRIGGER" and (t.trigger_price or 0) > 0 and not t.trigger_dir and price > 0:
+            t.trigger_dir = "ABOVE" if price < t.trigger_price else "BELOW"
+
         broker = self._broker_for(t, live_broker)
         if broker is None:
             if not self._warned_no_broker:

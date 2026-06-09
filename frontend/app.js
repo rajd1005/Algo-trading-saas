@@ -388,6 +388,18 @@ document.querySelectorAll("[data-side]").forEach((b) => {
   };
 });
 
+// Mode buttons (TEST / LIVE)
+document.querySelectorAll("[data-mode]").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll("[data-mode]").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active"); form.mode.value = b.dataset.mode;
+  };
+});
+function setMode(m) {
+  document.querySelectorAll("[data-mode]").forEach((x) => x.classList.toggle("active", x.dataset.mode === m));
+  form.mode.value = m;
+}
+
 const entryPrice = document.getElementById("entryPrice");
 function applyEntryType(et) {
   form.entry_type.value = et;
@@ -483,6 +495,7 @@ document.getElementById("genLegs").onclick = () => {
 function resetOrderForm() {
   document.querySelectorAll("[data-side]").forEach((x) => x.classList.toggle("active", x.dataset.side === "BUY"));
   form.side.value = "BUY";
+  setMode("TEST");
   applyEntryType("MARKET");
   multiToggle.checked = false; multiWrap.style.display = "none"; targetField.style.display = "";
   document.getElementById("targetRows").innerHTML = "";
@@ -557,6 +570,7 @@ async function selectUnderlying(underlying) {
   currentUnderlying = underlying;
   ulSearch.value = underlying;
   ulResults.classList.remove("show");
+  applyPreset(underlying);   // auto-fill saved defaults as soon as the symbol is chosen
   if (currentSeg === "OPTION") {
     const exps = await api.get("/api/expiries?kind=OPTION&underlying=" + encodeURIComponent(underlying));
     expirySelect.innerHTML = exps.map((e) => `<option>${e}</option>`).join("");
@@ -1023,7 +1037,9 @@ async function loadPresets() {
 }
 function applyPreset(key) {
   if (!key) return;
-  const p = _presets[String(key).toUpperCase()];
+  const norm = String(key).trim().toUpperCase();
+  // Try the exact underlying, then its first word (e.g. "NIFTY 50" -> "NIFTY").
+  const p = _presets[norm] || _presets[norm.split(/\s+/)[0]];
   if (!p) return;
   if (p.lots && p.lots > 0) { lotsInput.value = p.lots; updateQty(); }
   form.sl_points.value = p.sl_points || 0;
@@ -1065,34 +1081,110 @@ function renderPresets(rows) {
     if (confirm("Delete this preset?")) { await api.del("/api/presets/" + b.dataset.prDel); await loadPresets(); }
   });
 }
+// ---- preset multi-target widget (mirrors New Trade: cumulative points + auto
+//      lot-split driven by the preset's Lots field) ----
+const prLotsInput = document.getElementById("prLots");
+const prMulti = document.getElementById("prMulti");
+const prSingleWrap = document.getElementById("prSingleWrap");
+const prMultiWrap = document.getElementById("prMultiWrap");
+function prTargetCount() { return document.querySelectorAll("#prTargetRows .ptrow").length; }
+function prUpdateCumulative() {
+  let running = 0;
+  document.querySelectorAll("#prTargetRows .ptrow").forEach((r) => {
+    running += parseFloat(r.querySelector(".ptp").value) || 0;
+    const c = r.querySelector(".ptcum"); if (c) c.textContent = running > 0 ? `→ +${running} pts` : "";
+  });
+}
+function prDistribute() {
+  const rows = [...document.querySelectorAll("#prTargetRows .ptrow")];
+  const N = parseInt(prLotsInput.value) || 1, M = rows.length;
+  if (!M) return;
+  const base = Math.floor(N / M), rem = N % M;
+  rows.forEach((r, i) => { const lots = base + (i < rem ? 1 : 0); r.querySelector(".ptl").textContent = `${lots} lot${lots > 1 ? "s" : ""}`; });
+  prUpdateCumulative();
+}
+function prTrimDistribute() {
+  const N = parseInt(prLotsInput.value) || 1;
+  const rows = [...document.querySelectorAll("#prTargetRows .ptrow")];
+  while (rows.length > N) rows.pop().remove();
+  prDistribute();
+}
+function prAddTargetRow(points = "") {
+  const N = parseInt(prLotsInput.value) || 1;
+  if (prTargetCount() >= N) { alert(`At most ${N} target(s) — one per lot. Increase Lots to add more.`); return; }
+  const div = document.createElement("div");
+  div.className = "ptrow trow";
+  div.innerHTML = `<input class="ptp" type="number" step="0.05" placeholder="points" value="${points}" />
+    <span class="muted" style="font-size:11px;">qty <span class="ptl"></span> <span class="ptcum" style="color:var(--accent);"></span></span>
+    <button type="button" class="step ptrm">×</button>`;
+  div.querySelector(".ptp").addEventListener("input", prUpdateCumulative);
+  div.querySelector(".ptrm").onclick = () => { div.remove(); prDistribute(); };
+  document.getElementById("prTargetRows").appendChild(div);
+  prDistribute();
+}
+prMulti.onchange = () => {
+  const on = prMulti.checked;
+  prMultiWrap.style.display = on ? "block" : "none";
+  prSingleWrap.style.display = on ? "none" : "block";
+  if (on && !prTargetCount()) prAddTargetRow();
+};
+document.getElementById("prAddTarget").onclick = () => prAddTargetRow();
+prLotsInput.addEventListener("input", () => { if (prMulti.checked) prTrimDistribute(); });
+document.getElementById("prGenLegs").onclick = () => {
+  const total = parseFloat(document.getElementById("prAutoTotal").value) || 0;
+  const legs = parseInt(document.getElementById("prAutoLegs").value) || 0;
+  const N = parseInt(prLotsInput.value) || 1;
+  if (total <= 0 || legs < 1) { alert("Enter total target points and number of legs."); return; }
+  if (legs > N) { alert(`Legs (${legs}) cannot exceed Lots (${N}).`); return; }
+  document.getElementById("prTargetRows").innerHTML = "";
+  const per = Math.round((total / legs) * 100) / 100;
+  for (let i = 0; i < legs; i++) prAddTargetRow(per);
+};
+
 function editPreset(p) {
   if (!p) return;
   setVal("prSymbol", p.symbol); setVal("prLots", p.lots || 0);
   setVal("prSl", p.sl_points || 0); setVal("prTrail", p.trail_sl || 0);
   document.getElementById("prTrailMode").value = p.trail_mode || "CONTINUE";
-  setVal("prTarget", p.target_points || 0);
-  setVal("prTargets", (p.targets || []).join(", "));
   setVal("prMaxProfit", p.max_profit_amt || 0); setVal("prMaxLoss", p.max_loss_amt || 0);
   setVal("prLockStep", p.lock_step || 0); setVal("prLockAmount", p.lock_amount || 0);
+  document.getElementById("prTargetRows").innerHTML = "";
+  if (p.targets && p.targets.length > 1) {
+    if ((p.lots || 0) < p.targets.length) setVal("prLots", p.targets.length);
+    prMulti.checked = true; prMultiWrap.style.display = "block"; prSingleWrap.style.display = "none";
+    setVal("prTarget", 0);
+    p.targets.forEach((pts) => prAddTargetRow(pts));
+  } else {
+    prMulti.checked = false; prMultiWrap.style.display = "none"; prSingleWrap.style.display = "block";
+    setVal("prTarget", (p.targets && p.targets.length === 1) ? p.targets[0] : (p.target_points || 0));
+  }
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 function clearPresetForm() {
   ["prSl", "prTrail", "prTarget", "prMaxProfit", "prMaxLoss", "prLockStep", "prLockAmount", "prLots"]
     .forEach((id) => setVal(id, 0));
-  setVal("prSymbol", ""); setVal("prTargets", "");
+  setVal("prSymbol", "");
   document.getElementById("prTrailMode").value = "CONTINUE";
+  prMulti.checked = false; prMultiWrap.style.display = "none"; prSingleWrap.style.display = "block";
+  document.getElementById("prTargetRows").innerHTML = "";
 }
 document.getElementById("clearPresetBtn").onclick = clearPresetForm;
 document.getElementById("savePresetBtn").onclick = async () => {
   const msg = document.getElementById("presetMsg");
-  const targets = document.getElementById("prTargets").value.split(",").map((x) => parseFloat(x.trim())).filter((x) => x > 0);
+  let targets = [], target_points = 0;
+  if (prMulti.checked) {
+    targets = [...document.querySelectorAll("#prTargetRows .ptrow")]
+      .map((r) => parseFloat(r.querySelector(".ptp").value) || 0).filter((x) => x > 0);
+  } else {
+    target_points = numVal("prTarget");
+  }
   try {
     await api.post("/api/presets", {
       symbol: document.getElementById("prSymbol").value,
       lots: parseInt(document.getElementById("prLots").value) || 0,
       sl_points: numVal("prSl"), trail_sl: numVal("prTrail"),
       trail_mode: document.getElementById("prTrailMode").value,
-      target_points: numVal("prTarget"), targets,
+      target_points, targets,
       max_profit_amt: numVal("prMaxProfit"), max_loss_amt: numVal("prMaxLoss"),
       lock_step: numVal("prLockStep"), lock_amount: numVal("prLockAmount"),
     });
