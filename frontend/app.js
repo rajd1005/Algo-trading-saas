@@ -370,7 +370,7 @@ async function refreshLogs() {
   body.innerHTML = "";
   for (const r of d.logs) {
     const tr = document.createElement("tr");
-    const time = new Date(r.time + "Z").toLocaleTimeString();
+    const time = new Date(r.time + "Z").toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" });
     const reason = r.message.match(/EXIT \((\w+)\)/);
     const msg = reason ? `<span class="rbadge r-${reason[1]}">${reason[1]}</span> ${r.message}` : r.message;
     tr.innerHTML = `<td>${time}</td><td><span class="lvl lvl-${r.level}">${r.level}</span></td>
@@ -1428,24 +1428,50 @@ loadWatchlist();
 refreshAll();
 setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); }, 2000);
 
-// ---- how-to guide (admin-editable, shown on the Broker tab) ----
+// ---- how-to guide (admin-editable rich HTML, shown on the Broker tab) ----
 async function loadHowto() {
   try {
     const d = await api.get("/api/howto");
     const box = document.getElementById("howtoBox");
-    if (box) box.innerHTML = mdToHtml(d.markdown || "");
+    if (box) box.innerHTML = d.html || "";
   } catch (e) { /* ignore */ }
 }
-function mdToHtml(md) {
-  // tiny markdown: ## headings, **bold**, paragraphs
-  return (md || "").split(/\n{2,}/).map((p) => {
-    p = p.trim();
-    if (p.startsWith("## ")) return `<h3>${esc(p.slice(3))}</h3>`;
-    p = esc(p).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/\n/g, "<br>");
-    return `<p>${p}</p>`;
-  }).join("");
-}
 function esc(s) { return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+// All system times shown in IST.
+function _utc(iso) { let s = String(iso || ""); if (s && !/[Z+]/.test(s.slice(10))) s += "Z"; return s; }
+function fmtIST(iso) {
+  try { return new Date(_utc(iso)).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: true }); }
+  catch (e) { return iso || ""; }
+}
+
+// ---- WordPress-style rich text editors (How-to + email templates) ----
+const getRTE = (id) => { const e = document.getElementById(id); return e ? e.innerHTML : ""; };
+const setRTE = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html || ""; };
+function initRichEditors() {
+  document.querySelectorAll(".rte-toolbar").forEach((bar) => {
+    if (bar._init) return; bar._init = true;
+    const ed = document.getElementById(bar.dataset.for);
+    const b = (label, cmd, val) => `<button type="button" class="rte-b" data-cmd="${cmd}"${val ? ` data-val="${val}"` : ""}>${label}</button>`;
+    let html = b("<b>B</b>", "bold") + b("<i>I</i>", "italic") + b("<u>U</u>", "underline")
+      + b("H", "formatBlock", "h3") + b("¶", "formatBlock", "p")
+      + b("• List", "insertUnorderedList") + b("1. List", "insertOrderedList") + b("🔗", "createLink");
+    if (bar.dataset.ph) html += '<span class="rte-sep"></span>'
+      + bar.dataset.ph.split(",").map((p) => `<button type="button" class="rte-ph-chip" data-ins="{${p.trim()}}">{${p.trim()}}</button>`).join("");
+    bar.innerHTML = html;
+    bar.querySelectorAll("[data-cmd]").forEach((btn) => btn.onmousedown = (e) => {
+      e.preventDefault(); ed.focus();
+      if (btn.dataset.cmd === "createLink") { const u = prompt("Link URL:"); if (u) document.execCommand("createLink", false, u); }
+      else document.execCommand(btn.dataset.cmd, false, btn.dataset.val || null);
+    });
+    bar.querySelectorAll("[data-ins]").forEach((btn) => btn.onmousedown = (e) => {
+      e.preventDefault(); ed.focus(); document.execCommand("insertText", false, btn.dataset.ins);
+    });
+  });
+}
+initRichEditors();
+// Refresh the (admin-editable) how-to each time the Broker tab is opened.
+const _bt = document.querySelector('.tab[data-tab="broker"]');
+if (_bt) _bt.addEventListener("click", loadHowto);
 
 // ============================ ADMIN PANEL ============================
 document.querySelectorAll("[data-asec]").forEach((b) => b.onclick = () => {
@@ -1454,6 +1480,7 @@ document.querySelectorAll("[data-asec]").forEach((b) => b.onclick = () => {
   document.querySelectorAll(".asec").forEach((s) => s.style.display = "none");
   document.getElementById("asec-" + b.dataset.asec).style.display = "";
   if (b.dataset.asec === "users") adminLoadUsers();
+  if (b.dataset.asec === "alllogs") adminLoadAllLogs();
   if (b.dataset.asec === "plans") adminLoadPlans();
   if (b.dataset.asec === "saas" || b.dataset.asec === "email") adminLoadSettings();
   if (b.dataset.asec === "email") adminLoadTemplate();
@@ -1461,8 +1488,15 @@ document.querySelectorAll("[data-asec]").forEach((b) => b.onclick = () => {
 // load users when the Admin tab is opened
 document.querySelector('.tab[data-tab="admin"]').addEventListener("click", () => adminLoadUsers());
 
+let _adUserTimer = null;
+function wireAdminSearch() {
+  const s = document.getElementById("adUserSearch");
+  if (s && !s._w) { s._w = true; s.oninput = () => { clearTimeout(_adUserTimer); _adUserTimer = setTimeout(adminLoadUsers, 250); }; }
+}
 async function adminLoadUsers() {
-  let rows; try { rows = await api.get("/api/admin/users"); } catch (e) { return; }
+  wireAdminSearch();
+  const q = (document.getElementById("adUserSearch") || {}).value || "";
+  let rows; try { rows = await api.get("/api/admin/users?q=" + encodeURIComponent(q)); } catch (e) { return; }
   const box = document.getElementById("adminUsers");
   box.innerHTML = `<table class="data"><thead><tr><th>Email</th><th>Role</th><th>Plan</th><th>Expiry</th><th>Status</th><th>Brokers</th><th>Actions</th></tr></thead><tbody>`
     + rows.map((u) => {
@@ -1510,6 +1544,13 @@ async function adminInspect(uid, email) {
   document.getElementById("auTitle").textContent = email;
   document.getElementById("adminUserModal").style.display = "flex";
   document.getElementById("auMsg").textContent = "";
+  await auRefresh();
+  if (_auTimer) clearInterval(_auTimer);
+  _auTimer = setInterval(auRefresh, 3000);   // live, auto-updating balance / P&L
+}
+let _auTimer = null;
+async function auRefresh() {
+  const uid = _auId; if (!uid) return;
   try {
     const s = await api.get(`/api/admin/users/${uid}/summary`);
     document.getElementById("auPnl").textContent = money(s.pnl.total || 0);
@@ -1519,10 +1560,35 @@ async function adminInspect(uid, email) {
   try {
     const l = await api.get(`/api/admin/users/${uid}/logs`);
     document.getElementById("auLogs").innerHTML = l.logs.map((r) =>
-      `<div><span class="muted">${new Date(r.time).toLocaleString("en-IN")}</span> <b>${r.level}</b> — ${esc(r.message)}</div>`).join("") || "<div class='muted'>No logs.</div>";
+      `<div><span class="muted">${fmtIST(r.time)}</span> <b>${r.level}</b> — ${esc(r.message)}</div>`).join("") || "<div class='muted'>No logs.</div>";
+  } catch (e) {}
+  try {
+    const ts = await api.get(`/api/admin/users/${uid}/trades`);
+    document.getElementById("auTrades").innerHTML = ts.length ? (`<table class="data"><thead><tr><th>Sym</th><th>Side</th><th>Mode</th><th>Status</th><th>P&L</th></tr></thead><tbody>`
+      + ts.map((t) => `<tr><td>${esc(t.symbol)}</td><td>${t.side}</td><td>${t.mode}</td><td>${t.status}${t.exit_reason ? " · " + t.exit_reason : ""}</td><td class="${cls(t.pnl)}">${money(t.pnl)}</td></tr>`).join("") + "</tbody></table>")
+      : "<div class='muted'>No trades.</div>";
+  } catch (e) {}
+  try {
+    const accs = await api.get(`/api/admin/users/${uid}/accounts`);
+    document.getElementById("auAccounts").innerHTML = accs.length ? accs.map((a) =>
+      `<div class="acct-row"><span class="acct-name">${esc(a.label)}</span><span class="pill ${a.connected ? "pill-ok" : "pill-off"}">${a.connected ? "Connected" : "Not connected"}</span><span style="flex:1;"></span><button class="btn btn-sm" data-au-rm="${a.id}">Remove</button></div>`).join("")
+      : "<div class='muted'>No broker accounts.</div>";
+    document.getElementById("auAccounts").querySelectorAll("[data-au-rm]").forEach((b) => b.onclick = async () => {
+      await api.del(`/api/admin/users/${uid}/accounts/${b.dataset.auRm}`); toast("Broker removed", "info"); auRefresh();
+    });
   } catch (e) {}
 }
-document.getElementById("auClose").onclick = () => document.getElementById("adminUserModal").style.display = "none";
+document.getElementById("auAddAcct").onclick = async () => {
+  try {
+    await api.post(`/api/admin/users/${_auId}/accounts`, { broker: document.getElementById("auBroker").value,
+      client_id: document.getElementById("auClient").value.trim() });
+    document.getElementById("auClient").value = ""; toast("✅ Broker added", "pos"); auRefresh();
+  } catch (e) { toast("❌ " + e.message, "neg"); }
+};
+document.getElementById("auClose").onclick = () => {
+  document.getElementById("adminUserModal").style.display = "none";
+  if (_auTimer) { clearInterval(_auTimer); _auTimer = null; } _auId = null;
+};
 document.getElementById("auKill").onclick = async () => {
   if (!_auId || !confirm("Trigger remote kill switch — square off this user's positions and halt their algos?")) return;
   await api.post(`/api/admin/users/${_auId}/kill`, {});
@@ -1556,9 +1622,10 @@ let _adminSettings = null;
 async function adminLoadSettings() {
   let s; try { s = await api.get("/api/admin/settings"); } catch (e) { return; }
   _adminSettings = s;
+  initRichEditors();
   document.getElementById("adRegOpen").checked = !!s.registration_open;
   document.getElementById("adTrialDays").value = s.trial_days;
-  document.getElementById("adHowto").value = s.howto_md || "";
+  setRTE("adHowto", s.howto_md || "");
   document.getElementById("adSmtpHost").value = s.smtp_host || "";
   document.getElementById("adSmtpPort").value = s.smtp_port || 587;
   document.getElementById("adSmtpUser").value = s.smtp_user || "";
@@ -1570,7 +1637,7 @@ document.getElementById("adSaveSaas").onclick = async () => {
   try {
     await api.post("/api/admin/settings", { registration_open: document.getElementById("adRegOpen").checked,
       trial_days: parseInt(document.getElementById("adTrialDays").value) || 7,
-      howto_md: document.getElementById("adHowto").value });
+      howto_md: getRTE("adHowto") });
     document.getElementById("adSaasMsg").textContent = "✅ Saved"; document.getElementById("adSaasMsg").className = "msg pos";
     toast("✅ SaaS settings saved", "pos"); loadHowto();
   } catch (e) { toast("❌ " + e.message, "neg"); }
@@ -1590,17 +1657,44 @@ document.getElementById("adTestEmail").onclick = async () => {
   catch (e) { toast("❌ " + e.message, "neg"); }
 };
 async function adminLoadTemplate() {
+  initRichEditors();
   const key = document.getElementById("adTplKey").value;
   try { const all = await api.get("/api/admin/templates"); const t = all[key] || {};
     document.getElementById("adTplSubject").value = t.subject || "";
-    document.getElementById("adTplBody").value = t.body_html || "";
+    setRTE("adTplBody", t.body_html || "");
   } catch (e) {}
 }
 document.getElementById("adTplKey").onchange = adminLoadTemplate;
 document.getElementById("adSaveTpl").onclick = async () => {
   try { await api.post("/api/admin/templates", { key: document.getElementById("adTplKey").value,
-    subject: document.getElementById("adTplSubject").value, body_html: document.getElementById("adTplBody").value });
+    subject: document.getElementById("adTplSubject").value, body_html: getRTE("adTplBody") });
     document.getElementById("adTplMsg").textContent = "✅ Saved"; document.getElementById("adTplMsg").className = "msg pos";
     toast("✅ Template saved", "pos");
   } catch (e) { toast("❌ " + e.message, "neg"); }
 };
+
+// ---- admin: all-users day-wise logs ----
+let adLog = { date: "", level: "", q: "", page: 1, pages: 1, inited: false };
+async function adminLoadAllLogs() {
+  const p = new URLSearchParams({ date: adLog.date, level: adLog.level, q: adLog.q, page: adLog.page });
+  let d; try { d = await api.get("/api/admin/logs?" + p.toString()); } catch (e) { return; }
+  adLog.pages = d.pages;
+  const sel = document.getElementById("adLogDay");
+  if (sel && sel.options.length !== (d.days || []).length + 1) {
+    sel.innerHTML = `<option value="">All days</option>` + (d.days || []).map((x) => `<option>${x}</option>`).join("");
+    sel.value = adLog.date;
+  }
+  document.getElementById("adLogPage").textContent = `Page ${adLog.page} / ${d.pages}`;
+  document.getElementById("adLogsBody").innerHTML = d.logs.map((r) =>
+    `<tr><td>${fmtIST(r.time)}</td><td>${esc(r.email)}</td><td><span class="rbadge r-${r.level === "ERROR" ? "STOPLOSS" : r.level === "WARN" ? "TRAIL" : "MANUAL"}">${r.level}</span></td><td>${esc(r.message)}</td></tr>`).join("")
+    || `<tr><td colspan="4" class="muted">No logs.</td></tr>`;
+}
+(function wireAdLogs() {
+  const on = (id, fn) => { const e = document.getElementById(id); if (e) e[id.includes("Search") ? "oninput" : (e.tagName === "SELECT" ? "onchange" : "onclick")] = fn; };
+  let t = null;
+  document.getElementById("adLogDay").onchange = (e) => { adLog.date = e.target.value; adLog.page = 1; adminLoadAllLogs(); };
+  document.getElementById("adLogLevel").onchange = (e) => { adLog.level = e.target.value; adLog.page = 1; adminLoadAllLogs(); };
+  document.getElementById("adLogSearch").oninput = (e) => { clearTimeout(t); adLog.q = e.target.value; adLog.page = 1; t = setTimeout(adminLoadAllLogs, 300); };
+  document.getElementById("adLogPrev").onclick = () => { if (adLog.page > 1) { adLog.page--; adminLoadAllLogs(); } };
+  document.getElementById("adLogNext").onclick = () => { if (adLog.page < adLog.pages) { adLog.page++; adminLoadAllLogs(); } };
+})();

@@ -222,6 +222,19 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .asec textarea { background: var(--bg); border: 1px solid var(--line); color: var(--text);
   border-radius: 8px; padding: 10px; font-size: 13px; font-family: inherit; }
 
+/* WordPress-style rich text editor */
+.rte { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.rte-toolbar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  padding: 6px; background: #11171d; border-bottom: 1px solid var(--line); }
+.rte-b, .rte-ph-chip { background: var(--panel); border: 1px solid var(--line); color: var(--text);
+  border-radius: 6px; padding: 4px 9px; font-size: 12px; cursor: pointer; }
+.rte-b:hover, .rte-ph-chip:hover { border-color: var(--accent); }
+.rte-ph-chip { color: var(--accent); font-family: monospace; }
+.rte-sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+.rte-edit { min-height: 160px; padding: 12px; font-size: 14px; line-height: 1.6; outline: none; }
+.rte-edit:focus { box-shadow: inset 0 0 0 2px rgba(47,129,247,.3); }
+.rte-edit h3 { color: var(--accent); margin: 8px 0 4px; }
+
 /* toast notifications */
 .toast-host { position: fixed; top: 16px; right: 16px; z-index: 9999;
   display: flex; flex-direction: column; gap: 8px; max-width: 340px; }

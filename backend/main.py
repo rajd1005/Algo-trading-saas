@@ -1416,6 +1416,11 @@ def zerodha_callback(request: Request, request_token: str = "", db: Session = De
     if a is None or a.broker != "ZERODHA" or not request_token:
         return RedirectResponse(url="/?login=failed")
     creds = _acc_creds(a)
+    if a.client_id and _broker_in_use_elsewhere(db, "ZERODHA", a.client_id, me.id):
+        db.add(LogEntry(message="Zerodha login blocked: account already linked to another user.",
+                        level="ERROR", user_id=me.id))
+        db.commit()
+        return RedirectResponse(url="/?login=failed")
     ok, res = zerodha.exchange_request_token(creds.get("api_key", ""), creds.get("api_secret", ""), request_token)
     if ok:
         _set_acc_creds(a, access_token=res)
@@ -1574,23 +1579,24 @@ def aliceblue_login(payload: dict, request: Request, db: Session = Depends(get_d
     raise HTTPException(400, f"Alice Blue login failed: {res}")
 
 
-# ---------- how-to doc (admin-editable, shown to all users) ----------
+# ---------- how-to doc (admin-editable rich HTML, shown to all users) ----------
 DEFAULT_HOWTO = (
-    "## How to connect each broker\n\n"
-    "**Dhan** — create an app at web.dhan.co, set the Redirect & Postback URLs shown "
-    "on the Broker tab, add the account (Client ID, App ID, App Secret), then click Login.\n\n"
-    "**Angel One** — create a SmartAPI app, enable TOTP, add the account (Client ID, "
-    "API Key, PIN, TOTP secret), then click Login.\n\n"
-    "**Zerodha** — create a Kite Connect app, set the Redirect URL, add the account "
-    "(Client ID, API Key, API Secret), then click Login.\n\n"
-    "**Alice Blue** — enable the ANT API, add the account (User ID, API Key), then click "
-    "Login (no redirect needed)."
+    "<h3>Dhan</h3><p>Create an app at <b>web.dhan.co</b>, set the Redirect &amp; Postback "
+    "URLs shown on the Broker tab, add the account (Client ID, App ID, App Secret), then "
+    "click <b>Login</b>. Token lasts 24h and auto-renews.</p>"
+    "<h3>Angel One</h3><p>Create a <b>SmartAPI</b> app, enable TOTP, add the account "
+    "(Client ID, API Key, PIN, TOTP secret), then click <b>Login</b> (no redirect).</p>"
+    "<h3>Zerodha</h3><p>Create a <b>Kite Connect</b> app, set the Redirect URL, add the "
+    "account (Client ID, API Key, API Secret), then click <b>Login</b>.</p>"
+    "<h3>Alice Blue</h3><p>Enable the <b>ANT API</b>, add the account (User ID, API Key), "
+    "then click <b>Login</b> — connects instantly, no redirect.</p>"
 )
 
 
 @app.get("/api/howto")
 def get_howto(db: Session = Depends(get_db)):
-    return {"markdown": get_setting(db, "howto_md", "") or DEFAULT_HOWTO}
+    html = get_setting(db, "howto_md", "") or DEFAULT_HOWTO
+    return {"html": html, "markdown": html}
 
 
 # ---------- Super Admin control panel ----------
@@ -1607,9 +1613,12 @@ def _user_dict(db, u):
 
 
 @app.get("/api/admin/users")
-def admin_users(request: Request, db: Session = Depends(get_db)):
+def admin_users(request: Request, q: str = "", db: Session = Depends(get_db)):
     require_admin(request)
-    return [_user_dict(db, u) for u in db.query(User).order_by(User.id).all()]
+    query = db.query(User)
+    if q:
+        query = query.filter(User.email.ilike(f"%{q.strip()}%"))
+    return [_user_dict(db, u) for u in query.order_by(User.id).all()]
 
 
 @app.post("/api/admin/users")
@@ -1624,10 +1633,37 @@ def admin_create_user(payload: dict, request: Request, db: Session = Depends(get
     u = User(email=email, password_hash="", role="USER", plan_name=f"{days} Days",
              plan_expiry=dt.datetime.utcnow() + dt.timedelta(days=days))
     db.add(u); db.commit(); db.refresh(u)
-    # Send a set-password (reset) code so the user can activate.
+    # Welcome email + a set-password (reset) code so the user can activate.
+    emailer.send_email(db, email, "welcome", email=email, plan=u.plan_name,
+                       expiry=u.plan_expiry.strftime("%d %b %Y"))
     code = auth.issue_otp(db, email, "RESET")
     ok, _ = emailer.send_email(db, email, "otp_reset", code=code, email=email)
     return {"ok": True, "id": u.id, "set_password_code": None if ok else code}
+
+
+@app.get("/api/admin/logs")
+def admin_all_logs(request: Request, date: str = "", q: str = "", level: str = "",
+                   page: int = 1, db: Session = Depends(get_db)):
+    """Day-wise logs across ALL users (with the owner's email)."""
+    require_admin(request)
+    import math
+    per = 50
+    query = db.query(LogEntry)
+    if date:
+        query = query.filter(LogEntry.day == date)
+    if level:
+        query = query.filter(LogEntry.level == level)
+    uid_filter = None
+    if q:
+        ids = [u.id for u in db.query(User).filter(User.email.ilike(f"%{q.strip()}%")).all()]
+        query = query.filter(LogEntry.user_id.in_(ids or [-1]))
+    total = query.count()
+    rows = query.order_by(LogEntry.id.desc()).offset((max(1, page) - 1) * per).limit(per).all()
+    emap = {u.id: u.email for u in db.query(User).all()}
+    days = [d[0] for d in db.query(LogEntry.day).distinct().order_by(LogEntry.day.desc()).all() if d[0]]
+    return {"logs": [{"time": r.created_at.isoformat(), "level": r.level, "day": r.day,
+                      "email": emap.get(r.user_id, "system"), "message": r.message} for r in rows],
+            "page": page, "pages": max(1, math.ceil(total / per)), "days": days}
 
 
 @app.post("/api/admin/users/{uid}/status")
@@ -1709,10 +1745,51 @@ def admin_user_logs(uid: int, request: Request, page: int = 1, db: Session = Dep
             "page": page, "pages": max(1, math.ceil(total / per))}
 
 
+@app.get("/api/admin/users/{uid}/trades")
+def admin_user_trades(uid: int, request: Request, date: str = "", db: Session = Depends(get_db)):
+    """Full trade history / P&L breakdown of a user (admin audit)."""
+    require_admin(request)
+    q = db.query(Trade).filter(Trade.user_id == uid)
+    if date:
+        b = _ist_day_bounds(date)
+        if b:
+            q = q.filter(Trade.created_at >= b[0], Trade.created_at < b[1])
+    rows = q.order_by(Trade.id.desc()).limit(300).all()
+    return [{"id": t.id, "symbol": t.symbol, "side": t.side, "qty": t.quantity,
+             "mode": t.mode, "broker": t.broker, "status": t.status,
+             "entry": t.entry_fill_price or t.entry_price, "ltp": t.last_price,
+             "pnl": t.pnl, "exit_reason": t.exit_reason,
+             "time": t.created_at.isoformat() if t.created_at else None} for t in rows]
+
+
 @app.get("/api/admin/users/{uid}/accounts")
 def admin_user_accounts(uid: int, request: Request, db: Session = Depends(get_db)):
     require_admin(request)
     return [_account_dict(a) for a in db.query(Account).filter(Account.user_id == uid).all()]
+
+
+@app.post("/api/admin/users/{uid}/accounts")
+def admin_add_account(uid: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Broker override: admin adds a broker account into a user's profile."""
+    require_admin(request)
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "User not found")
+    broker = str(payload.get("broker", "DHAN")).upper()
+    if broker not in ("DHAN", "ANGEL", "ZERODHA", "ALICE"):
+        broker = "DHAN"
+    client_id = str(payload.get("client_id", "")).strip()
+    if client_id and _broker_in_use_elsewhere(db, broker, client_id, uid):
+        raise HTTPException(400, "That broker Client ID is already linked to another user.")
+    a = Account(user_id=uid, broker=broker, client_id=client_id)
+    _set_acc_creds(a, app_id=payload.get("app_id"), app_secret=payload.get("app_secret"),
+                   api_key=payload.get("api_key"), api_secret=payload.get("api_secret"),
+                   totp_secret=payload.get("totp_secret"), pin=payload.get("pin"))
+    a.label = _label(broker, client_id)
+    db.add(a)
+    db.add(LogEntry(message=f"ADMIN added a {broker} broker account.", level="WARN", user_id=uid))
+    db.commit(); db.refresh(a)
+    return _account_dict(a)
 
 
 @app.delete("/api/admin/users/{uid}/accounts/{aid}")
@@ -1720,6 +1797,7 @@ def admin_remove_account(uid: int, aid: int, request: Request, db: Session = Dep
     require_admin(request)
     a = db.get(Account, aid)
     if a and a.user_id == uid:
+        db.add(LogEntry(message=f"ADMIN removed a {a.broker} broker account.", level="WARN", user_id=uid))
         db.delete(a); db.commit()
     return {"ok": True}
 
