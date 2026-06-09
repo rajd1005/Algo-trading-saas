@@ -250,14 +250,28 @@ def _broker_connected(db, uid) -> bool:
     return db.query(Account).filter(Account.user_id == uid, Account.connected == 1).count() > 0
 
 
+ALL_BROKERS = ["DHAN", "ANGEL", "ZERODHA", "ALICE"]
+
+
+def _enabled_brokers(db):
+    """Brokers the admin has made available to users (default: all)."""
+    raw = get_setting(db, "enabled_brokers", "")
+    if not raw:
+        return list(ALL_BROKERS)
+    out = [b for b in raw.split(",") if b in ALL_BROKERS]
+    return out or list(ALL_BROKERS)
+
+
 @app.get("/api/me")
 def me(request: Request, db: Session = Depends(get_db)):
     u = current_user(request)
     expired = u.role != "SUPER_ADMIN" and _plan_expired(u)
+    is_admin = u.role == "SUPER_ADMIN"
     return {
         "email": u.email, "role": u.role, "uuid": u.uuid,
-        "is_admin": u.role == "SUPER_ADMIN",
-        "demo_allowed": u.role == "SUPER_ADMIN",
+        "is_admin": is_admin,
+        "demo_allowed": is_admin,
+        "enabled_brokers": ALL_BROKERS if is_admin else _enabled_brokers(db),
         "plan_name": u.plan_name,
         "plan_expiry": u.plan_expiry.isoformat() if u.plan_expiry else None,
         "plan_expired": expired,
@@ -430,8 +444,11 @@ def save_account(payload: dict, request: Request, db: Session = Depends(get_db))
     """Add or update a broker account (scoped to the tenant)."""
     me = current_user(request)
     broker = str(payload.get("broker", "")).upper()
-    if broker not in ("DHAN", "ANGEL", "ZERODHA", "ALICE"):
+    if broker not in ALL_BROKERS:
         broker = "DHAN"
+    if me.role != "SUPER_ADMIN" and broker not in _enabled_brokers(db):
+        raise HTTPException(403, f"{_label(broker, '').split(' ·')[0]} is not available. "
+                                 "Please choose one of the enabled brokers.")
     aid = payload.get("id")
     a = db.get(Account, int(aid)) if aid else None
     if a is not None and a.user_id != me.id:
@@ -1336,12 +1353,19 @@ def delete_watchlist(item_id: int, request: Request, db: Session = Depends(get_d
 @app.get("/api/broker")
 def get_broker(request: Request, db: Session = Depends(get_db)):
     me = current_user(request)
+    is_admin = me.role == "SUPER_ADMIN"
     data_provider = uget(db, me.id, "data_provider", "DEMO")
     trade_provider = uget(db, me.id, "trade_provider", "DEMO")
+    # Demo is admin-only — never surface it to a normal user (show "no provider").
+    if not is_admin:
+        if data_provider == "DEMO":
+            data_provider = ""
+        if trade_provider == "DEMO":
+            trade_provider = ""
     data_acc = _account_for_provider(db, data_provider, me.id)
     trade_acc = _account_for_provider(db, trade_provider, me.id)
-    data_conn = data_acc is None or bool(data_acc.connected)
-    trade_conn = trade_acc is None or bool(trade_acc.connected)
+    data_conn = bool(data_acc) and bool(data_acc.connected) if not is_admin else (data_acc is None or bool(data_acc.connected))
+    trade_conn = bool(trade_acc) and bool(trade_acc.connected) if not is_admin else (trade_acc is None or bool(trade_acc.connected))
     base = str(request.base_url).rstrip("/")
     hook = f"{base}/api/webhook/{me.uuid}"
     return {
@@ -1352,7 +1376,8 @@ def get_broker(request: Request, db: Session = Depends(get_db)):
         "data_connected": data_conn,
         "trade_connected": trade_conn,
         "connected": data_conn and trade_conn,
-        "demo_allowed": me.role == "SUPER_ADMIN",
+        "demo_allowed": is_admin,
+        "enabled_brokers": ALL_BROKERS if is_admin else _enabled_brokers(db),
         "redirect_url": base + "/api/dhan/callback",
         "postback_url": f"{hook}/dhan",
         "angel_redirect_url": base + "/api/angel/callback",
@@ -1881,6 +1906,8 @@ def admin_get_settings(request: Request, db: Session = Depends(get_db)):
     return {
         "registration_open": get_setting(db, "registration_open", "yes") == "yes",
         "trial_days": int(get_setting(db, "trial_days", str(config.DEFAULT_TRIAL_DAYS)) or 7),
+        "enabled_brokers": _enabled_brokers(db),
+        "all_brokers": ALL_BROKERS,
         "smtp_host": get_setting(db, "smtp_host", config.SMTP_HOST),
         "smtp_port": int(get_setting(db, "smtp_port", str(config.SMTP_PORT)) or 587),
         "smtp_user": get_setting(db, "smtp_user", config.SMTP_USER),
@@ -1899,6 +1926,9 @@ def admin_set_settings(payload: dict, request: Request, db: Session = Depends(ge
         set_setting(db, "registration_open", "yes" if payload["registration_open"] else "no")
     if "trial_days" in payload:
         set_setting(db, "trial_days", str(int(payload["trial_days"])))
+    if "enabled_brokers" in payload:
+        sel = [b.upper() for b in (payload["enabled_brokers"] or []) if b.upper() in ALL_BROKERS]
+        set_setting(db, "enabled_brokers", ",".join(sel))   # empty -> all (default)
     for k in ("smtp_host", "smtp_user", "smtp_sender", "smtp_from", "smtp_bcc", "howto_md"):
         if k in payload:
             set_setting(db, k, str(payload[k]))

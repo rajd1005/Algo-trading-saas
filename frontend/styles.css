@@ -223,6 +223,7 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .howto b { color: var(--text); }
 .asec textarea { background: var(--bg); border: 1px solid var(--line); color: var(--text);
   border-radius: 8px; padding: 10px; font-size: 13px; font-family: inherit; }
+.broker-toggles { display: flex; flex-wrap: wrap; gap: 8px 18px; }
 
 /* WordPress-style rich text editor */
 .rte { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }

@@ -854,6 +854,15 @@ document.getElementById("killBtn").onclick = async () => {
 
 // ---- broker / providers / accounts ----
 let _accounts = [];
+let _enabledBrokers = ["DHAN", "ANGEL", "ZERODHA", "ALICE"];
+const _BROKER_LABEL = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
+function buildAcctBrokerOptions() {
+  const sel = document.getElementById("newAcctBroker");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = _enabledBrokers.map((b) => `<option value="${b}">${_BROKER_LABEL[b] || b}</option>`).join("");
+  if (_enabledBrokers.includes(cur)) sel.value = cur;
+}
 function provLabel(value) {
   if (value === "DEMO") return "🧪 Demo (simulated)";
   const a = _accounts.find((x) => String(x.id) === String(value));
@@ -861,11 +870,12 @@ function provLabel(value) {
 }
 function fillProviderSelect(id, value) {
   const sel = document.getElementById(id);
+  const demoOk = window._me && window._me.demo_allowed;
   // Demo broker is for administrators only (anti-abuse).
-  let html = (window._me && window._me.demo_allowed) ? `<option value="DEMO">🧪 Demo (simulated)</option>` : "";
+  let html = demoOk ? `<option value="DEMO">🧪 Demo (simulated)</option>` : `<option value="">— select broker —</option>`;
   html += _accounts.map((a) => `<option value="${a.id}">${a.label}${a.connected ? " ✓" : ""}</option>`).join("");
   sel.innerHTML = html;
-  sel.value = value;
+  sel.value = value || (demoOk ? "DEMO" : "");
 }
 
 // Demo price controls
@@ -927,11 +937,15 @@ function buildPnlFilter() {
 async function refreshBroker() {
   const b = await api.get("/api/broker");
   _accounts = b.accounts || [];
-  fillProviderSelect("dataProvider", b.data_provider || "DEMO");
-  fillProviderSelect("tradeProvider", b.trade_provider || "DEMO");
+  _enabledBrokers = b.enabled_brokers || ["DHAN", "ANGEL", "ZERODHA", "ALICE"];
+  buildAcctBrokerOptions();
+  fillProviderSelect("dataProvider", b.data_provider || "");
+  fillProviderSelect("tradeProvider", b.trade_provider || "");
   buildPnlFilter();
   renderAccounts();
-  document.getElementById("demoControls").style.display = (b.data_provider === "DEMO") ? "flex" : "none";
+  // Demo controls + Demo provider are admin-only.
+  document.getElementById("demoControls").style.display =
+    (b.demo_allowed && b.data_provider === "DEMO") ? "flex" : "none";
   document.getElementById("providerDesc").textContent =
     `Data from ${provLabel(b.data_provider)}, orders to ${provLabel(b.trade_provider)}.` +
     (b.data_provider !== b.trade_provider ? " Symbols are auto-translated between brokers." : "");
@@ -1706,6 +1720,9 @@ async function adminLoadSettings() {
   initRichEditors();
   document.getElementById("adRegOpen").checked = !!s.registration_open;
   document.getElementById("adTrialDays").value = s.trial_days;
+  const labels = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
+  document.getElementById("adBrokers").innerHTML = (s.all_brokers || []).map((b) =>
+    `<label class="check"><input type="checkbox" class="ad-brk" value="${b}" ${(s.enabled_brokers || []).includes(b) ? "checked" : ""}/> ${labels[b] || b}</label>`).join("");
   setRTE("adHowto", s.howto_md || "");
   document.getElementById("adSmtpHost").value = s.smtp_host || "";
   document.getElementById("adSmtpPort").value = s.smtp_port || 587;
@@ -1716,8 +1733,10 @@ async function adminLoadSettings() {
 }
 document.getElementById("adSaveSaas").onclick = async () => {
   try {
+    const enabled = [...document.querySelectorAll(".ad-brk:checked")].map((x) => x.value);
     await api.post("/api/admin/settings", { registration_open: document.getElementById("adRegOpen").checked,
       trial_days: parseInt(document.getElementById("adTrialDays").value) || 7,
+      enabled_brokers: enabled,
       howto_md: getRTE("adHowto") });
     document.getElementById("adSaasMsg").textContent = "✅ Saved"; document.getElementById("adSaasMsg").className = "msg pos";
     toast("✅ SaaS settings saved", "pos"); loadHowto();
