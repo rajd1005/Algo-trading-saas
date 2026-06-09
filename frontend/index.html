@@ -19,12 +19,25 @@
 
   <div id="brokerAlert" class="alert-banner" style="display:none;"></div>
 
-  <!-- Summary cards -->
-  <section class="cards">
-    <div class="card"><div class="card-label">Total P&L</div><div id="sumTotal" class="card-value">₹0</div></div>
-    <div class="card"><div class="card-label">Open P&L</div><div id="sumOpen" class="card-value">₹0</div></div>
-    <div class="card"><div class="card-label">Booked P&L</div><div id="sumClosed" class="card-value">₹0</div></div>
-    <div class="card"><div class="card-label">Open / Pending</div><div id="sumCounts" class="card-value">0 / 0</div></div>
+  <!-- P&L section (filtered by broker / environment) -->
+  <section class="pnl-section">
+    <div class="pnl-head">
+      <span class="pnl-title">P&L —</span>
+      <select id="pnlFilter">
+        <option value="ALL">All Brokers</option>
+        <option value="PAPER">Demo (paper)</option>
+        <option value="DHAN">Dhan (live)</option>
+      </select>
+      <span id="pnlBreakdown" class="muted" style="font-size:12px;"></span>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="card-label">Net P&L</div><div id="sumNet" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label">Gross P&L</div><div id="sumGross" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label">Charges (est.)</div><div id="sumCharges" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label">Win Rate</div><div id="sumWin" class="card-value">0%</div></div>
+      <div class="card"><div class="card-label">Open P&L</div><div id="sumOpen" class="card-value">₹0</div></div>
+      <div class="card"><div class="card-label">Booked P&L</div><div id="sumClosed" class="card-value">₹0</div></div>
+    </div>
   </section>
 
   <div id="mdBanner" class="banner" style="display:none;"></div>

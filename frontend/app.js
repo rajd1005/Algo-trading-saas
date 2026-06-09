@@ -27,16 +27,32 @@ document.querySelectorAll(".tab").forEach((t) => {
   };
 });
 
-// ---- summary ----
+// ---- summary / P&L ----
+let pnlFilter = "ALL";
+document.getElementById("pnlFilter").onchange = (e) => { pnlFilter = e.target.value; refreshSummary(); };
+
+function setCard(id, val) {
+  const el = document.getElementById(id);
+  if (el) { el.textContent = money(val); el.className = "card-value " + cls(val); }
+}
+
 async function refreshSummary() {
-  const s = await api.get("/api/summary");
-  const tot = document.getElementById("sumTotal");
-  tot.textContent = money(s.total_pnl); tot.className = "card-value " + cls(s.total_pnl);
-  const op = document.getElementById("sumOpen");
-  op.textContent = money(s.open_pnl); op.className = "card-value " + cls(s.open_pnl);
-  const cl = document.getElementById("sumClosed");
-  cl.textContent = money(s.closed_pnl); cl.className = "card-value " + cls(s.closed_pnl);
-  document.getElementById("sumCounts").textContent = `${s.open} / ${s.pending}`;
+  const s = await api.get("/api/summary?broker=" + pnlFilter);
+  const p = s.pnl || {};
+  setCard("sumNet", p.net || 0);
+  setCard("sumGross", p.gross || 0);
+  const ch = document.getElementById("sumCharges");
+  if (ch) { ch.textContent = money(p.charges || 0); ch.className = "card-value neg"; }
+  const w = document.getElementById("sumWin");
+  if (w) { w.textContent = (p.win_rate || 0) + "%  (" + (p.wins || 0) + "/" + (p.closed || 0) + ")"; }
+  setCard("sumOpen", p.open_pnl || 0);
+  setCard("sumClosed", p.closed_pnl || 0);
+  // breakdown (only meaningful in the All Brokers view)
+  const bd = document.getElementById("pnlBreakdown");
+  const b = s.pnl_breakdown || {};
+  bd.innerHTML = (s.pnl_filter === "ALL")
+    ? `Demo: <span class="${cls(b.PAPER)}">${money(b.PAPER || 0)}</span> &nbsp;·&nbsp; Dhan: <span class="${cls(b.DHAN)}">${money(b.DHAN || 0)}</span>`
+    : "";
   // kill switch state
   const on = s.kill_switch === "on";
   const ks = document.getElementById("killState");

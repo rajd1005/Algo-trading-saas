@@ -471,11 +471,59 @@ def instruments_refresh():
 
 
 # ---------- summary ----------
-@app.get("/api/summary")
-def summary(db: Session = Depends(get_db)):
-    trades = db.query(Trade).all()
+# ---------- summary / P&L ----------
+def _trade_env(t):
+    """Which environment a trade belongs to: PAPER (demo) or DHAN (live)."""
+    if t.broker:
+        return t.broker
+    return "PAPER" if t.mode == "TEST" else "DHAN"
+
+
+def _metrics(trades):
+    """Compute the P&L metric set for a list of trades."""
+    closed = [t for t in trades if t.status == "CLOSED"]
+    gross = sum(t.pnl for t in trades if t.status in ("OPEN", "CLOSED"))
     open_pnl = sum(t.pnl for t in trades if t.status == "OPEN")
-    closed_pnl = sum(t.pnl for t in trades if t.status == "CLOSED")
+    closed_pnl = sum(t.pnl for t in closed)
+    charges = 0.0
+    for t in trades:
+        legs = 1 if (t.entry_fill_price or 0) > 0 else 0
+        hits = 0
+        if t.targets_json:
+            try:
+                hits = sum(1 for x in json.loads(t.targets_json) if x.get("hit"))
+            except Exception:
+                hits = 0
+        if hits > 0:
+            legs += hits
+        elif t.status == "CLOSED":
+            legs += 1
+        charges += legs * config.CHARGE_PER_LEG
+    wins = sum(1 for t in closed if t.pnl > 0)
+    return {
+        "gross": round(gross, 2),
+        "charges": round(charges, 2),
+        "net": round(gross - charges, 2),
+        "open_pnl": round(open_pnl, 2),
+        "closed_pnl": round(closed_pnl, 2),
+        "win_rate": round(100 * wins / len(closed), 1) if closed else 0.0,
+        "wins": wins,
+        "closed": len(closed),
+        "open": sum(1 for t in trades if t.status == "OPEN"),
+        "pending": sum(1 for t in trades if t.status == "PENDING"),
+    }
+
+
+@app.get("/api/summary")
+def summary(broker: str = "ALL", db: Session = Depends(get_db)):
+    trades = db.query(Trade).all()
+    paper = [t for t in trades if _trade_env(t) == "PAPER"]
+    dhan = [t for t in trades if _trade_env(t) == "DHAN"]
+    flt = (broker or "ALL").upper()
+    selected = paper if flt == "PAPER" else dhan if flt == "DHAN" else trades
+
+    pnl = _metrics(selected)
+    breakdown = {"PAPER": _metrics(paper)["net"], "DHAN": _metrics(dhan)["net"]}
     active = sum(1 for t in trades if t.status in ("OPEN", "PENDING"))
 
     mode = get_setting(db, "broker_mode", "DHAN")
@@ -498,12 +546,15 @@ def summary(db: Session = Depends(get_db)):
 
     return {
         "total_trades": len(trades),
-        "pending": sum(1 for t in trades if t.status == "PENDING"),
-        "open": sum(1 for t in trades if t.status == "OPEN"),
-        "closed": sum(1 for t in trades if t.status == "CLOSED"),
-        "open_pnl": round(open_pnl, 2),
-        "closed_pnl": round(closed_pnl, 2),
-        "total_pnl": round(open_pnl + closed_pnl, 2),
+        "pending": pnl["pending"],
+        "open": pnl["open"],
+        "closed": pnl["closed"],
+        "open_pnl": pnl["open_pnl"],
+        "closed_pnl": pnl["closed_pnl"],
+        "total_pnl": pnl["net"],
+        "pnl": pnl,                       # full metric set for the selected filter
+        "pnl_filter": flt,
+        "pnl_breakdown": breakdown,       # net P&L split: {PAPER, DHAN}
         "kill_switch": get_setting(db, "kill_switch", "off"),
         "md_status": get_setting(db, "md_status", ""),
         "instruments": instruments.status(),

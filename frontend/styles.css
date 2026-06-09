@@ -21,7 +21,12 @@ header h1 { font-size: 20px; margin: 0; }
 .alert-banner { margin: 0; padding: 12px 22px; background: var(--red); color: #fff;
   font-weight: 600; font-size: 14px; text-align: center; }
 
-.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 18px 22px; }
+.pnl-section { padding: 14px 22px 4px; }
+.pnl-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.pnl-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.pnl-head select { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 7px 10px; font-size: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .card-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .card-value { font-size: 24px; font-weight: 700; margin-top: 6px; }

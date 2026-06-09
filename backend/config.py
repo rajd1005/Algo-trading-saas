@@ -12,7 +12,9 @@ load_dotenv()
 HOST = os.getenv("HOST", "0.0.0.0")          # 0.0.0.0 = reachable from your VPS IP
 PORT = int(os.getenv("PORT", "8000"))
 
-# --- Dashboard login ---
+# Estimated brokerage + taxes per executed leg (used for Net P&L). A simple
+# flat estimate (real charges vary by broker/segment); tune in .env if needed.
+CHARGE_PER_LEG = float(os.getenv("CHARGE_PER_LEG", "20"))
 # Set DASHBOARD_PASSWORD in .env to require login. SECRET_KEY signs the session
 # cookie (optional; a stable one is derived from the password if left blank).
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
