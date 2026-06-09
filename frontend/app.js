@@ -1,9 +1,28 @@
 // ---- tiny API helper ----
+// ---- global request tracking (sync / latency indicator) ----
+let _inflight = 0;
+function setSyncing(show, slow) {
+  const el = document.getElementById("syncIndicator");
+  if (!el) return;
+  el.classList.toggle("show", show);
+  el.classList.toggle("slow", !!slow);
+  el.querySelector(".txt").textContent = slow ? "Network slow — tap to retry" : "Syncing with Broker…";
+}
+async function trackedFetch(url, opts) {
+  _inflight++;
+  const t500 = setTimeout(() => setSyncing(true, false), 500);   // >500ms latency
+  const t5000 = setTimeout(() => setSyncing(true, true), 5000);  // >5s = slow
+  try { return await fetch(url, opts); }
+  finally {
+    clearTimeout(t500); clearTimeout(t5000);
+    if (--_inflight === 0) setSyncing(false, false);
+  }
+}
 function checkAuth(r) { if (r.status === 401) { location.href = "/login"; throw new Error("Login required"); } return r; }
 const api = {
-  async get(url) { const r = checkAuth(await fetch(url)); return r.json(); },
+  async get(url) { const r = checkAuth(await trackedFetch(url)); return r.json(); },
   async post(url, body) {
-    const r = checkAuth(await fetch(url, {
+    const r = checkAuth(await trackedFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : null,
@@ -11,9 +30,12 @@ const api = {
     if (!r.ok) throw new Error((await r.json()).detail || "Request failed");
     return r.json();
   },
-  async del(url) { const r = checkAuth(await fetch(url, { method: "DELETE" })); return r.json(); },
+  async del(url) { const r = checkAuth(await trackedFetch(url, { method: "DELETE" })); return r.json(); },
 };
 
+document.getElementById("syncIndicator").onclick = () => { setSyncing(false, false); refreshAll(); };
+
+let _lastBalance;
 const money = (n) => (n >= 0 ? "₹" : "-₹") + Math.abs(n).toLocaleString("en-IN");
 const cls = (n) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 
@@ -29,7 +51,26 @@ document.querySelectorAll(".tab").forEach((t) => {
 
 // ---- summary / P&L ----
 let pnlFilter = "ALL";
-document.getElementById("pnlFilter").onchange = (e) => { pnlFilter = e.target.value; refreshSummary(); };
+let _pnlTO = null;
+function showPnlLoading(on) {
+  const sec = document.querySelector(".pnl-section");
+  let ov = document.getElementById("pnlOverlay");
+  if (on) {
+    if (!ov) {
+      ov = document.createElement("div");
+      ov.id = "pnlOverlay"; ov.className = "glass-overlay";
+      ov.innerHTML = '<span class="spinner"></span> Aggregating…';
+      sec.appendChild(ov);
+    }
+    clearTimeout(_pnlTO);
+    _pnlTO = setTimeout(() => showPnlLoading(false), 5000);   // timeout fallback
+  } else if (ov) { ov.remove(); clearTimeout(_pnlTO); }
+}
+document.getElementById("pnlFilter").onchange = (e) => {
+  pnlFilter = e.target.value;
+  showPnlLoading(true);
+  refreshSummary().finally(() => showPnlLoading(false));
+};
 
 function setCard(id, val) {
   const el = document.getElementById(id);
@@ -80,6 +121,11 @@ async function refreshSummary() {
   if (bs) {
     const bal = s.balance != null ? " · Avail ₹" + Number(s.balance).toLocaleString("en-IN") : "";
     bs.innerHTML = s.broker_name ? `<b>${s.broker_name}</b>${bal}` : "";
+    // micro-interaction: pulse when the live balance changes
+    if (_lastBalance !== undefined && _lastBalance !== s.balance) {
+      bs.classList.remove("pulse"); void bs.offsetWidth; bs.classList.add("pulse");
+    }
+    _lastBalance = s.balance;
   }
   // connection-lost alert while trades are running
   const ba = document.getElementById("brokerAlert");
@@ -108,6 +154,10 @@ async function refreshSummary() {
 
 // ---- trades table ----
 let tradesById = {};
+function showTradesSkeleton(n = 4) {
+  document.getElementById("tradesBody").innerHTML = Array.from({ length: n })
+    .map(() => `<tr class="skel-row"><td colspan="13"><div class="skel-bar"></div></td></tr>`).join("");
+}
 async function refreshTrades() {
   const rows = await api.get("/api/trades");
   tradesById = {};
@@ -548,23 +598,39 @@ function pickContract(r) {
   form.instrument_type.value = r.instrument_type;
   currentLotSize = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
   updateQty();
-  showSelected(r, null);
   // Auto-fetch & live-update the LTP for stocks / futures / index right away.
   if (selLtpTimer) { clearInterval(selLtpTimer); selLtpTimer = null; }
   if (["EQUITY", "FUTURES", "INDEX"].includes(r.instrument_type)) {
+    showSelected(r, "LOADING");           // inline spinner until first tick
+    let gotPrice = false;
     const run = async () => {
       if (form.security_id.value !== r.security_id) return;
       let res; try { res = await api.post("/api/ltp", { items: [{ security_id: r.security_id, exchange_segment: r.exchange_segment }] }); } catch { return; }
-      showSelected(r, (res.prices || {})[r.security_id]);
+      const p = (res.prices || {})[r.security_id];
+      if (p != null) { gotPrice = true; showSelected(r, p); }
     };
     run();
     selLtpTimer = setInterval(run, 3000);
+    // Timeout/fallback: if no tick within 5s, stop spinning and warn.
+    setTimeout(() => { if (!gotPrice && form.security_id.value === r.security_id) showSelected(r, "SLOW"); }, 5000);
+  } else {
+    showSelected(r, null);
   }
 }
 function showSelected(r, ltp) {
-  const ltpTxt = ltp != null ? ` · <span style="color:var(--accent)">LTP ₹${ltp}</span>` : "";
+  let ltpTxt = "";
+  if (ltp === "LOADING") ltpTxt = ` · <span class="spinner"></span>`;
+  else if (ltp === "SLOW") ltpTxt = ` · <span style="color:var(--red)">price slow… <span class="link" onclick="retrySelLtp()">retry</span></span>`;
+  else if (ltp != null) ltpTxt = ` · <span style="color:var(--accent)">LTP ₹${ltp}</span>`;
   document.getElementById("selectedSymbol").innerHTML =
     `✅ <b>${r.symbol}</b> — ${r.instrument_type} · ${r.exchange_segment} · ID ${r.security_id} · lot ${currentLotSize}${ltpTxt}`;
+}
+function retrySelLtp() {
+  if (form.security_id.value) {
+    pickContract({ symbol: form.symbol.value, security_id: form.security_id.value,
+      exchange_segment: form.exchange_segment.value, instrument_type: form.instrument_type.value,
+      lot_size: currentLotSize });
+  }
 }
 
 document.addEventListener("click", (e) => {
@@ -847,5 +913,6 @@ document.getElementById("refreshSymbolsBtn").onclick = async () => {
 async function refreshAll() {
   await Promise.all([refreshSummary(), refreshTrades(), refreshLogs(), refreshBroker()]);
 }
+showTradesSkeleton();   // skeleton rows until the first data arrives
 refreshAll();
 setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); }, 2000);

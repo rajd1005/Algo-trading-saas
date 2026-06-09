@@ -21,7 +21,7 @@ header h1 { font-size: 20px; margin: 0; }
 .alert-banner { margin: 0; padding: 12px 22px; background: var(--red); color: #fff;
   font-weight: 600; font-size: 14px; text-align: center; }
 
-.pnl-section { padding: 14px 22px 4px; }
+.pnl-section { padding: 14px 22px 4px; position: relative; }
 .pnl-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
 .pnl-title { font-size: 16px; font-weight: 700; color: var(--text); }
 .pnl-head select { background: var(--bg); border: 1px solid var(--line); color: var(--text);
@@ -205,3 +205,35 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .b-LIVE { background: rgba(248,81,73,.18); color: var(--red); }
 
 @media (max-width: 720px) { .cards { grid-template-columns: repeat(2,1fr); } }
+
+/* ---------- loaders / sync indicators ---------- */
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line);
+  border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+.shimmer, .skel-bar { background: linear-gradient(90deg, #1a2129 25%, #243040 50%, #1a2129 75%);
+  background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 5px; }
+.shimmer { display: inline-block; width: 56px; height: 12px; color: transparent !important; vertical-align: middle; }
+.skel-bar { height: 12px; }
+
+/* glassmorphism overlay (PnL cards) */
+.glass-overlay { position: absolute; inset: 8px; background: rgba(15,20,25,.4);
+  backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+  display: flex; align-items: center; justify-content: center; gap: 10px; z-index: 20;
+  border-radius: 10px; color: var(--muted); font-size: 13px; }
+.glass-overlay .spinner { width: 20px; height: 20px; border-width: 3px; }
+
+/* floating "syncing" indicator */
+.syncing { display: none; align-items: center; gap: 7px; font-size: 12px; cursor: pointer;
+  color: var(--yellow); background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.4);
+  border-radius: 20px; padding: 4px 12px; }
+.syncing.show { display: inline-flex; }
+.syncing.slow { color: var(--red); background: rgba(248,81,73,.12); border-color: rgba(248,81,73,.45); }
+.syncing .spinner { border-top-color: currentColor; }
+
+/* pulse on auto-updated values */
+@keyframes pulseGlow { 0% { box-shadow: 0 0 0 0 rgba(47,129,247,.55); }
+  100% { box-shadow: 0 0 0 9px rgba(47,129,247,0); } }
+.pulse { animation: pulseGlow .8s ease-out; }
+.link { color: var(--accent); cursor: pointer; text-decoration: underline; }
