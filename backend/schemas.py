@@ -59,6 +59,8 @@ class TradeOut(BaseModel):
     pnl: float
     exit_reason: str
     broker_order_id: str
+    broker: str
+    source: str
 
     class Config:
         from_attributes = True

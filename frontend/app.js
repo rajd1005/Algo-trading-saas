@@ -59,6 +59,19 @@ async function refreshSummary() {
   } else {
     banner.style.display = "none";
   }
+  // broker name + balance (auto-updates every 2s with the summary)
+  const bs = document.getElementById("brokerStatus");
+  if (bs) {
+    const bal = s.balance != null ? " · Avail ₹" + Number(s.balance).toLocaleString("en-IN") : "";
+    bs.innerHTML = s.broker_name ? `<b>${s.broker_name}</b>${bal}` : "";
+  }
+  // connection-lost alert while trades are running
+  const ba = document.getElementById("brokerAlert");
+  if (ba) {
+    if (s.broker_alert) { ba.style.display = "block"; ba.textContent = "⚠️ " + s.alert_msg; }
+    else ba.style.display = "none";
+  }
+
   // demo direction state
   const dir = s.demo_direction || 0;
   const dirState = document.getElementById("demoDirState");
@@ -91,6 +104,7 @@ async function refreshTrades() {
       <td>${t.id}</td>
       <td>${t.symbol}</td>
       <td><span class="badge b-${t.mode}">${t.mode}</span></td>
+      <td>${brokerLabel(t)}</td>
       <td>${t.side}</td>
       <td>${qtyCell(t)}</td>
       <td>${t.entry_fill_price || t.entry_price || "-"}</td>
@@ -109,6 +123,12 @@ async function refreshTrades() {
       else doAction(b.dataset.act, b.dataset.id);
     };
   });
+}
+
+function brokerLabel(t) {
+  const name = t.broker === "PAPER" ? "Paper" : (t.broker || (t.mode === "TEST" ? "Paper" : "—"));
+  const ext = t.source === "EXTERNAL" ? ' <span class="rbadge r-MANUAL">EXT</span>' : "";
+  return name + ext;
 }
 
 function qtyCell(t) {
@@ -352,6 +372,7 @@ function resetPicker() {
   futWrap.style.display = "none";
   futWrap.innerHTML = ""; chainBody.innerHTML = "";
   if (ltpTimer) { clearInterval(ltpTimer); ltpTimer = null; }
+  if (typeof selLtpTimer !== "undefined" && selLtpTimer) { clearInterval(selLtpTimer); selLtpTimer = null; }
 }
 
 document.querySelectorAll("[data-seg]").forEach((b) => {
@@ -503,6 +524,7 @@ function renderFutures(futs) {
   });
 }
 
+let selLtpTimer = null;
 function pickContract(r) {
   form.symbol.value = r.symbol;
   form.security_id.value = r.security_id;
@@ -510,8 +532,23 @@ function pickContract(r) {
   form.instrument_type.value = r.instrument_type;
   currentLotSize = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
   updateQty();
+  showSelected(r, null);
+  // Auto-fetch & live-update the LTP for stocks / futures / index right away.
+  if (selLtpTimer) { clearInterval(selLtpTimer); selLtpTimer = null; }
+  if (["EQUITY", "FUTURES", "INDEX"].includes(r.instrument_type)) {
+    const run = async () => {
+      if (form.security_id.value !== r.security_id) return;
+      let res; try { res = await api.post("/api/ltp", { items: [{ security_id: r.security_id, exchange_segment: r.exchange_segment }] }); } catch { return; }
+      showSelected(r, (res.prices || {})[r.security_id]);
+    };
+    run();
+    selLtpTimer = setInterval(run, 3000);
+  }
+}
+function showSelected(r, ltp) {
+  const ltpTxt = ltp != null ? ` · <span style="color:var(--accent)">LTP ₹${ltp}</span>` : "";
   document.getElementById("selectedSymbol").innerHTML =
-    `✅ <b>${r.symbol}</b> — ${r.instrument_type} · ${r.exchange_segment} · ID ${r.security_id} · lot size ${currentLotSize}`;
+    `✅ <b>${r.symbol}</b> — ${r.instrument_type} · ${r.exchange_segment} · ID ${r.security_id} · lot ${currentLotSize}${ltpTxt}`;
 }
 
 document.addEventListener("click", (e) => {
@@ -644,9 +681,16 @@ document.getElementById("loginDhanBtn").onclick = async () => {
 ["modeDemo", "modeDhan"].forEach((id) => {
   document.getElementById(id).onclick = async () => {
     const mode = document.getElementById(id).dataset.mode;
-    await api.post("/api/broker/mode", { mode });
-    applyBrokerMode(mode);
-    await refreshBroker();
+    const msg = document.getElementById("brokerMsg");
+    try {
+      await api.post("/api/broker/mode", { mode });
+      applyBrokerMode(mode);
+      msg.textContent = "";
+      await refreshBroker();
+    } catch (e) {
+      msg.textContent = "❌ " + e.message; msg.className = "msg neg";
+      await refreshBroker();   // revert the buttons to the real mode
+    }
   };
 });
 document.getElementById("saveBrokerBtn").onclick = async () => {

@@ -47,6 +47,8 @@ _MIGRATIONS = {
         "trail_sl": "REAL DEFAULT 0",
         "trail_mode": "TEXT DEFAULT 'CONTINUE'",
         "hwm": "REAL DEFAULT 0",
+        "broker": "TEXT DEFAULT ''",
+        "source": "TEXT DEFAULT 'ALGO'",
     },
     "logs": {
         "day": "TEXT DEFAULT ''",

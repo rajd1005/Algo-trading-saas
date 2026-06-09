@@ -10,11 +10,14 @@
   <header>
     <h1>⚡ Algo Trading <span class="muted">— India</span></h1>
     <div class="header-right">
+      <span id="brokerStatus" class="broker-status"></span>
       <span id="killState" class="pill pill-off">KILL: OFF</span>
       <button id="killBtn" class="btn btn-danger">Kill Switch</button>
       <button id="logoutBtn" class="btn">Logout</button>
     </div>
   </header>
+
+  <div id="brokerAlert" class="alert-banner" style="display:none;"></div>
 
   <!-- Summary cards -->
   <section class="cards">
@@ -46,7 +49,7 @@
     <table class="data">
       <thead>
         <tr>
-          <th>ID</th><th>Symbol</th><th>Mode</th><th>Side</th><th>Qty</th>
+          <th>ID</th><th>Symbol</th><th>Mode</th><th>Broker</th><th>Side</th><th>Qty</th>
           <th>Entry</th><th>SL</th><th>Target</th><th>LTP</th><th>P&L</th>
           <th>Status</th><th>Actions</th>
         </tr>

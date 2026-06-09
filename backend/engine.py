@@ -292,6 +292,7 @@ class TradingEngine:
         """Mark a trade OPEN only after the broker confirms the fill."""
         t.status = "OPEN"
         t.entry_fill_price = fill_price
+        t.broker = broker.name
         self._apply_levels(t)
         self._log(db, f"ENTRY {t.side} {t.symbol} x{t.quantity} @ {fill_price} "
                       f"[{t.mode}/{broker.name}]", "INFO", t.id)

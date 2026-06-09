@@ -148,6 +148,31 @@ class DhanBroker:
             time.sleep(config.ORDER_POLL_DELAY)
         return last
 
+    def fund_limit(self):
+        """Return (ok, available_balance) from Dhan."""
+        url = f"{config.DHAN_API_BASE}/fundlimit"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=6)
+            r.raise_for_status()
+            d = r.json()
+            bal = (d.get("availabelBalance")          # Dhan's known spelling
+                   or d.get("availableBalance")
+                   or d.get("withdrawableBalance") or 0)
+            return True, float(bal)
+        except Exception:
+            return False, 0.0
+
+    def get_positions(self):
+        """Return the list of open positions held at Dhan (for external sync)."""
+        url = f"{config.DHAN_API_BASE}/positions"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=6)
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
 
 def verify_dhan_credentials(client_id: str, access_token: str) -> tuple[bool, str]:
     """

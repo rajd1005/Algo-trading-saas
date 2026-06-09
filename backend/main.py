@@ -35,7 +35,7 @@ from schemas import TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn
 from engine import engine, level_price
 from instruments import store as instruments
 from market_data import DhanMarketData, demo_market
-from brokers import verify_dhan_credentials
+from brokers import verify_dhan_credentials, DhanBroker
 
 app = FastAPI(title="Algo Trading SaaS (India)")
 
@@ -127,6 +127,66 @@ def _startup():
     instruments.load_async()   # download Dhan's symbol list in the background
     engine.start()
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
+    threading.Thread(target=_broker_monitor_loop, daemon=True).start()
+
+
+def _broker_monitor_loop():
+    """Live broker: refresh balance + connection health, and sync any positions
+    placed externally on the broker terminal into our 'Live Trade' list."""
+    while True:
+        time.sleep(12)
+        try:
+            db = SessionLocal()
+            if get_setting(db, "broker_mode", "DHAN") == "DHAN":
+                cid = get_setting(db, "dhan_client_id", "")
+                tok = get_setting(db, "dhan_access_token", "")
+                if cid and tok:
+                    b = DhanBroker(cid, tok)
+                    ok, bal = b.fund_limit()
+                    if ok:
+                        set_setting(db, "dhan_balance", str(bal))
+                        set_setting(db, "broker_health", "ok")
+                        set_setting(db, "broker_health_time", dt.datetime.utcnow().isoformat())
+                    else:
+                        set_setting(db, "broker_health", "error")
+                    try:
+                        _sync_external_positions(db, b.get_positions())
+                    except Exception:
+                        pass
+            db.commit()
+            db.close()
+        except Exception:
+            pass
+
+
+def _sync_external_positions(db, positions):
+    """Create a Live Trade for any broker position we aren't already tracking."""
+    for p in positions or []:
+        try:
+            net = int(float(p.get("netQty", 0)))
+        except Exception:
+            net = 0
+        if net == 0:
+            continue
+        sec = str(p.get("securityId", ""))
+        if not sec:
+            continue
+        existing = db.query(Trade).filter(
+            Trade.security_id == sec, Trade.status.in_(["OPEN", "PENDING"])).first()
+        if existing:
+            continue
+        side = "BUY" if net > 0 else "SELL"
+        avg = float(p.get("buyAvg") or p.get("costPrice") or 0) if net > 0 \
+            else float(p.get("sellAvg") or p.get("costPrice") or 0)
+        sym = p.get("tradingSymbol") or sec
+        t = Trade(symbol=sym, name=sym, security_id=sec,
+                  exchange_segment=p.get("exchangeSegment", ""),
+                  instrument_type="OPTION" if "OPT" in str(p.get("drvOptionType", "")) else "EQUITY",
+                  side=side, quantity=abs(net), lot_size=1, mode="LIVE",
+                  status="OPEN", entry_fill_price=avg, broker="DHAN", source="EXTERNAL")
+        db.add(t)
+        db.add(LogEntry(message=f"Synced external {side} position: {sym} x{abs(net)} @ {avg} "
+                                f"(placed on broker terminal)", level="INFO"))
 
 
 def _auto_renew_loop():
@@ -384,6 +444,26 @@ def summary(db: Session = Depends(get_db)):
     trades = db.query(Trade).all()
     open_pnl = sum(t.pnl for t in trades if t.status == "OPEN")
     closed_pnl = sum(t.pnl for t in trades if t.status == "CLOSED")
+    active = sum(1 for t in trades if t.status in ("OPEN", "PENDING"))
+
+    mode = get_setting(db, "broker_mode", "DHAN")
+    if mode == "DEMO":
+        broker_name, balance = "Demo (simulated)", None
+    else:
+        broker_name = "Dhan"
+        bal = get_setting(db, "dhan_balance", "")
+        balance = float(bal) if bal else None
+
+    # Connection-lost warning while trades are running.
+    broker_alert, alert_msg = False, ""
+    if mode == "DHAN" and active > 0:
+        if get_setting(db, "dhan_connected", "no") != "yes":
+            broker_alert = True
+            alert_msg = "Dhan is NOT connected but trades are running — re-login on the Broker tab now."
+        elif get_setting(db, "broker_health", "") == "error":
+            broker_alert = True
+            alert_msg = "Lost connection to Dhan — stop-loss/target exits may not fire. Check the Broker tab."
+
     return {
         "total_trades": len(trades),
         "pending": sum(1 for t in trades if t.status == "PENDING"),
@@ -396,6 +476,10 @@ def summary(db: Session = Depends(get_db)):
         "md_status": get_setting(db, "md_status", ""),
         "instruments": instruments.status(),
         "demo_direction": demo_market.direction,
+        "broker_name": broker_name,
+        "balance": balance,
+        "broker_alert": broker_alert,
+        "alert_msg": alert_msg,
     }
 
 
@@ -534,6 +618,11 @@ def dhan_callback(tokenId: str = "", db: Session = Depends(get_db)):
 @app.post("/api/broker/mode")
 def set_broker_mode(payload: dict, db: Session = Depends(get_db)):
     mode = "DEMO" if str(payload.get("mode", "")).upper() == "DEMO" else "DHAN"
+    # Active-trade lock: don't let the broker change while trades are running.
+    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
+    if active > 0 and mode != get_setting(db, "broker_mode", "DHAN"):
+        raise HTTPException(400, f"{active} trade(s) are running — close them before "
+                                 f"switching the broker.")
     set_setting(db, "broker_mode", mode)
     db.add(LogEntry(message=f"Broker mode set to {mode}", level="WARN"))
     db.commit()

@@ -15,6 +15,11 @@ header {
 header h1 { font-size: 20px; margin: 0; }
 .muted { color: var(--muted); font-weight: 400; }
 .header-right { display: flex; gap: 12px; align-items: center; }
+.broker-status { font-size: 13px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 12px; }
+.broker-status b { color: var(--green); }
+.alert-banner { margin: 0; padding: 12px 22px; background: var(--red); color: #fff;
+  font-weight: 600; font-size: 14px; text-align: center; }
 
 .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; padding: 18px 22px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
