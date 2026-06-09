@@ -31,6 +31,7 @@ import dhan_auth
 import auth
 import angel
 import zerodha
+import aliceblue
 
 import config
 from database import init_db, get_db, SessionLocal
@@ -48,7 +49,8 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fronten
 
 _OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico",
                "/api/dhan/postback", "/api/dhan/callback", "/api/angel/postback",
-               "/api/zerodha/callback", "/api/zerodha/postback"}
+               "/api/zerodha/callback", "/api/zerodha/postback",
+               "/api/aliceblue/postback"}
 
 
 @app.middleware("http")
@@ -134,7 +136,8 @@ def get_data_creds(db):
 
 # ---------- multi-account broker logins ----------
 def _label(broker, client_id):
-    name = {"DHAN": "Dhan", "ANGEL": "Angel One", "ZERODHA": "Zerodha"}.get(broker, broker)
+    name = {"DHAN": "Dhan", "ANGEL": "Angel One", "ZERODHA": "Zerodha",
+            "ALICE": "Alice Blue"}.get(broker, broker)
     return f"{name} · {client_id or '—'}"
 
 
@@ -200,6 +203,8 @@ def _broker_from_account(a):
         return angel.AngelBroker(a.client_id, creds.get("api_key", ""), creds["jwt"])
     if a.broker == "ZERODHA" and creds.get("access_token"):
         return zerodha.ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
+    if a.broker == "ALICE" and creds.get("session_id"):
+        return aliceblue.AliceBroker(a.client_id, creds["session_id"])
     return None
 
 
@@ -212,7 +217,7 @@ def list_accounts(db: Session = Depends(get_db)):
 def save_account(payload: dict, db: Session = Depends(get_db)):
     """Add or update a broker account."""
     broker = str(payload.get("broker", "")).upper()
-    if broker not in ("DHAN", "ANGEL", "ZERODHA"):
+    if broker not in ("DHAN", "ANGEL", "ZERODHA", "ALICE"):
         broker = "DHAN"
     aid = payload.get("id")
     a = db.get(Account, int(aid)) if aid else None
@@ -268,6 +273,7 @@ def _startup():
     instruments.load_async()   # download Dhan's symbol list in the background
     angel.mapper.load_async()  # download Angel One master + build the symbol map
     zerodha.mapper.load_async()  # download Zerodha (Kite) master + symbol map
+    aliceblue.mapper.load_async()  # download Alice Blue contract masters + symbol map
     engine.start()
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
@@ -437,6 +443,15 @@ def _auto_renew_loop():
                         _set_acc_creds(a, jwt=new)
                         a.token_time = dt.datetime.utcnow()
                         db.add(LogEntry(message=f"{a.label} token auto-renewed.", level="INFO"))
+                    else:
+                        db.add(LogEntry(message=f"{a.label} renew failed — log in again.", level="WARN"))
+                elif a.broker == "ALICE" and creds.get("api_key"):
+                    # Alice Blue is key-based: re-login programmatically (no TOTP/redirect).
+                    ok, res = aliceblue.login(a.client_id, creds["api_key"])
+                    if ok:
+                        _set_acc_creds(a, session_id=res)
+                        a.token_time = dt.datetime.utcnow()
+                        db.add(LogEntry(message=f"{a.label} session auto-renewed.", level="INFO"))
                     else:
                         db.add(LogEntry(message=f"{a.label} renew failed — log in again.", level="WARN"))
             db.commit()
@@ -640,6 +655,11 @@ def ltp(payload: dict, db: Session = Depends(get_db)):
         if not (key and tok) or not by_seg:
             return {"connected": bool(key and tok), "prices": {}}
         md = zerodha.ZerodhaMarketData(key, tok)
+    elif acc.broker == "ALICE":
+        cid, sid = acc.client_id, creds.get("session_id", "")
+        if not (cid and sid) or not by_seg:
+            return {"connected": bool(cid and sid), "prices": {}}
+        md = aliceblue.AliceMarketData(cid, sid)
     else:               # DHAN
         cid, tok = acc.client_id, creds.get("access_token", "")
         if not cid or not tok or not by_seg:
@@ -676,6 +696,7 @@ def instruments_refresh():
     instruments.refresh()        # Dhan master (the universal picker base)
     angel.mapper.load_async()    # Angel master (for translation)
     zerodha.mapper.load_async()  # Zerodha master (for translation)
+    aliceblue.mapper.load_async()  # Alice Blue masters (for translation)
     return {"ok": True, "message": "Refreshing symbol lists in the background…"}
 
 
@@ -779,6 +800,7 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
         "instruments": instruments.status(),
         "angel_map": angel.mapper.status(),
         "zerodha_map": zerodha.mapper.status(),
+        "alice_map": aliceblue.mapper.status(),
         "demo_direction": demo_market.direction,
         "data_provider": data_provider, "trade_provider": trade_provider,
         "data_name": data_name, "broker_name": broker_name, "balance": balance,
@@ -855,6 +877,7 @@ def get_broker(request: Request, db: Session = Depends(get_db)):
         "angel_postback_url": base + "/api/angel/postback",
         "zerodha_redirect_url": base + "/api/zerodha/callback",
         "zerodha_postback_url": base + "/api/zerodha/postback",
+        "aliceblue_postback_url": base + "/api/aliceblue/postback",
         "static_ip": get_setting(db, "static_ip", ""),
     }
 
@@ -1049,6 +1072,46 @@ async def angel_postback(request: Request, db: Session = Depends(get_db)):
         db.commit()
     except Exception as e:
         db.add(LogEntry(message=f"Angel postback error: {e}", level="ERROR"))
+        db.commit()
+    return {"ok": True}
+
+
+# ---------- Alice Blue (ANT API, per account) ----------
+@app.post("/api/aliceblue/login")
+def aliceblue_login(payload: dict, db: Session = Depends(get_db)):
+    """Log in to Alice Blue (User ID + API Key -> session) and store the session."""
+    a = db.get(Account, int(payload.get("account_id", 0)))
+    if a is None or a.broker != "ALICE":
+        raise HTTPException(400, "Alice Blue account not found.")
+    creds = _acc_creds(a)
+    cid, key = a.client_id, creds.get("api_key", "")
+    if not cid or not key:
+        raise HTTPException(400, "Enter Alice Blue User ID and API Key first.")
+    ok, res = aliceblue.login(cid, key)
+    if ok:
+        _set_acc_creds(a, session_id=res)
+        a.connected = 1
+        a.token_time = dt.datetime.utcnow()
+        a.label = _label("ALICE", a.client_id)
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO"))
+        db.commit()
+        return {"connected": True}
+    db.add(LogEntry(message=f"Alice Blue login failed: {res}", level="ERROR"))
+    db.commit()
+    raise HTTPException(400, f"Alice Blue login failed: {res}")
+
+
+@app.post("/api/aliceblue/postback")
+async def aliceblue_postback(request: Request, db: Session = Depends(get_db)):
+    """Alice Blue order-update webhook: instant sync of external Alice orders."""
+    try:
+        payload = await request.json()
+        orders = payload if isinstance(payload, list) else [payload]
+        _sync_external_orders(db, [aliceblue.normalize_order(o) for o in orders],
+                              "ALICE", _account_id_for_broker(db, "ALICE"))
+        db.commit()
+    except Exception as e:
+        db.add(LogEntry(message=f"Alice Blue postback error: {e}", level="ERROR"))
         db.commit()
     return {"ok": True}
 

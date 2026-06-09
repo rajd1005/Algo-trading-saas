@@ -27,6 +27,7 @@ from live_feed import feed
 from brokers import PaperBroker, DhanBroker
 from angel import AngelBroker, AngelMarketData
 from zerodha import ZerodhaBroker, ZerodhaMarketData
+from aliceblue import AliceBroker, AliceMarketData
 import config
 
 
@@ -144,6 +145,8 @@ class TradingEngine:
             return AngelBroker(acc.client_id, creds.get("api_key", ""), creds["jwt"])
         if acc.broker == "ZERODHA" and creds.get("access_token"):
             return ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
+        if acc.broker == "ALICE" and creds.get("session_id"):
+            return AliceBroker(acc.client_id, creds["session_id"])
         return None
 
     def _fetch_prices(self, db, value, instruments, active):
@@ -190,6 +193,20 @@ class TradingEngine:
                     self._set_setting(db, "md_status", "ok:zerodha")
                 elif md.last_error:
                     self._set_setting(db, "md_status", f"Zerodha data error: {md.last_error[:160]}")
+            return prices
+        if acc.broker == "ALICE":
+            cid, sid = acc.client_id, creds.get("session_id", "")
+            if not cid or not sid:
+                if active:
+                    self._set_setting(db, "md_status", "Data (Alice Blue) not connected — connect on the Broker tab.")
+                return {}
+            md = AliceMarketData(cid, sid)
+            prices = md.get_ltp_batch(by_seg)
+            if active:
+                if prices:
+                    self._set_setting(db, "md_status", "ok:alice")
+                elif md.last_error:
+                    self._set_setting(db, "md_status", f"Alice Blue data error: {md.last_error[:160]}")
             return prices
         return {}
 
@@ -344,7 +361,7 @@ class TradingEngine:
 
         # If we already placed a live entry order, just CONFIRM it (never place
         # a second order) — this prevents duplicate/ghost trades.
-        if t.broker_order_id and broker.name in ("DHAN", "ANGEL"):
+        if t.broker_order_id and broker.name in ("DHAN", "ANGEL", "ZERODHA", "ALICE"):
             status, traded_price, _, reason = broker.order_status(t.broker_order_id)
             if status == "TRADED":
                 self._open_trade(db, t, traded_price or t.last_price, broker)

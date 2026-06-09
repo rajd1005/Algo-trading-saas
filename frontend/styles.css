@@ -161,6 +161,15 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
   padding: 10px 12px; font-size: 12px; margin-bottom: 10px; }
 .webhook-box code { color: var(--accent); word-break: break-all; }
 
+/* per-broker connection help */
+.help-box { background: #11171d; border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 12px; font-size: 13px; }
+.help-box > summary { cursor: pointer; font-weight: 700; color: var(--text); }
+.help-broker { margin: 10px 0; padding-top: 8px; border-top: 1px solid var(--line); }
+.help-broker b { color: var(--accent); }
+.help-broker ol { margin: 6px 0 0 18px; padding: 0; color: var(--muted); line-height: 1.6; }
+.help-broker code { color: var(--accent); }
+
 /* demo control bar */
 .demo-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   background: rgba(46,160,67,.08); border: 1px solid rgba(46,160,67,.3);

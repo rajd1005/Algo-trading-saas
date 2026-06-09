@@ -105,13 +105,15 @@ async function refreshSummary() {
   const banner = document.getElementById("mdBanner");
   const inst = s.instruments || {};
   const m = s.md_status || "";
-  const dataName = { DEMO: "Demo", DHAN: "Dhan", ANGEL: "Angel One" }[s.data_provider] || "broker";
+  const dataName = s.data_name || "broker";
   if (m.indexOf("ok") === 0) {
     banner.style.display = "block"; banner.className = "banner ok";
     banner.textContent =
         m === "ok:demo" ? "🧪 DEMO mode — simulated prices (no real money)."
       : m === "ok:ws" ? `⚡ Real-time prices (WebSocket) flowing from ${dataName}.`
-      : m === "ok:angel" ? "✅ Live prices flowing from Angel One."
+      : m === "ok:angel" ? `✅ Live prices flowing from ${dataName}.`
+      : m === "ok:zerodha" ? `✅ Live prices flowing from ${dataName}.`
+      : m === "ok:alice" ? `✅ Live prices flowing from ${dataName}.`
       : `✅ Live prices (1-second) flowing from ${dataName}.`;
   } else if (m) {
     banner.style.display = "block"; banner.className = "banner";
@@ -155,14 +157,22 @@ async function refreshSummary() {
   });
 
   // symbol list state (Broker tab) — reflect the active data provider
-  const am = s.angel_map || {};
   const ss = document.getElementById("symbolsState");
+  const ssLabel = document.getElementById("symbolsLabel");
+  // Maps for non-Dhan brokers carry a {count, loading}; Dhan uses the instruments store.
+  const brokerMap = { ANGEL: s.angel_map, ZERODHA: s.zerodha_map, ALICE: s.alice_map };
+  const map = brokerMap[dataBroker];
+  if (ssLabel) {
+    const src = { DEMO: "Demo", DHAN: "Dhan", ANGEL: "Angel One",
+                  ZERODHA: "Zerodha", ALICE: "Alice Blue" }[dataBroker] || "Dhan";
+    ssLabel.textContent = `Symbol list (auto-downloaded from ${src}, refreshes daily):`;
+  }
   if (ss) {
-    if (dataBroker === "ANGEL") {
-      if (am.loading) { ss.textContent = "Downloading Angel…"; ss.className = "pill pill-off"; }
-      else if (am.count > 0) { ss.textContent = am.count.toLocaleString("en-IN") + " Angel instruments"; ss.className = "pill pill-ok"; }
+    if (map) {   // Angel / Zerodha / Alice translation master
+      if (map.loading) { ss.textContent = "Downloading…"; ss.className = "pill pill-off"; }
+      else if (map.count > 0) { ss.textContent = map.count.toLocaleString("en-IN") + " instruments"; ss.className = "pill pill-ok"; }
       else { ss.textContent = "Not loaded"; ss.className = "pill pill-off"; }
-    } else {
+    } else {     // Dhan (the universal picker base) or Demo
       if (inst.loading) { ss.textContent = "Downloading…"; ss.className = "pill pill-off"; }
       else if (inst.underlyings > 0) { ss.textContent = inst.underlyings.toLocaleString("en-IN") + " underlyings loaded"; ss.className = "pill pill-ok"; }
       else { ss.textContent = "Not loaded"; ss.className = "pill pill-off"; }
@@ -753,6 +763,10 @@ async function loginAccount(id, broker) {
     } else if (broker === "ZERODHA") {
       const r = await api.get("/api/zerodha/login?account_id=" + id);
       window.location.href = r.login_url;        // redirect to Kite
+    } else if (broker === "ALICE") {
+      await api.post("/api/aliceblue/login", { account_id: Number(id) });
+      msg.textContent = "✅ Logged in to Alice Blue."; msg.className = "msg pos";
+      await refreshBroker();
     } else {
       await api.post("/api/angel/login", { account_id: Number(id) });
       msg.textContent = "✅ Logged in to Angel One."; msg.className = "msg pos";
@@ -788,6 +802,8 @@ async function refreshBroker() {
   document.getElementById("angelPostbackUrl").textContent = b.angel_postback_url || "—";
   document.getElementById("zerodhaRedirectUrl").textContent = b.zerodha_redirect_url || "—";
   document.getElementById("zerodhaPostbackUrl").textContent = b.zerodha_postback_url || "—";
+  const aliceP = document.getElementById("alicebluePostbackUrl");
+  if (aliceP) aliceP.textContent = b.aliceblue_postback_url || "—";
   document.getElementById("staticIp").textContent = b.static_ip || "detecting…";
   const st = document.getElementById("brokerState");
   const dot = (ok) => (ok ? "🟢" : "🔴");
@@ -811,14 +827,14 @@ async function refreshBroker() {
 });
 
 // add / edit account form
-const BROKER_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha" };
+const BROKER_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
 function showAcctForm(broker, acc) {
   document.getElementById("acctForm").style.display = "block";
   document.getElementById("acctBroker").value = broker;
   document.getElementById("acctId").value = acc ? acc.id : "";
   document.getElementById("acctFormTitle").textContent = (acc ? "Edit " : "New ") + (BROKER_NAME[broker] || broker) + " account";
   document.querySelectorAll(".dhan-f").forEach((e) => e.style.display = broker === "DHAN" ? "" : "none");
-  document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA") ? "" : "none");
+  document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA" || broker === "ALICE") ? "" : "none");
   document.querySelectorAll(".angel-f").forEach((e) => e.style.display = broker === "ANGEL" ? "" : "none");
   document.querySelectorAll(".zerodha-f").forEach((e) => e.style.display = broker === "ZERODHA" ? "" : "none");
   ["acctClientId", "acctAppId", "acctAppSecret", "acctApiKey", "acctPin", "acctTotp", "acctZSecret"].forEach((i) => document.getElementById(i).value = "");
@@ -841,6 +857,8 @@ document.getElementById("acctSaveBtn").onclick = async () => {
   } else if (broker === "ZERODHA") {
     payload.api_key = document.getElementById("acctApiKey").value;
     payload.api_secret = document.getElementById("acctZSecret").value;
+  } else if (broker === "ALICE") {
+    payload.api_key = document.getElementById("acctApiKey").value;
   } else {
     payload.api_key = document.getElementById("acctApiKey").value;
     payload.pin = document.getElementById("acctPin").value;

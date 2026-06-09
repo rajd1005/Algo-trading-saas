@@ -192,10 +192,57 @@
       <p class="muted" id="providerDesc" style="font-size:12px;"></p>
 
       <hr style="border-color:#2a3441; margin:14px 0;" />
+
+      <details class="help-box" style="margin-bottom:12px;">
+        <summary>📘 How to connect each broker (step-by-step)</summary>
+
+        <div class="help-broker">
+          <b>Dhan</b>
+          <ol>
+            <li>Create an app at <code>web.dhan.co → DhanHQ Trading APIs</code>.</li>
+            <li>Set the <b>Redirect URL</b> and <b>Postback URL</b> shown below in your Dhan app.</li>
+            <li>Add account here → enter <b>Client ID</b>, <b>App ID</b>, <b>App Secret</b> → Save.</li>
+            <li>Click <b>Login</b> on the account → approve on Dhan's consent screen. Token lasts 24h (auto-renewed).</li>
+          </ol>
+        </div>
+
+        <div class="help-broker">
+          <b>Angel One</b>
+          <ol>
+            <li>Create a <b>SmartAPI</b> app at <code>smartapi.angelbroking.com</code> (Trading / Market-Feed API).</li>
+            <li>Set the <b>Redirect URL</b> below in the SmartAPI app; enable TOTP on your Angel login.</li>
+            <li>Add account here → enter <b>Client ID</b>, <b>API Key</b>, <b>PIN</b>, <b>TOTP Secret</b> → Save.</li>
+            <li>Click <b>Login</b> → logs in automatically (no redirect, TOTP is generated for you).</li>
+          </ol>
+        </div>
+
+        <div class="help-broker">
+          <b>Zerodha</b>
+          <ol>
+            <li>Create a <b>Kite Connect</b> app at <code>developers.kite.trade</code> (₹2000/mo).</li>
+            <li>Set the <b>Redirect URL</b> below as the app's Redirect URL.</li>
+            <li>Add account here → enter <b>Client ID</b>, <b>API Key</b>, <b>API Secret</b> → Save.</li>
+            <li>Click <b>Login</b> → approve on Kite. Session is valid for the trading day.</li>
+          </ol>
+        </div>
+
+        <div class="help-broker">
+          <b>Alice Blue</b>
+          <ol>
+            <li>Enable the <b>ANT API</b> from <code>Alice Blue → API / Apps</code> and copy your <b>API Key</b>.</li>
+            <li>Add account here → enter <b>User ID</b> (as Client/User ID) and <b>API Key</b> → Save.</li>
+            <li>Click <b>Login</b> → connects instantly (no redirect, no TOTP). Session auto-renews daily.</li>
+            <li><span class="muted">Optional:</span> set the <b>Postback URL</b> below for instant external-order sync.</li>
+          </ol>
+        </div>
+
+        <p class="muted" style="margin-top:6px;">Tip: you can add several accounts and mix them — e.g. use one broker for <b>Data</b> and another for <b>Trading</b>. Symbols are auto-translated between brokers.</p>
+      </details>
+
       <div class="acct-title">Broker accounts</div>
       <div id="accountsList"></div>
       <div class="row" style="align-items:center; gap:8px;">
-        <select id="newAcctBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option><option value="ZERODHA">Zerodha</option></select>
+        <select id="newAcctBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option><option value="ZERODHA">Zerodha</option><option value="ALICE">Alice Blue</option></select>
         <button type="button" class="btn" id="addAcctBtn">+ Add account</button>
       </div>
 
@@ -205,7 +252,7 @@
         <input type="hidden" id="acctId" />
         <input type="hidden" id="acctBroker" />
         <div class="row">
-          <label>Client ID <input id="acctClientId" placeholder="client id" /></label>
+          <label>Client / User ID <input id="acctClientId" placeholder="client / user id" /></label>
           <label class="dhan-f">App ID <input id="acctAppId" placeholder="Dhan app id" /></label>
           <label class="dhan-f">App Secret <input id="acctAppSecret" type="password" placeholder="Dhan app secret" /></label>
           <label class="api-f">API Key <input id="acctApiKey" placeholder="API key" /></label>
@@ -220,13 +267,14 @@
       </div>
 
       <div class="webhook-box" style="margin-top:12px;">
-        <div class="muted" style="margin-bottom:4px;">Configure these on your broker app (Dhan &amp; Angel):</div>
+        <div class="muted" style="margin-bottom:4px;">Configure these on your broker app:</div>
         <div>Dhan Redirect URL: <code id="redirectUrl">—</code></div>
         <div>Dhan Postback URL: <code id="postbackUrl">—</code></div>
         <div>Angel Redirect URL: <code id="angelRedirectUrl">—</code></div>
         <div>Angel Postback URL: <code id="angelPostbackUrl">—</code></div>
         <div>Zerodha Redirect URL: <code id="zerodhaRedirectUrl">—</code></div>
         <div>Zerodha Postback URL: <code id="zerodhaPostbackUrl">—</code></div>
+        <div>Alice Blue Postback URL: <code id="alicebluePostbackUrl">—</code> <span class="muted">(no redirect needed)</span></div>
         <div>Static IP to whitelist (all): <code id="staticIp">—</code></div>
       </div>
 
@@ -235,7 +283,7 @@
       </div>
       <p id="brokerMsg" class="msg"></p>
       <hr style="border-color:#2a3441; margin:18px 0;" />
-      <p class="muted">Symbol list (auto-downloaded from Dhan, refreshes daily):</p>
+      <p class="muted" id="symbolsLabel">Symbol list (auto-downloaded from Dhan, refreshes daily):</p>
       <div class="row">
         <button id="refreshSymbolsBtn" class="btn">Refresh symbols now</button>
         <span id="symbolsState" class="pill pill-off">Loading…</span>
