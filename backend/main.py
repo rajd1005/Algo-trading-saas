@@ -889,10 +889,11 @@ def set_providers(payload: dict, db: Session = Depends(get_db)):
     set_setting(db, "data_provider", new_data)
     set_setting(db, "trade_provider", new_trade)
     set_setting(db, "broker_mode", "DEMO" if new_trade == "DEMO" else "DHAN")
-    # forget any balance/health from the previous trading provider
+    # forget any balance/health/feed status from the previous trading provider
     set_setting(db, "broker_balance", "")
     set_setting(db, "broker_balance_provider", "")
     set_setting(db, "broker_health", "")
+    set_setting(db, "md_status", "")
     db.commit()
     return {"data_provider": new_data, "trade_provider": new_trade}
 

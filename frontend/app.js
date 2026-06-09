@@ -105,11 +105,14 @@ async function refreshSummary() {
   const banner = document.getElementById("mdBanner");
   const inst = s.instruments || {};
   const m = s.md_status || "";
+  const dataName = { DEMO: "Demo", DHAN: "Dhan", ANGEL: "Angel One" }[s.data_provider] || "broker";
   if (m.indexOf("ok") === 0) {
     banner.style.display = "block"; banner.className = "banner ok";
-    banner.textContent = m === "ok:ws" ? "⚡ Real-time prices (WebSocket) flowing from Dhan."
-      : m === "ok:demo" ? "🧪 DEMO mode — simulated prices (no real money)."
-      : "✅ Live prices (1-second) flowing from Dhan.";
+    banner.textContent =
+        m === "ok:demo" ? "🧪 DEMO mode — simulated prices (no real money)."
+      : m === "ok:ws" ? `⚡ Real-time prices (WebSocket) flowing from ${dataName}.`
+      : m === "ok:angel" ? "✅ Live prices flowing from Angel One."
+      : `✅ Live prices (1-second) flowing from ${dataName}.`;
   } else if (m) {
     banner.style.display = "block"; banner.className = "banner";
     banner.textContent = "⚠️ " + m;
