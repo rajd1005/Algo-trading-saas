@@ -376,8 +376,8 @@ function resetOrderForm() {
   document.getElementById("targetRows").innerHTML = "";
   currentLotSize = 1; lotsInput.value = 1; updateQty();
 }
-const HINTS = { OPTION: "— search an index/stock, then pick a strike",
-                FUTURES: "— search an index/stock future",
+const HINTS = { OPTION: "— search index / stock / commodity (NIFTY, RELIANCE, GOLD…), then pick a strike",
+                FUTURES: "— search index / stock / commodity future (NIFTY, CRUDEOIL…)",
                 EQUITY: "— search a stock or index" };
 
 function resetPicker() {
@@ -426,7 +426,7 @@ function renderUlResults(rows) {
     });
   } else {
     ulResults.innerHTML = rows.map((r, i) => `<div class="item" data-i="${i}">
-      <div class="sym">${r.underlying}</div>
+      <div class="sym">${r.underlying} <span class="exch-tag">${r.exchange || ""}</span></div>
       <div class="meta">${currentSeg === "OPTION" ? "Options" : "Futures"} available</div></div>`).join("");
     ulResults.querySelectorAll(".item").forEach((el) => {
       const r = rows[el.dataset.i]; if (r) el.onclick = () => selectUnderlying(r.underlying);

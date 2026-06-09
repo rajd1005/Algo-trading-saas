@@ -83,6 +83,8 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .dropdown .item:hover { background: #1a2129; }
 .dropdown .item .sym { color: var(--text); font-size: 14px; }
 .dropdown .item .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.exch-tag { font-size: 10px; font-weight: 700; color: var(--accent);
+  background: rgba(47,129,247,.15); border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
 .selected-symbol { margin: 0 0 14px; padding: 9px 12px; border-radius: 8px;
   background: rgba(47,129,247,.1); border: 1px solid rgba(47,129,247,.3);
   color: var(--text); font-size: 13px; }

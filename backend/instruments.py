@@ -159,7 +159,7 @@ class InstrumentStore:
                 equities.append(row)
             elif itype == "OPTION":
                 u = underlyings.setdefault(underlying, {"underlying": underlying,
-                                                        "display": underlying,
+                                                        "display": underlying, "exchange": exch,
                                                         "has_option": False, "has_future": False})
                 u["has_option"] = True
                 exp = opt.setdefault(underlying, {}).setdefault(expiry, {})
@@ -168,7 +168,7 @@ class InstrumentStore:
                     pair[row["option_type"]] = row
             elif itype == "FUTURES":
                 u = underlyings.setdefault(underlying, {"underlying": underlying,
-                                                        "display": underlying,
+                                                        "display": underlying, "exchange": exch,
                                                         "has_option": False, "has_future": False})
                 u["has_future"] = True
                 fut.setdefault(underlying, []).append(row)
@@ -205,7 +205,8 @@ class InstrumentStore:
             name = u["underlying"].lower()
             if q in name:
                 out.append((0 if name.startswith(q) else 1, len(name),
-                            {"underlying": u["underlying"], "display": u["display"], "kind": kind}))
+                            {"underlying": u["underlying"], "display": u["display"],
+                             "exchange": u.get("exchange", ""), "kind": kind}))
         out.sort(key=lambda x: (x[0], x[1]))
         return [r for _, _, r in out[:limit]]
 
