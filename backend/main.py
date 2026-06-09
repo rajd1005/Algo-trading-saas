@@ -124,6 +124,18 @@ def _ist_today() -> str:
     return dt.datetime.now(dt.timezone(dt.timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
 
 
+def _ist_day_bounds(date_str):
+    """UTC [start, end) datetimes for the given IST date 'YYYY-MM-DD'. None if bad."""
+    try:
+        ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+        base = dt.datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=ist)
+        start = base.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        end = (base + dt.timedelta(days=1)).astimezone(dt.timezone.utc).replace(tzinfo=None)
+        return start, end
+    except Exception:
+        return None
+
+
 def _daily_halted(db) -> bool:
     """True when the daily target/drawdown halt has tripped for today."""
     return (get_setting(db, "daily_halt", "off") == "on"
@@ -473,8 +485,13 @@ def _auto_renew_loop():
 
 # ---------- trades ----------
 @app.get("/api/trades", response_model=list[TradeOut])
-def list_trades(db: Session = Depends(get_db)):
-    return db.query(Trade).order_by(Trade.id.desc()).all()
+def list_trades(date: str = "", db: Session = Depends(get_db)):
+    q = db.query(Trade)
+    if date:
+        b = _ist_day_bounds(date)
+        if b:
+            q = q.filter(Trade.created_at >= b[0], Trade.created_at < b[1])
+    return q.order_by(Trade.id.desc()).all()
 
 
 @app.post("/api/trades", response_model=TradeOut)
@@ -788,8 +805,13 @@ def _metrics(trades):
 
 
 @app.get("/api/summary")
-def summary(broker: str = "ALL", db: Session = Depends(get_db)):
-    trades = db.query(Trade).all()
+def summary(broker: str = "ALL", date: str = "", db: Session = Depends(get_db)):
+    q = db.query(Trade)
+    if date:
+        b = _ist_day_bounds(date)
+        if b:
+            q = q.filter(Trade.created_at >= b[0], Trade.created_at < b[1])
+    trades = q.all()
     # Group P&L per ACCOUNT (0 = Demo/paper) — accounts are not merged by broker.
     groups = {}
     for t in trades:
@@ -807,7 +829,9 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
     for a in db.query(Account).order_by(Account.id).all():
         breakdown.append({"key": str(a.id), "label": a.label or _label(a.broker, a.client_id),
                           "net": _metrics(groups.get(a.id, []))["net"]})
-    active = sum(1 for t in trades if t.status in ("OPEN", "PENDING"))
+    # The broker-lock / connection alerts must reflect the WHOLE system, not just
+    # the selected day, so compute live activity independently of the date filter.
+    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
 
     data_provider = get_setting(db, "data_provider", "DEMO")
     trade_provider = get_setting(db, "trade_provider", "DEMO")
@@ -837,7 +861,7 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
         "total_trades": len(trades),
         "pending": pnl["pending"], "open": pnl["open"], "closed": pnl["closed"],
         "open_pnl": pnl["open_pnl"], "closed_pnl": pnl["closed_pnl"], "total_pnl": pnl["net"],
-        "pnl": pnl, "pnl_filter": flt, "pnl_breakdown": breakdown,
+        "pnl": pnl, "pnl_filter": flt, "pnl_breakdown": breakdown, "date": date,
         "kill_switch": get_setting(db, "kill_switch", "off"),
         "md_status": get_setting(db, "md_status", ""),
         "instruments": instruments.status(),

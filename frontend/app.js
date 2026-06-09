@@ -19,6 +19,22 @@ async function trackedFetch(url, opts) {
   }
 }
 function checkAuth(r) { if (r.status === 401) { location.href = "/login"; throw new Error("Login required"); } return r; }
+
+// ---- toast notifications (small boxes, top-right, like a broker site) ----
+function toast(message, type = "info", ms = 3500) {
+  let host = document.getElementById("toastHost");
+  if (!host) { host = document.createElement("div"); host.id = "toastHost"; host.className = "toast-host"; document.body.appendChild(host); }
+  const el = document.createElement("div");
+  el.className = "toast toast-" + type;
+  el.textContent = message;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  const kill = () => { el.classList.remove("show"); setTimeout(() => el.remove(), 250); };
+  el.onclick = kill;
+  setTimeout(kill, ms);
+}
+
+async function _readErr(r) { try { return (await r.json()).detail || "Request failed"; } catch (e) { return "Request failed"; } }
 const api = {
   async get(url) { const r = checkAuth(await trackedFetch(url)); return r.json(); },
   async post(url, body) {
@@ -27,10 +43,14 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : null,
     }));
-    if (!r.ok) throw new Error((await r.json()).detail || "Request failed");
+    if (!r.ok) { const d = await _readErr(r); toast("⚠️ " + d, "neg"); throw new Error(d); }
     return r.json();
   },
-  async del(url) { const r = checkAuth(await trackedFetch(url, { method: "DELETE" })); return r.json(); },
+  async del(url) {
+    const r = checkAuth(await trackedFetch(url, { method: "DELETE" }));
+    if (!r.ok) { const d = await _readErr(r); toast("⚠️ " + d, "neg"); throw new Error(d); }
+    return r.json();
+  },
 };
 
 document.getElementById("syncIndicator").onclick = () => { setSyncing(false, false); refreshAll(); };
@@ -51,6 +71,11 @@ document.querySelectorAll(".tab").forEach((t) => {
 
 // ---- summary / P&L ----
 let pnlFilter = "ALL";
+function istToday() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata",
+    year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+}
+let dateFilter = istToday();     // "" = all days; default to today
 let _pnlTO = null;
 function showPnlLoading(on) {
   const sec = document.querySelector(".pnl-section");
@@ -71,6 +96,11 @@ document.getElementById("pnlFilter").onchange = (e) => {
   showPnlLoading(true);
   refreshSummary().finally(() => showPnlLoading(false));
 };
+// date picker — show a particular day's trades & P&L
+const dateFilterEl = document.getElementById("dateFilter");
+dateFilterEl.value = dateFilter;
+dateFilterEl.onchange = (e) => { dateFilter = e.target.value; refreshAll(); };
+document.getElementById("dateAll").onclick = () => { dateFilter = ""; dateFilterEl.value = ""; refreshAll(); };
 
 function setCard(id, val) {
   const el = document.getElementById(id);
@@ -78,11 +108,13 @@ function setCard(id, val) {
 }
 
 async function refreshSummary() {
-  const s = await api.get("/api/summary?broker=" + pnlFilter);
+  const s = await api.get("/api/summary?broker=" + pnlFilter + "&date=" + encodeURIComponent(dateFilter));
   const p = s.pnl || {};
   setCard("sumBooked", p.booked || 0);
   setCard("sumActive", p.active || 0);
   setCard("sumTotal", p.total || 0);
+  const scope = document.getElementById("dateScope");
+  if (scope) scope.textContent = dateFilter ? `· ${dateFilter}` : "· all days";
   // per-account breakdown (only in the All view)
   const bd = document.getElementById("pnlBreakdown");
   const list = s.pnl_breakdown || [];
@@ -99,7 +131,7 @@ async function refreshSummary() {
       const rl = document.getElementById("resetHaltLink");
       if (rl) rl.onclick = async () => {
         if (confirm("Clear the daily limit halt and allow new trades again?")) {
-          await api.post("/api/settings/reset_halt", {}); await refreshAll();
+          await api.post("/api/settings/reset_halt", {}); toast("✅ Trading resumed", "pos"); await refreshAll();
         }
       };
     } else halt.style.display = "none";
@@ -205,7 +237,7 @@ function showTradesSkeleton(n = 4) {
     .map(() => `<tr class="skel-row"><td colspan="13"><div class="skel-bar"></div></td></tr>`).join("");
 }
 async function refreshTrades() {
-  const rows = await api.get("/api/trades");
+  const rows = await api.get("/api/trades?date=" + encodeURIComponent(dateFilter));
   tradesById = {};
   rows.forEach((t) => (tradesById[t.id] = t));
   const body = document.getElementById("tradesBody");
@@ -295,11 +327,11 @@ function actionsFor(t) {
 
 async function doAction(act, id, sym) {
   try {
-    if (act === "cancel") await api.post(`/api/trades/${id}/cancel`);
-    else if (act === "close") await api.post(`/api/trades/${id}/close`);
-    else if (act === "del") await api.del(`/api/trades/${id}`);
+    if (act === "cancel") { await api.post(`/api/trades/${id}/cancel`); toast(`Trade #${id} cancelled`, "info"); }
+    else if (act === "close") { await api.post(`/api/trades/${id}/close`); toast(`Trade #${id} closed`, "pos"); }
+    else if (act === "del") { await api.del(`/api/trades/${id}`); toast(`Trade #${id} deleted`, "info"); }
     await refreshAll();
-  } catch (e) { alert(e.message); }
+  } catch (e) { /* error toast already shown by the API helper */ }
 }
 
 // ---- logs (day-wise + paginated) ----
@@ -747,6 +779,7 @@ form.onsubmit = async (e) => {
   try {
     const t = await api.post("/api/trades", payload);
     msg.textContent = `✅ Created trade #${t.id} (${t.symbol}).`; msg.className = "msg pos";
+    toast(`✅ Trade #${t.id} created — ${t.symbol}`, "pos");
     e.target.reset();
     document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
     ulSearch.value = ""; resetOrderForm(); resetPicker();
@@ -766,6 +799,7 @@ document.getElementById("killBtn").onclick = async () => {
   const turningOn = s.kill_switch !== "on";
   if (turningOn && !confirm("Turn ON kill switch? This blocks new entries and flattens open positions.")) return;
   await api.post("/api/settings", { kill_switch: turningOn });
+  toast(turningOn ? "🛑 Kill switch ON — entries blocked" : "✅ Kill switch OFF", turningOn ? "neg" : "pos");
   await refreshAll();
 };
 
@@ -876,7 +910,7 @@ async function refreshBroker() {
     const msg = document.getElementById("brokerMsg");
     try {
       await api.post("/api/providers", { data_provider: dp, trade_provider: tp });
-      msg.textContent = ""; await refreshBroker();
+      msg.textContent = ""; toast("✅ Provider updated", "pos"); await refreshBroker();
     } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; await refreshBroker(); }
   };
 });
@@ -1011,6 +1045,7 @@ document.getElementById("modSave").onclick = async () => {
       lock_amount: numVal("modLockAmount"),
     });
     modifyModal.style.display = "none";
+    toast(`✅ Trade #${modifyId} updated`, "pos");
     await refreshAll();
   } catch (e) {
     const mm = document.getElementById("modMsg");
@@ -1201,6 +1236,7 @@ document.getElementById("savePresetBtn").onclick = async () => {
       lock_step: numVal("prLockStep"), lock_amount: numVal("prLockAmount"),
     });
     msg.textContent = "✅ Preset saved."; msg.className = "msg pos";
+    toast("✅ Preset saved", "pos");
     clearPresetForm(); await loadPresets();
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
@@ -1253,6 +1289,7 @@ document.getElementById("saveSettingsBtn").onclick = async () => {
       global_lock_amount: numVal("globalLockAmount"),
     });
     msg.textContent = "✅ Settings saved."; msg.className = "msg pos";
+    toast("✅ Settings saved", "pos");
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
 
@@ -1313,6 +1350,7 @@ document.getElementById("addSymbolBtn").onclick = async () => {
         instrument_type: currentSeg, underlying: sym, lot_size: 1 });
     }
     msg.textContent = `⭐ Added ${sym} to watchlist.`; msg.className = "msg pos";
+    toast(`⭐ ${sym} added to watchlist`, "pos");
     await loadWatchlist();
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
@@ -1327,6 +1365,7 @@ document.getElementById("addWatchBtn").onclick = async () => {
       lot_size: currentLotSize,
     });
     msg.textContent = "⭐ Added to watchlist."; msg.className = "msg pos";
+    toast("⭐ Added to watchlist", "pos");
     await loadWatchlist();
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };

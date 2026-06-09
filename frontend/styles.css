@@ -24,8 +24,9 @@ header h1 { font-size: 20px; margin: 0; }
 .pnl-section { padding: 14px 22px 4px; position: relative; }
 .pnl-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
 .pnl-title { font-size: 16px; font-weight: 700; color: var(--text); }
-.pnl-head select { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+.pnl-head select, .pnl-head input[type=date] { background: var(--bg); border: 1px solid var(--line); color: var(--text);
   border-radius: 7px; padding: 7px 10px; font-size: 14px; }
+.pnl-head input[type=date]::-webkit-calendar-picker-indicator { filter: invert(.7); cursor: pointer; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .card-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -215,6 +216,18 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .wl-x:hover { color: var(--red); background: rgba(248,81,73,.15); }
 .wl-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--accent);
   background: rgba(47,129,247,.15); border-radius: 4px; padding: 1px 5px; }
+
+/* toast notifications */
+.toast-host { position: fixed; top: 16px; right: 16px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px; max-width: 340px; }
+.toast { background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  color: var(--text); border-radius: 8px; padding: 11px 14px; font-size: 13px; font-weight: 600;
+  box-shadow: 0 6px 24px rgba(0,0,0,.45); cursor: pointer;
+  opacity: 0; transform: translateX(20px); transition: opacity .22s ease, transform .22s ease; }
+.toast.show { opacity: 1; transform: translateX(0); }
+.toast-pos { border-left-color: var(--green); }
+.toast-neg { border-left-color: var(--red); }
+.toast-info { border-left-color: var(--accent); }
 
 /* logs */
 .logs-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
