@@ -80,16 +80,25 @@ class TradingEngine:
     def _kill_switch_on(self, db) -> bool:
         return self._get_setting(db, "kill_switch", "off") == "on"
 
+    def _trade_creds(self, db):
+        return (self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID),
+                self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN))
+
+    def _data_creds(self, db):
+        # When 'use same account' is on, data uses the trading creds; else its own.
+        if self._get_setting(db, "use_same_account", "yes") == "yes":
+            return self._trade_creds(db)
+        return (self._get_setting(db, "data_client_id", ""),
+                self._get_setting(db, "data_access_token", ""))
+
     def _market_data(self, db):
-        cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-        tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+        cid, tok = self._data_creds(db)
         if not cid or not tok:
             return None
         return DhanMarketData(cid, tok)
 
     def _live_broker(self, db):
-        cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-        tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+        cid, tok = self._trade_creds(db)
         return DhanBroker(cid, tok)
 
     # ---------- main loop ----------
@@ -124,12 +133,12 @@ class TradingEngine:
                 if active:
                     self._set_setting(db, "md_status", "ok:demo")
             else:
-                cid = self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-                tok = self._get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
+                # Market data uses the DATA account (may differ from trading).
+                cid, tok = self._data_creds(db)
                 if not cid or not tok:
                     if active:
                         self._set_setting(db, "md_status",
-                                          "Dhan not connected — connect on the Broker tab to get prices.")
+                                          "Data account not connected — connect on the Broker tab to get prices.")
                     db.commit()
                     return
                 prices = self._collect_prices(db, cid, tok, instruments)

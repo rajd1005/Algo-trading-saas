@@ -191,21 +191,48 @@
       <p class="muted" id="modeDesc"></p>
 
       <div id="dhanFields">
-        <p class="muted"><b>Login with Dhan</b> — no daily token copy-paste. Set your App ID &amp; Secret
-        once (from Dhan → DhanHQ Trading APIs → create an app; valid ~12 months), then just click
-        <b>Login with Dhan</b> whenever the token expires. Tokens last 24h (SEBI rule) but the app auto-renews while running.</p>
-        <div class="row">
-          <label>Dhan Client ID <input id="dhanClientId" placeholder="1000000000" /></label>
-          <label>App ID <input id="dhanAppId" placeholder="app id / api key" /></label>
-          <label>App Secret <input id="dhanAppSecret" type="password" placeholder="app secret" /></label>
+        <label class="check" style="margin-bottom:12px;">
+          <input type="checkbox" id="sameAcct" checked /> Use the same account for Data and Trading
+        </label>
+
+        <!-- Trading (or shared) account -->
+        <div class="acct-panel">
+          <div class="acct-title" id="tradeTitle">Account (Data &amp; Execution)</div>
+          <div class="row">
+            <label>Client ID <input id="dhanClientId" placeholder="1000000000" /></label>
+            <label>App ID <input id="dhanAppId" placeholder="app id" /></label>
+            <label>App Secret <input id="dhanAppSecret" type="password" placeholder="app secret" /></label>
+          </div>
+          <div class="row">
+            <button class="btn" data-save="TRADE">Save</button>
+            <button class="btn btn-primary" data-login="TRADE">🔐 Login with Dhan</button>
+            <span id="tradeStatus" class="pill pill-off">Not connected</span>
+          </div>
         </div>
-        <div class="row">
-          <button id="saveAppBtn" class="btn">Save app details</button>
-          <button id="loginDhanBtn" class="btn btn-primary">🔐 Login with Dhan</button>
-          <span id="tokenStatus" class="muted" style="font-size:12px;"></span>
+
+        <!-- Data account (only when separate) -->
+        <div id="acctData" class="acct-panel" style="display:none;">
+          <div class="acct-title">Data / Feed account</div>
+          <div class="row">
+            <label>Client ID <input id="dataClientId" placeholder="1000000000" /></label>
+            <label>App ID <input id="dataAppId" placeholder="app id" /></label>
+            <label>App Secret <input id="dataAppSecret" type="password" placeholder="app secret" /></label>
+          </div>
+          <div class="row">
+            <button class="btn" data-save="DATA">Save</button>
+            <button class="btn btn-primary" data-login="DATA">🔐 Login (Data)</button>
+            <span id="dataStatus" class="pill pill-off">Not connected</span>
+          </div>
         </div>
+
+        <div class="webhook-box">
+          <div class="muted" style="margin-bottom:4px;">Configure these on your Dhan app(s):</div>
+          <div>Redirect URL: <code id="redirectUrl">—</code></div>
+          <div>Order Postback URL: <code id="postbackUrl">—</code></div>
+        </div>
+
         <details style="margin-top:12px;">
-          <summary class="muted" style="cursor:pointer;">Advanced: paste a 24h access token manually instead</summary>
+          <summary class="muted" style="cursor:pointer;">Advanced: paste a 24h trading token manually</summary>
           <div class="row" style="margin-top:8px;">
             <label>Access Token <input id="dhanToken" type="password" placeholder="paste token" /></label>
           </div>

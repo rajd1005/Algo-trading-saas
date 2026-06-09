@@ -42,7 +42,8 @@ app = FastAPI(title="Algo Trading SaaS (India)")
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 
 
-_OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico"}
+_OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico",
+               "/api/dhan/postback", "/api/dhan/callback"}
 
 
 @app.middleware("http")
@@ -109,6 +110,21 @@ def set_setting(db: Session, key: str, value: str):
 def get_setting(db: Session, key: str, default: str = "") -> str:
     row = db.get(Setting, key)
     return row.value if row else default
+
+
+def get_trade_creds(db):
+    """Credentials used for ORDER execution + account info (balance/positions)."""
+    return (get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID),
+            get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN))
+
+
+def get_data_creds(db):
+    """Credentials used for MARKET DATA (LTP / feed). Same as trading unless the
+    user configured a separate data account."""
+    if get_setting(db, "use_same_account", "yes") == "yes":
+        return get_trade_creds(db)
+    return (get_setting(db, "data_client_id", ""),
+            get_setting(db, "data_access_token", ""))
 
 
 # ---------- startup ----------
@@ -437,7 +453,8 @@ def ltp(payload: dict, db: Session = Depends(get_db)):
     tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
     if not cid or not tok or not by_seg:
         return {"connected": bool(cid and tok), "prices": {}}
-    md = DhanMarketData(cid, tok)
+    dcid, dtok = get_data_creds(db)        # market data uses the DATA account
+    md = DhanMarketData(dcid or cid, dtok or tok)
     res = md.get_ltp_batch(by_seg)
     prices = {sid: px for (seg, sid), px in res.items()}
     return {"connected": True, "prices": prices, "error": md.last_error}
@@ -613,12 +630,8 @@ def update_settings(payload: SettingsIn, db: Session = Depends(get_db)):
 
 
 # ---------- broker (Dhan) ----------
-@app.get("/api/broker")
-def get_broker(db: Session = Depends(get_db)):
-    cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-    tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
-    mode = get_setting(db, "broker_mode", "DHAN")
-    token_time = get_setting(db, "dhan_token_time", "")
+def _account_info(db, pre):
+    token_time = get_setting(db, pre + "token_time", "")
     hours_left = None
     if token_time:
         try:
@@ -627,43 +640,81 @@ def get_broker(db: Session = Depends(get_db)):
         except Exception:
             pass
     return {
-        "dhan_client_id": cid,
-        "dhan_app_id": get_setting(db, "dhan_app_id", ""),
-        # Never send secrets back; just say if they're set.
-        "has_access_token": bool(tok),
-        "has_app": bool(get_setting(db, "dhan_app_id", "")),
-        "has_app_secret": bool(get_setting(db, "dhan_app_secret", "")),
-        "mode": mode,
-        "connected": mode == "DEMO" or get_setting(db, "dhan_connected", "no") == "yes",
+        "client_id": get_setting(db, pre + "client_id", ""),
+        "app_id": get_setting(db, pre + "app_id", ""),
+        "has_app_secret": bool(get_setting(db, pre + "app_secret", "")),
+        "connected": get_setting(db, pre + "connected", "no") == "yes",
         "token_hours_left": hours_left,
     }
 
 
+@app.get("/api/broker")
+def get_broker(request: Request, db: Session = Depends(get_db)):
+    mode = get_setting(db, "broker_mode", "DHAN")
+    same = get_setting(db, "use_same_account", "yes") == "yes"
+    trade = _account_info(db, "dhan_")
+    data = trade if same else _account_info(db, "data_")
+    connected = mode == "DEMO" or (trade["connected"] and (same or data["connected"]))
+    base = str(request.base_url).rstrip("/")
+    return {
+        "mode": mode,
+        "use_same_account": same,
+        "trade": trade,
+        "data": data,
+        "connected": connected,
+        # back-compat fields (trading account)
+        "dhan_client_id": trade["client_id"],
+        "dhan_app_id": trade["app_id"],
+        "has_app": bool(trade["app_id"]),
+        "has_app_secret": trade["has_app_secret"],
+        "token_hours_left": trade["token_hours_left"],
+        # webhook / redirect URLs to configure on the Dhan app(s)
+        "redirect_url": base + "/api/dhan/callback",
+        "postback_url": base + "/api/dhan/postback",
+    }
+
+
 # ---------- "Login with Dhan" (app consent) ----------
+def _acct_prefix(account: str) -> str:
+    """Settings prefix for an account: trading uses 'dhan_', data uses 'data_'."""
+    return "data_" if str(account).upper() == "DATA" else "dhan_"
+
+
+@app.post("/api/broker/same")
+def set_same_account(payload: dict, db: Session = Depends(get_db)):
+    """Toggle 'use the same account for Data and Trading'."""
+    same = "yes" if payload.get("same", True) else "no"
+    set_setting(db, "use_same_account", same)
+    return {"use_same_account": same}
+
+
 @app.post("/api/dhan/app")
 def save_dhan_app(payload: dict, db: Session = Depends(get_db)):
-    """Save the one-time App ID / App Secret / Client ID (valid ~12 months)."""
+    """Save App ID / App Secret / Client ID for an account (TRADE or DATA)."""
+    pre = _acct_prefix(payload.get("account", "TRADE"))
     if payload.get("app_id"):
-        set_setting(db, "dhan_app_id", payload["app_id"].strip())
+        set_setting(db, pre + "app_id", payload["app_id"].strip())
     if payload.get("app_secret"):
-        set_setting(db, "dhan_app_secret", payload["app_secret"].strip())
+        set_setting(db, pre + "app_secret", payload["app_secret"].strip())
     if payload.get("client_id"):
-        set_setting(db, "dhan_client_id", payload["client_id"].strip())
+        set_setting(db, pre + "client_id", payload["client_id"].strip())
     return {"ok": True}
 
 
 @app.get("/api/dhan/login")
-def dhan_login(db: Session = Depends(get_db)):
-    """Start the Dhan login: returns the URL to send the user to."""
-    app_id = get_setting(db, "dhan_app_id", "")
-    app_secret = get_setting(db, "dhan_app_secret", "")
-    client_id = get_setting(db, "dhan_client_id", "")
+def dhan_login(account: str = "TRADE", db: Session = Depends(get_db)):
+    """Start the Dhan login for an account; returns the URL to send the user to."""
+    pre = _acct_prefix(account)
+    app_id = get_setting(db, pre + "app_id", "")
+    app_secret = get_setting(db, pre + "app_secret", "")
+    client_id = get_setting(db, pre + "client_id", "")
     if not app_id or not app_secret or not client_id:
-        raise HTTPException(400, "Enter your Dhan App ID, App Secret and Client ID first.")
+        raise HTTPException(400, "Enter App ID, App Secret and Client ID first.")
     try:
         consent = dhan_auth.generate_consent(app_id, app_secret, client_id)
         if not consent:
             raise HTTPException(400, "Dhan did not return a consent id. Check your App ID/Secret.")
+        set_setting(db, "pending_login_acct", "DATA" if pre == "data_" else "TRADE")
         return {"login_url": dhan_auth.login_url(consent)}
     except HTTPException:
         raise
@@ -675,27 +726,46 @@ def dhan_login(db: Session = Depends(get_db)):
 
 @app.get("/api/dhan/callback")
 def dhan_callback(tokenId: str = "", db: Session = Depends(get_db)):
-    """Dhan redirects here after login with a tokenId; we fetch the access token."""
-    app_id = get_setting(db, "dhan_app_id", "")
-    app_secret = get_setting(db, "dhan_app_secret", "")
+    """Dhan redirects here after login; fetch the access token for the pending account."""
+    pre = _acct_prefix(get_setting(db, "pending_login_acct", "TRADE"))
+    app_id = get_setting(db, pre + "app_id", "")
+    app_secret = get_setting(db, pre + "app_secret", "")
     if not tokenId or not app_id:
         return RedirectResponse(url="/?login=failed")
     try:
         token, client_id, _ = dhan_auth.consume_consent(app_id, app_secret, tokenId)
         if not token:
             raise RuntimeError("no access token returned")
-        set_setting(db, "dhan_access_token", token)
+        set_setting(db, pre + "access_token", token)
         if client_id:
-            set_setting(db, "dhan_client_id", client_id)
-        set_setting(db, "dhan_connected", "yes")
-        set_setting(db, "dhan_token_time", dt.datetime.utcnow().isoformat())
-        db.add(LogEntry(message="Logged in to Dhan — access token received.", level="INFO"))
+            set_setting(db, pre + "client_id", client_id)
+        set_setting(db, pre + "connected", "yes")
+        set_setting(db, pre + "token_time", dt.datetime.utcnow().isoformat())
+        # 'dhan_connected' drives the live engine; keep it in sync with the trade acct.
+        if pre == "dhan_":
+            set_setting(db, "dhan_connected", "yes")
+        label = "Data" if pre == "data_" else "Trading"
+        db.add(LogEntry(message=f"Logged in to Dhan ({label} account).", level="INFO"))
         db.commit()
         return RedirectResponse(url="/?login=ok")
     except Exception as e:
         db.add(LogEntry(message=f"Dhan login callback failed: {e}", level="ERROR"))
         db.commit()
         return RedirectResponse(url="/?login=failed")
+
+
+@app.post("/api/dhan/postback")
+async def dhan_postback(request: Request, db: Session = Depends(get_db)):
+    """Order-update webhook: Dhan POSTs order status here for instant sync."""
+    try:
+        payload = await request.json()
+        orders = payload if isinstance(payload, list) else [payload]
+        _sync_external_orders(db, orders)
+        db.commit()
+    except Exception as e:
+        db.add(LogEntry(message=f"Postback error: {e}", level="ERROR"))
+        db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/broker/mode")

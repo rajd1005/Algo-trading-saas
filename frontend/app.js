@@ -639,53 +639,84 @@ document.getElementById("demoReset").onclick = async () => {
   await api.post("/api/demo/reset"); await refreshAll();
 };
 
+// per-account field ids
+const ACCT_FIELDS = {
+  TRADE: { cid: "dhanClientId", appId: "dhanAppId", secret: "dhanAppSecret", status: "tradeStatus" },
+  DATA: { cid: "dataClientId", appId: "dataAppId", secret: "dataAppSecret", status: "dataStatus" },
+};
+function acctPayload(acct) {
+  const f = ACCT_FIELDS[acct];
+  return { account: acct, client_id: document.getElementById(f.cid).value,
+           app_id: document.getElementById(f.appId).value,
+           app_secret: document.getElementById(f.secret).value };
+}
+function setAcctStatus(acct, info, same) {
+  const f = ACCT_FIELDS[acct];
+  const cidEl = document.getElementById(f.cid);
+  if (document.activeElement !== cidEl) cidEl.value = info.client_id || "";
+  const appEl = document.getElementById(f.appId);
+  if (document.activeElement !== appEl) appEl.value = info.app_id || "";
+  const secEl = document.getElementById(f.secret);
+  if (info.has_app_secret && !secEl.value && document.activeElement !== secEl)
+    secEl.placeholder = "•••••• saved";
+  const st = document.getElementById(f.status);
+  if (info.connected) {
+    st.textContent = info.token_hours_left != null ? `Connected · ~${info.token_hours_left}h left` : "Connected";
+    st.className = "pill pill-ok";
+  } else { st.textContent = "Not connected"; st.className = "pill pill-off"; }
+}
+
 async function refreshBroker() {
   const b = await api.get("/api/broker");
-  const cidEl = document.getElementById("dhanClientId");
-  if (document.activeElement !== cidEl) cidEl.value = b.dhan_client_id || "";
-  const appIdEl = document.getElementById("dhanAppId");
-  if (appIdEl && document.activeElement !== appIdEl) appIdEl.value = b.dhan_app_id || "";
-  const secEl = document.getElementById("dhanAppSecret");
-  if (secEl && b.has_app_secret && !secEl.value && document.activeElement !== secEl) {
-    secEl.placeholder = "•••••• saved (leave blank to keep)";
-  }
   applyBrokerMode(b.mode || "DHAN");
+  // same-account toggle + panels
+  document.getElementById("sameAcct").checked = !!b.use_same_account;
+  document.getElementById("acctData").style.display = b.use_same_account ? "none" : "block";
+  document.getElementById("tradeTitle").textContent =
+    b.use_same_account ? "Account (Data & Execution)" : "Trading / Execution account";
+  setAcctStatus("TRADE", b.trade || {}, b.use_same_account);
+  if (!b.use_same_account) setAcctStatus("DATA", b.data || {}, false);
+  // webhook URLs
+  document.getElementById("redirectUrl").textContent = b.redirect_url || "—";
+  document.getElementById("postbackUrl").textContent = b.postback_url || "—";
+  // unified vs split status pill (top of broker tab)
   const st = document.getElementById("brokerState");
-  const label = b.mode === "DEMO" ? "Demo connected" : (b.connected ? "Dhan connected" : "Not connected");
-  st.textContent = label;
-  st.className = "pill " + (b.connected ? "pill-ok" : "pill-off");
-  const ts = document.getElementById("tokenStatus");
-  if (ts) {
-    if (b.mode === "DEMO") ts.textContent = "";
-    else if (b.token_hours_left != null) ts.textContent = `Token valid ~${b.token_hours_left}h more`;
-    else if (b.has_app) ts.textContent = "App saved — click Login with Dhan";
-    else ts.textContent = "Set App ID & Secret, then Login with Dhan";
+  if (b.mode === "DEMO") { st.textContent = "Demo connected"; st.className = "pill pill-ok"; }
+  else if (b.use_same_account) {
+    st.textContent = b.connected ? "Connected (Data & Execution)" : "Not connected";
+    st.className = "pill " + (b.connected ? "pill-ok" : "pill-off");
+  } else {
+    const d = (b.data || {}).connected, x = (b.trade || {}).connected;
+    st.innerHTML = `Data: ${d ? "✅" : "❌"} &nbsp; Execution: ${x ? "✅" : "❌"}`;
+    st.className = "pill " + (d && x ? "pill-ok" : "pill-off");
   }
 }
 
-// Save app details + start the Dhan login redirect
-document.getElementById("saveAppBtn").onclick = async () => {
-  await api.post("/api/dhan/app", {
-    client_id: document.getElementById("dhanClientId").value,
-    app_id: document.getElementById("dhanAppId").value,
-    app_secret: document.getElementById("dhanAppSecret").value,
-  });
-  document.getElementById("brokerMsg").textContent = "App details saved.";
+// same-account toggle
+document.getElementById("sameAcct").onchange = async (e) => {
+  await api.post("/api/broker/same", { same: e.target.checked });
   await refreshBroker();
 };
-document.getElementById("loginDhanBtn").onclick = async () => {
-  const msg = document.getElementById("brokerMsg");
-  // make sure the latest app details are saved first
-  await api.post("/api/dhan/app", {
-    client_id: document.getElementById("dhanClientId").value,
-    app_id: document.getElementById("dhanAppId").value,
-    app_secret: document.getElementById("dhanAppSecret").value,
-  });
-  try {
-    const r = await api.get("/api/dhan/login");
-    window.location.href = r.login_url;   // send user to Dhan's login page
-  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
-};
+
+// per-account Save + Login buttons
+document.querySelectorAll("[data-save]").forEach((b) => {
+  b.onclick = async () => {
+    await api.post("/api/dhan/app", acctPayload(b.dataset.save));
+    document.getElementById("brokerMsg").textContent = "Saved.";
+    await refreshBroker();
+  };
+});
+document.querySelectorAll("[data-login]").forEach((b) => {
+  b.onclick = async () => {
+    const acct = b.dataset.login;
+    const msg = document.getElementById("brokerMsg");
+    await api.post("/api/dhan/app", acctPayload(acct));   // save latest first
+    try {
+      const r = await api.get("/api/dhan/login?account=" + acct);
+      window.location.href = r.login_url;
+    } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+  };
+});
 
 // Show a message after returning from the Dhan login redirect
 (function () {
