@@ -86,7 +86,7 @@
       <button type="button" class="chip" data-of="PENDING">Pending <span class="chip-n" data-cn="PENDING"></span></button>
       <button type="button" class="chip" data-of="CLOSED">Done <span class="chip-n" data-cn="CLOSED"></span></button>
     </div>
-    <table class="data">
+    <table class="data orders-table">
       <thead>
         <tr>
           <th>ID</th><th>Symbol</th><th>Mode</th><th>Broker</th><th>Side</th><th>Qty</th>
@@ -96,11 +96,12 @@
       </thead>
       <tbody id="tradesBody"></tbody>
     </table>
+    <div id="orderCards" class="order-list"></div>
   </section>
 
   <!-- NEW TRADE -->
   <section id="tab-new" class="tab-panel">
-    <details class="watchlist-acc" open>
+    <details class="watchlist-acc">
       <summary><span>⭐ Watchlist</span><span class="acc-caret">▾</span></summary>
       <div class="wl-body">
         <span id="watchlistChips" class="wl-chips"></span>

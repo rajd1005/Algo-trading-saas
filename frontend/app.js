@@ -255,7 +255,42 @@ let orderFilter = "ALL";
 function showTradesSkeleton(n = 4) {
   document.getElementById("tradesBody").innerHTML = Array.from({ length: n })
     .map(() => `<tr class="skel-row"><td colspan="13"><div class="skel-bar"></div></td></tr>`).join("");
+  const c = document.getElementById("orderCards");
+  if (c) c.innerHTML = Array.from({ length: n }).map(() => `<div class="order-card skel"><div class="skel-bar" style="width:55%"></div><div class="skel-bar" style="width:35%;margin-top:12px"></div></div>`).join("");
 }
+const _entryCond = (t) => {
+  if (t.entry_type === "SCHEDULED" && t.scheduled_time) return "Time " + t.scheduled_time;
+  if (t.entry_type === "TRIGGER" && t.trigger_price)
+    return "Trig " + (t.trigger_dir === "ABOVE" ? "≥" : t.trigger_dir === "BELOW" ? "≤" : "@") + " " + t.trigger_price;
+  if (t.entry_type === "LIMIT") return "Limit ₹" + t.entry_price;
+  return "Market";
+};
+function tradeCard(t) {
+  const isPending = t.status === "PENDING";
+  const isDone = ["CLOSED", "CANCELLED", "REJECTED"].includes(t.status);
+  const exited = t.exited_qty || 0;
+  const qtyTxt = (exited > 0 && t.status === "OPEN") ? `${t.quantity - exited}/${t.quantity}` : t.quantity;
+  const avg = t.entry_fill_price || t.entry_price || 0;
+  const ltp = t.last_price || 0;
+  const arrow = t.pnl > 0 ? "▲" : t.pnl < 0 ? "▼" : "";
+  const statusBadge = (t.status === "CLOSED" && t.exit_reason)
+    ? `<span class="oc-status st-CLOSED">DONE · ${t.exit_reason}</span>`
+    : `<span class="oc-status st-${t.status}">${t.status}</span>`;
+  const meta = isPending
+    ? `<span>Qty&nbsp;<b>${t.quantity}</b></span><span>Entry&nbsp;<b>${_entryCond(t)}</b></span>`
+    : `<span>Qty&nbsp;<b>${qtyTxt}</b></span><span>Avg&nbsp;<b>${avg ? "₹" + avg : "—"}</b></span><span>LTP&nbsp;<b>${ltp ? "₹" + ltp : "—"}</b></span>`;
+  const sub = [];
+  if (!isPending && (t.stop_loss > 0 || t.sl_points > 0)) sub.push(`SL ${t.stop_loss || t.sl_points + "p"}`);
+  const tg = targetCell(t); if (!isPending && tg && tg !== "-") sub.push(`Tgt ${tg}`);
+  sub.push(brokerLabel(t));
+  const pnlBlock = (isPending || (!avg && !isDone)) ? "" : `<div class="oc-pnl ${cls(t.pnl)}">${money(t.pnl)} <span class="oc-arr">${arrow}</span></div>`;
+  return `<div class="order-card oc-${t.status}" data-id="${t.id}">
+    <div class="oc-top"><div class="oc-sym"><span class="oc-tag tag-${t.side}">${t.side === "BUY" ? "B" : "S"}</span><span class="oc-name">${esc(t.symbol)}</span><span class="mode-chip m-${t.mode}">${t.mode}</span></div>${statusBadge}</div>
+    <div class="oc-mid"><div class="oc-meta">${meta}</div>${pnlBlock}</div>
+    <div class="oc-sub">${sub.join(`<span class="dot">·</span>`)}</div>
+    <div class="oc-actions">${actionsFor(t, true)}</div></div>`;
+}
+
 async function refreshTrades() {
   const rows = await api.get("/api/trades?date=" + encodeURIComponent(dateFilter));
   tradesById = {};
@@ -266,27 +301,29 @@ async function refreshTrades() {
   const inFilter = (t) => orderFilter === "ALL" ? true
     : orderFilter === "CLOSED" ? ["CLOSED", "CANCELLED", "REJECTED"].includes(t.status)
       : t.status === orderFilter;
+  const filtered = rows.filter(inFilter);
+  // desktop table
   const body = document.getElementById("tradesBody");
   body.innerHTML = "";
-  for (const t of rows.filter(inFilter)) {
+  for (const t of filtered) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${t.id}</td>
-      <td>${t.symbol}</td>
+      <td>${t.id}</td><td>${t.symbol}</td>
       <td><span class="badge b-${t.mode}">${t.mode}</span></td>
-      <td>${brokerLabel(t)}</td>
-      <td>${t.side}</td>
-      <td>${qtyCell(t)}</td>
+      <td>${brokerLabel(t)}</td><td>${t.side}</td><td>${qtyCell(t)}</td>
       <td>${entryCell(t)}</td>
       <td>${t.stop_loss || (t.sl_points ? t.sl_points + "p" : "-")}</td>
-      <td>${targetCell(t)}</td>
-      <td>${t.last_price || "-"}</td>
+      <td>${targetCell(t)}</td><td>${t.last_price || "-"}</td>
       <td class="${cls(t.pnl)}">${money(t.pnl)}</td>
-      <td>${statusCell(t)}</td>
-      <td>${actionsFor(t)}</td>`;
+      <td>${statusCell(t)}</td><td>${actionsFor(t)}</td>`;
     body.appendChild(tr);
   }
-  body.querySelectorAll("[data-act]").forEach((b) => {
+  // mobile cards
+  const cards = document.getElementById("orderCards");
+  cards.innerHTML = filtered.length ? filtered.map(tradeCard).join("")
+    : `<div class="order-empty">No ${orderFilter === "ALL" ? "" : orderFilter.toLowerCase() + " "}orders${dateFilter ? " for " + dateFilter : ""}.<br><span class="link" id="emptyNew">+ Place a new trade</span></div>`;
+  const en = document.getElementById("emptyNew"); if (en) en.onclick = () => document.querySelector('.tab[data-tab="new"]').click();
+  document.querySelectorAll("#tradesBody [data-act], #orderCards [data-act]").forEach((b) => {
     b.onclick = () => { if (b.dataset.act === "modify") openModify(b.dataset.id); else doAction(b.dataset.act, b.dataset.id); };
   });
 }
@@ -318,15 +355,16 @@ function targetCell(t) {
   }
   return t.target || (t.target_points ? t.target_points + "p" : "-");
 }
-function actionsFor(t) {
+function actionsFor(t, card) {
+  const c = card ? " oc-btn" : "";
   let h = "";
   if (t.status === "PENDING")
-    h += `<button class="btn btn-sm" data-act="cancel" data-id="${t.id}">Cancel</button> `;
+    h += `<button class="btn btn-sm${c}" data-act="cancel" data-id="${t.id}">Cancel</button> `;
   if (t.status === "OPEN")
-    h += `<button class="btn btn-sm" data-act="modify" data-id="${t.id}">SL/TP</button> `
-       + `<button class="btn btn-sm" data-act="close" data-id="${t.id}">Close</button> `;
+    h += `<button class="btn btn-sm${c}" data-act="modify" data-id="${t.id}">${card ? "Modify" : "SL/TP"}</button> `
+       + `<button class="btn btn-sm${c}${card ? " oc-btn-exit" : ""}" data-act="close" data-id="${t.id}">${card ? "Exit" : "Close"}</button> `;
   if (t.status === "CLOSED" || t.status === "CANCELLED" || t.status === "REJECTED")
-    h += `<button class="btn btn-sm" data-act="del" data-id="${t.id}">Delete</button>`;
+    h += `<button class="btn btn-sm${c}" data-act="del" data-id="${t.id}">Delete</button>`;
   return h;
 }
 // status filter chips
@@ -1338,6 +1376,7 @@ function wlLoad(item) {
   document.querySelectorAll("[data-seg]").forEach((x) => x.classList.toggle("active", x.dataset.seg === seg));
   pickerHint.textContent = HINTS[seg];
   document.querySelector('.tab[data-tab="new"]').click();   // ensure the New Trade tab is open
+  const acc = document.querySelector(".watchlist-acc"); if (acc) acc.open = false;  // auto-close after selecting
   if (item.security_id) {                 // a specific contract -> load it directly
     currentUnderlying = item.underlying || null;
     ulSearch.value = item.underlying || item.symbol;

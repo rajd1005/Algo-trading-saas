@@ -331,7 +331,7 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .chip.active { background: rgba(47,129,247,.14); border-color: var(--accent); color: var(--accent); }
 .chip-n { font-size: 11px; opacity: .8; }
 
-.order-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.order-list { display: none; }   /* cards are mobile-only; desktop uses the table */
 .order-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   padding: 14px; display: flex; flex-direction: column; gap: 10px;
   border-left: 3px solid var(--line); transition: border-color .15s; }
@@ -396,6 +396,17 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 #tradeForm input:focus, #tradeForm select:focus, .modal input:focus, .modal select:focus, .modal textarea:focus {
   outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,129,247,.15); }
 
+/* (3b) consistent custom select arrow + properly-aligned checkboxes */
+.form select, .modal select, .pnl-head select, .acct-panel select, .logs-bar select, #prTrailMode {
+  appearance: none; -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b98a5' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 9px center; padding-right: 28px;
+}
+.form label.check, .check { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; }
+.check input[type=checkbox], .form input[type=checkbox], .form input[type=radio] {
+  width: 18px; height: 18px; min-height: 0; flex: 0 0 auto; margin: 0; accent-color: var(--accent); cursor: pointer;
+}
+
 /* (4) popups / modals — consistent inputs + clean header */
 .modal h3 { margin: 0 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 17px; }
 .modal input, .modal select, .modal textarea {
@@ -421,11 +432,22 @@ button, .btn, .tab, .seg, .opt, .step, input, select, textarea,
 img, svg, canvas { max-width: 100%; }
 
 @media (max-width: 760px) {
-  /* ----- global density ----- */
-  body { padding-bottom: calc(60px + env(safe-area-inset-bottom)); }  /* room for bottom nav */
-  .tab-panel { padding: 14px 12px; }
-  .pnl-section { padding: 12px 12px 2px; }
-  .banner, .alert-banner { margin-left: 12px; margin-right: 12px; }
+  /* ----- EXTREME-COMPACT global density ----- */
+  body { padding-bottom: calc(58px + env(safe-area-inset-bottom)); font-size: 13px; }
+  .tab-panel { padding: 10px 10px; }
+  .pnl-section { padding: 8px 10px 0; }
+  .banner, .alert-banner { margin: 0 10px 6px; padding: 8px 10px; font-size: 12px; }
+  .form { padding: 12px; border-radius: 9px; }
+  .row { gap: 8px; margin-bottom: 9px; }
+  .field { margin-bottom: 9px; }
+  .field-label { margin-bottom: 3px; font-size: 11px; }
+  .form input, .form select, .form textarea, input, select, textarea { min-height: 40px; padding: 8px 10px; }
+  .form input[type=checkbox], .form input[type=radio] { min-height: 0; }
+  .watchlist-acc { margin-bottom: 10px; }
+  .watchlist-acc > summary { padding: 10px 12px; }
+  .wl-body { padding: 0 12px 10px; gap: 6px; }
+  .selected-symbol { margin-bottom: 9px; padding: 8px 10px; }
+  .seg-tabs, .order-filters { margin-bottom: 10px; }
 
   /* ----- COMPACT HEADER: single row, drop bulky/redundant chips ----- */
   header { padding: 9px 12px; gap: 8px; flex-wrap: nowrap; }
@@ -444,13 +466,14 @@ img, svg, canvas { max-width: 100%; }
   .pnl-title, #pnlBreakdown, #dateScope { display: none; }
   .pnl-head { gap: 6px; margin-bottom: 8px; }
   .pnl-head select, .pnl-head input[type=date] { flex: 1 1 auto; min-width: 0; font-size: 13px; min-height: 38px; }
-  .cards { grid-template-columns: repeat(3, 1fr); gap: 7px; }
-  .card { padding: 9px 8px; border-radius: 9px; }
+  .cards { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .card { padding: 7px 8px; border-radius: 8px; }
   .card-total { grid-column: auto; }                 /* 3-up, not full width */
-  .card-label { font-size: 9.5px; letter-spacing: 0; }
+  .card-label { font-size: 9px; letter-spacing: 0; }
   .lbl-full { display: none; }
   .lbl-short { display: inline; }
-  .card-value { font-size: 15px; margin-top: 3px; }
+  .card-value { font-size: 14px; margin-top: 2px; }
+  .chip { padding: 6px 12px; font-size: 12px; }
 
   /* ----- TABS -> fixed bottom navigation (thumb reach) ----- */
   .tabs {
@@ -470,11 +493,12 @@ img, svg, canvas { max-width: 100%; }
   .tab.active { border-top-color: var(--accent); border-bottom-color: transparent; color: var(--accent); }
   .tab-ico { display: block; }
   .tab-lbl { font-size: 10px; line-height: 1; }
-  /* single-column cards on phones */
-  .order-list { grid-template-columns: 1fr; gap: 10px; }
-  .order-card { padding: 13px; }
-  .oc-name { font-size: 14.5px; }
-  .oc-pnl { font-size: 17px; }
+  /* mobile shows order CARDS, hides the desktop table */
+  table.data.orders-table { display: none; }
+  .order-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .order-card { padding: 11px 12px; gap: 7px; }
+  .oc-name { font-size: 14px; }
+  .oc-pnl { font-size: 16px; }
 
   /* ----- DATA TABLES: horizontal scroll instead of page overflow ----- */
   table.data {
@@ -483,30 +507,34 @@ img, svg, canvas { max-width: 100%; }
   }
   table.data th, table.data td { padding: 10px 9px; }
 
-  /* ----- FORMS: full-width stacked fields, 16px inputs ----- */
-  .form { max-width: 100%; padding: 14px; }
-  .row { gap: 10px; }
+  /* ----- FORMS: full-width stacked fields, 16px inputs (compact) ----- */
+  .form { max-width: 100%; }
   .form label { min-width: 100%; flex: 1 1 100%; }
   .form input, .form select, .form textarea,
-  input, select, textarea { font-size: 16px; min-height: 44px; }
-  .lock-rule input, .pnl-head input, .pnl-head select { min-height: 40px; }
+  input, select, textarea { font-size: 16px; min-height: 40px; padding: 8px 10px; }
+  .form input[type=checkbox], .form input[type=radio] { min-height: 0; padding: 0; }
+  .lock-rule input { min-height: 36px; }
+  .pnl-head input, .pnl-head select { min-height: 38px; }
 
-  /* comfortable, thumb-sized controls */
-  .btn { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; }
-  .btn-sm { min-height: 34px; padding: 6px 11px; }
+  /* compact thumb controls */
+  .btn { min-height: 38px; display: inline-flex; align-items: center; justify-content: center; }
+  .btn-sm { min-height: 32px; padding: 5px 10px; }
   .btn-group { flex-wrap: wrap; }
-  .opt, .seg, .fut-btn, .step { min-height: 44px; }
+  .field .btn-group .opt { padding: 9px 8px; }
+  .opt, .seg, .fut-btn, .step { min-height: 40px; }
   .seg-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; }
   .seg { white-space: nowrap; flex: 1 1 auto; text-align: center; }
   /* full-width accordion + single-column modal fields on phones */
-  .watchlist-acc { max-width: 100%; margin-bottom: 12px; }
+  .watchlist-acc { max-width: 100%; }
+  .modal { padding: 13px 12px; }
+  .modal .row { gap: 9px; margin-bottom: 9px; }
   .modal .row label { min-width: 100%; }
-  .modal h3 { font-size: 16px; }
+  .modal h3 { font-size: 16px; margin-bottom: 11px; padding-bottom: 10px; }
 
   /* ----- OPTION CHAIN: tighter strike column, bigger tap rows ----- */
   .chain-head, .chain-row { grid-template-columns: 1fr 56px 1fr; }
-  .chain-cell { padding: 13px 8px; font-size: 12px; }
-  .chain-strike { padding: 13px 4px; font-size: 12px; }
+  .chain-cell { padding: 11px 8px; font-size: 12px; }
+  .chain-strike { padding: 11px 4px; font-size: 12px; }
   .chain-body { max-height: 50vh; }
 
   /* ----- MODALS -> bottom sheet ----- */
