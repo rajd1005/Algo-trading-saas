@@ -146,7 +146,7 @@ function actionsFor(t) {
   if (t.status === "OPEN")
     h += `<button class="btn btn-sm" data-act="modify" data-id="${t.id}">SL/TP</button> `
        + `<button class="btn btn-sm" data-act="close" data-id="${t.id}">Close</button> `;
-  if (t.status === "CLOSED" || t.status === "CANCELLED")
+  if (t.status === "CLOSED" || t.status === "CANCELLED" || t.status === "REJECTED")
     h += `<button class="btn btn-sm" data-act="del" data-id="${t.id}">Delete</button>`;
   return h;
 }

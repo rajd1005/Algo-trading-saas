@@ -216,61 +216,107 @@ class TradingEngine:
         return live_broker
 
     def _place_confirmed(self, db, t, broker, is_exit, qty):
-        """Place an order and, for live Dhan, VERIFY it actually executed —
-        retry on rejection and sync our records to Dhan's real traded price,
-        so our order details match the broker's."""
+        """Place an order and (for live Dhan) confirm what ACTUALLY happened.
+        Returns a result whose .status is TRADED / REJECTED / ERROR / PENDING and
+        whose .error holds the broker's exact reason on rejection. We retry only
+        on network errors — never on a definitive broker rejection."""
         place = broker.place_exit if is_exit else broker.place_entry
         price = t.last_price or t.entry_fill_price or t.entry_price
         kind = "EXIT" if is_exit else "ENTRY"
         res = None
-        attempt = 0
-        while attempt <= config.ORDER_RETRIES:
+        for attempt in range(config.ORDER_RETRIES + 1):
             res = place(t, price, qty=qty)
-            if not res.ok:
-                attempt += 1
-                self._log(db, f"{kind} order failed (try {attempt}): {res.error}", "ERROR", t.id)
-                continue
-            if broker.name != "DHAN":
-                return res                          # paper/demo fills at live price
-            status, traded_price, _ = broker.confirm(res.order_id)
-            if status == "TRADED":
-                if traded_price > 0:
-                    if abs(traded_price - res.fill_price) > 0.001:
-                        self._log(db, f"{kind} reconciled to Dhan fill {traded_price} "
-                                      f"(provisional {res.fill_price})", "INFO", t.id)
-                    res.fill_price = traded_price
-                res.status = "TRADED"
-                return res
-            if status in ("REJECTED", "CANCELLED", "EXPIRED"):
-                attempt += 1
-                self._log(db, f"{kind} {status} by broker — re-placing ({attempt})", "WARN", t.id)
-                continue
-            # still pending/unknown: accept provisional fill but flag it
-            self._log(db, f"{kind} order {res.order_id} status '{status or 'unknown'}'; "
-                          f"recorded at live price {res.fill_price}", "WARN", t.id)
+            if res.ok:
+                break
+            if res.status == "REJECTED":
+                return res                      # definitive rejection -> do not retry
+            self._log(db, f"{kind} order network error (try {attempt + 1}): {res.error}",
+                      "WARN", t.id)             # ERROR -> retryable
+        if not res.ok:
             return res
+        if broker.name != "DHAN":
+            return res                          # paper/demo: filled at live price
+        # Verify with Dhan what really happened.
+        status, traded_price, _, reason = broker.confirm(res.order_id)
+        res.status = status or res.status
+        if status == "TRADED":
+            if traded_price > 0:
+                if abs(traded_price - res.fill_price) > 0.001:
+                    self._log(db, f"{kind} reconciled to Dhan fill {traded_price} "
+                                  f"(provisional {res.fill_price})", "INFO", t.id)
+                res.fill_price = traded_price
+            res.ok = True
+            return res
+        if status in ("REJECTED", "CANCELLED", "EXPIRED"):
+            res.ok = False
+            res.error = reason or status
+            return res
+        # pending/unknown: order is live but not yet confirmed filled.
+        res.ok = True
+        res.status = status or "PENDING"
         return res
 
     # ---------- entry ----------
     def _handle_pending(self, db, t, price, kill, live_broker):
-        if kill:
-            return
-        if not self._entry_triggered(t, price):
+        broker = self._broker_for(t, live_broker)
+
+        # If we already placed a live entry order, just CONFIRM it (never place
+        # a second order) — this prevents duplicate/ghost trades.
+        if t.broker_order_id and broker.name == "DHAN":
+            status, traded_price, _, reason = broker.order_status(t.broker_order_id)
+            if status == "TRADED":
+                self._open_trade(db, t, traded_price or t.last_price, broker)
+            elif status in ("REJECTED", "CANCELLED", "EXPIRED"):
+                self._reject_trade(db, t, reason or status)
             return
 
-        broker = self._broker_for(t, live_broker)
+        if kill or not self._entry_triggered(t, price):
+            return
+
         res = self._place_confirmed(db, t, broker, is_exit=False, qty=t.quantity)
-        if res.ok:
-            t.status = "OPEN"
-            t.entry_fill_price = res.fill_price
+        if res.order_id:
             t.broker_order_id = res.order_id
-            self._apply_levels(t)        # compute SL/target prices from the fill
-            self._log(db, f"ENTRY {t.side} {t.symbol} x{t.quantity} @ {res.fill_price} "
-                          f"[{t.mode}/{broker.name}]", "INFO", t.id)
+        if res.ok and res.status == "TRADED":
+            self._open_trade(db, t, res.fill_price, broker)
+        elif res.status == "REJECTED":
+            self._reject_trade(db, t, res.error)
+        elif not res.ok:
+            # network error after retries — treat as failed, don't assume open
+            self._reject_trade(db, t, res.error, label="ENTRY_FAILED")
         else:
-            t.status = "CANCELLED"
-            t.exit_reason = "ENTRY_FAILED"
-            self._log(db, f"Entry failed for {t.symbol}: {res.error}", "ERROR", t.id)
+            # placed but not yet filled — stay PENDING and re-confirm next ticks
+            self._log(db, f"Entry order placed for {t.symbol} (status {res.status}); "
+                          f"awaiting fill confirmation…", "INFO", t.id)
+
+    def _open_trade(self, db, t, fill_price, broker):
+        """Mark a trade OPEN only after the broker confirms the fill."""
+        t.status = "OPEN"
+        t.entry_fill_price = fill_price
+        self._apply_levels(t)
+        self._log(db, f"ENTRY {t.side} {t.symbol} x{t.quantity} @ {fill_price} "
+                      f"[{t.mode}/{broker.name}]", "INFO", t.id)
+        self._log_levels(db, t)
+
+    def _reject_trade(self, db, t, reason, label="REJECTED"):
+        t.status = "REJECTED"
+        t.exit_reason = label
+        self._log(db, f"{t.side} order {t.symbol} REJECTED. Broker reason: "
+                      f"{reason or 'unknown'}", "ERROR", t.id)
+
+    def _log_levels(self, db, t):
+        """Audit log of the SL / target / trailing set on the new position."""
+        parts = []
+        if (t.stop_loss or 0) > 0:
+            parts.append(f"SL at {t.stop_loss}")
+        targets = self._targets(t)
+        if targets:
+            parts.append("Targets at " + ", ".join(str(x.get("price")) for x in targets))
+        elif (t.target or 0) > 0:
+            parts.append(f"Target at {t.target}")
+        if (t.trail_sl or 0) > 0:
+            parts.append(f"Trailing SL {t.trail_sl}pt ({t.trail_mode})")
+        if parts:
+            self._log(db, f"Trade #{t.id}: " + "; ".join(parts) + " (set at entry)", "INFO", t.id)
 
     def _entry_triggered(self, t, price):
         if t.entry_type == "MARKET":
@@ -342,8 +388,10 @@ class TradingEngine:
                     if cap_entry:
                         new_sl = min(new_sl, t.entry_fill_price)
                     if new_sl > (t.stop_loss or 0):
+                        old_sl = t.stop_loss or 0
                         t.stop_loss = new_sl
-                        self._log(db, f"Trailing SL → {new_sl} (price {price}) {t.symbol}", "INFO", t.id)
+                        self._log(db, f"Trade #{t.id}: SL updated (trailing). "
+                                      f"Old SL: {old_sl} -> New SL: {new_sl}", "INFO", t.id)
             else:
                 ref = t.hwm if t.hwm else t.entry_fill_price
                 steps = math.floor((ref - price) / step)
@@ -353,8 +401,10 @@ class TradingEngine:
                     if cap_entry:
                         new_sl = max(new_sl, t.entry_fill_price)
                     if not t.stop_loss or new_sl < t.stop_loss:
+                        old_sl = t.stop_loss or 0
                         t.stop_loss = new_sl
-                        self._log(db, f"Trailing SL → {new_sl} (price {price}) {t.symbol}", "INFO", t.id)
+                        self._log(db, f"Trade #{t.id}: SL updated (trailing). "
+                                      f"Old SL: {old_sl} -> New SL: {new_sl}", "INFO", t.id)
 
         # 1) Kill switch or stop-loss -> exit ALL remaining.
         sl_hit = (t.stop_loss or 0) > 0 and (price <= t.stop_loss if t.side == "BUY"

@@ -181,6 +181,7 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .b-OPEN { background: rgba(47,129,247,.18); color: var(--accent); }
 .b-CLOSED { background: rgba(139,152,165,.18); color: var(--muted); }
 .b-CANCELLED { background: rgba(248,81,73,.15); color: var(--red); }
+.b-REJECTED { background: rgba(248,81,73,.25); color: var(--red); font-weight: 700; }
 .b-TEST { background: rgba(46,160,67,.15); color: var(--green); }
 .b-LIVE { background: rgba(248,81,73,.18); color: var(--red); }
 

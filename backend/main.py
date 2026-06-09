@@ -202,6 +202,10 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
     if t.status != "OPEN":
         raise HTTPException(400, "Only open trades can be modified.")
 
+    old_sl, old_trail = t.stop_loss, t.trail_sl
+    old_targets = t.targets_json or (str(t.target) if t.target else "")
+    changes = []
+
     if payload.trail_mode is not None:
         t.trail_mode = "ENTRY" if str(payload.trail_mode).upper() == "ENTRY" else "CONTINUE"
 
@@ -210,11 +214,15 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
         t.stop_loss = float(payload.stop_loss)
         if t.entry_fill_price > 0 and t.stop_loss > 0:
             t.sl_points = round(abs(t.entry_fill_price - t.stop_loss), 2)
+        if old_sl != t.stop_loss:
+            changes.append(f"SL: Old {old_sl or '-'} -> New {t.stop_loss}")
 
     if payload.trail_sl is not None:
         t.trail_sl = float(payload.trail_sl)
         if t.trail_sl > 0:
             t.hwm = t.last_price or t.entry_fill_price   # re-arm the trailing step reference
+        if old_trail != t.trail_sl:
+            changes.append(f"Trailing SL: Old {old_trail or 0}pt -> New {t.trail_sl}pt")
 
     if payload.targets is not None:
         clean = [{"price": float(x.price), "qty": int(x.qty), "hit": False}
@@ -224,12 +232,17 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
             t.targets_json = ""
             t.target = clean[0]["price"] if clean else 0.0
             t.target_points = 0.0
+            new_targets = str(t.target) if t.target else ""
         else:
             t.targets_json = json.dumps(clean)
             t.target = clean[0]["price"]
             t.target_points = 0.0
+            new_targets = ", ".join(str(c["price"]) for c in clean)
+        if old_targets != (t.targets_json or (str(t.target) if t.target else "")):
+            changes.append(f"Targets: now {new_targets or '-'}")
 
-    db.add(LogEntry(message=f"Modified {t.symbol}: SL {t.stop_loss} / targets updated", trade_id=t.id))
+    msg = f"Trade #{t.id} modified: " + ("; ".join(changes) if changes else "no change")
+    db.add(LogEntry(message=msg, level="INFO", trade_id=t.id))
     db.commit()
     db.refresh(t)
     return t

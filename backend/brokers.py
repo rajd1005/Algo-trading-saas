@@ -26,6 +26,23 @@ class OrderResult:
         self.traded_qty = traded_qty
 
 
+def _extract_reason(resp):
+    """Pull the human-readable rejection reason out of a broker response."""
+    try:
+        d = resp.json()
+        if isinstance(d, dict):
+            for k in ("errorMessage", "message", "error_desc", "reject_reason",
+                      "omsErrorDescription", "remarks", "errorType"):
+                if d.get(k):
+                    return str(d[k])
+        return str(d)[:300]
+    except Exception:
+        try:
+            return resp.text[:300]
+        except Exception:
+            return "Unknown broker error"
+
+
 class PaperBroker:
     """Simulated broker for TEST / DEMO mode."""
 
@@ -40,8 +57,11 @@ class PaperBroker:
         return OrderResult(ok=True, fill_price=current_price, order_id=f"PAPER-X-{trade.id}",
                            status="TRADED", traded_qty=int(qty or trade.quantity))
 
+    def order_status(self, order_id):
+        return ("TRADED", 0.0, 0, "")
+
     def confirm(self, order_id):
-        return ("TRADED", 0.0, 0)
+        return ("TRADED", 0.0, 0, "")
 
 
 class DhanBroker:
@@ -77,20 +97,20 @@ class DhanBroker:
         }
         try:
             r = requests.post(url, json=payload, headers=self._headers(), timeout=8)
-            r.raise_for_status()
-            data = r.json()
-            order_id = str(data.get("orderId", ""))
-            status = str(data.get("orderStatus", "PENDING")).upper()
-            # current_price is a provisional fill; the engine then confirms the
-            # real traded price from Dhan via confirm().
-            return OrderResult(ok=True, fill_price=current_price, order_id=order_id, status=status)
         except Exception as e:
-            detail = ""
-            try:
-                detail = r.text  # type: ignore
-            except Exception:
-                pass
-            return OrderResult(ok=False, error=f"{e} {detail}".strip())
+            # No response = network/timeout problem -> retryable.
+            return OrderResult(ok=False, error=f"Network error: {e}", status="ERROR")
+        if r.status_code >= 400:
+            # The broker gave a definitive rejection (e.g. insufficient funds).
+            return OrderResult(ok=False, error=_extract_reason(r), status="REJECTED")
+        try:
+            data = r.json()
+        except Exception:
+            return OrderResult(ok=False, error="Unreadable broker response", status="ERROR")
+        order_id = str(data.get("orderId", ""))
+        status = str(data.get("orderStatus", "PENDING")).upper()
+        # current_price is provisional; confirm() then fetches the real fill.
+        return OrderResult(ok=True, fill_price=current_price, order_id=order_id, status=status)
 
     def place_entry(self, trade, current_price: float, qty=None) -> OrderResult:
         return self._place(trade, trade.side, current_price, qty)
@@ -101,7 +121,7 @@ class DhanBroker:
         return self._place(trade, exit_side, current_price, qty)
 
     def order_status(self, order_id):
-        """Fetch one order's status + actual traded price/qty from Dhan."""
+        """Fetch one order's status, real traded price/qty, and reject reason."""
         url = f"{config.DHAN_API_BASE}/orders/{order_id}"
         try:
             r = requests.get(url, headers=self._headers(), timeout=6)
@@ -112,17 +132,18 @@ class DhanBroker:
             status = str(data.get("orderStatus", "")).upper()
             traded_price = float(data.get("averageTradedPrice") or data.get("price") or 0)
             traded_qty = int(data.get("filledQty") or data.get("tradedQty") or 0)
-            return status, traded_price, traded_qty
+            reason = (data.get("omsErrorDescription") or data.get("text")
+                      or data.get("errorMessage") or "")
+            return status, traded_price, traded_qty, reason
         except Exception:
-            return "", 0.0, 0
+            return "", 0.0, 0, ""
 
     def confirm(self, order_id):
         """Poll until the order reaches a final state (TRADED/REJECTED/...)."""
-        last = ("", 0.0, 0)
+        last = ("", 0.0, 0, "")
         for _ in range(config.ORDER_POLLS):
-            status, tp, tq = self.order_status(order_id)
-            last = (status, tp, tq)
-            if status in ("TRADED", "REJECTED", "CANCELLED", "EXPIRED"):
+            last = self.order_status(order_id)
+            if last[0] in ("TRADED", "REJECTED", "CANCELLED", "EXPIRED"):
                 return last
             time.sleep(config.ORDER_POLL_DELAY)
         return last
