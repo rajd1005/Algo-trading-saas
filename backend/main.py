@@ -10,6 +10,8 @@ import time
 import threading
 import datetime as dt
 
+import requests
+
 # Force ALL outbound connections to use IPv4. Dhan whitelists an IPv4 address;
 # if the VPS prefers IPv6, orders are rejected with DH-905 "Invalid IP".
 import socket as _socket
@@ -44,7 +46,7 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fronten
 
 
 _OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico",
-               "/api/dhan/postback", "/api/dhan/callback"}
+               "/api/dhan/postback", "/api/dhan/callback", "/api/angel/postback"}
 
 
 @app.middleware("http")
@@ -152,6 +154,19 @@ def _startup():
     engine.start()
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
+    threading.Thread(target=_fetch_static_ip, daemon=True).start()
+
+
+def _fetch_static_ip():
+    """Discover the server's outbound IPv4 (the one to whitelist with brokers)."""
+    try:
+        ip = requests.get("https://api.ipify.org", timeout=10).text.strip()
+        db = SessionLocal()
+        set_setting(db, "static_ip", ip)
+        db.commit()
+        db.close()
+    except Exception:
+        pass
 
 
 def _broker_monitor_loop():
@@ -177,6 +192,7 @@ def _broker_monitor_loop():
                 ok, bal = b.fund_limit()
                 if ok:
                     set_setting(db, "broker_balance", str(bal))
+                    set_setting(db, "broker_balance_provider", tp)
                     set_setting(db, "broker_health", "ok")
                     set_setting(db, "broker_health_time", dt.datetime.utcnow().isoformat())
                 else:
@@ -592,18 +608,19 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
     trade_provider = get_setting(db, "trade_provider", "DEMO")
     PNAME = {"DEMO": "Demo", "DHAN": "Dhan", "ANGEL": "Angel One"}
     broker_name = PNAME.get(trade_provider, trade_provider)
-    if trade_provider == "DEMO":
-        balance = None
-    else:
+    # Show the balance ONLY for the connected, currently-selected trading provider.
+    trade_connected = (get_setting(db, "dhan_connected", "no") == "yes") if trade_provider == "DHAN" \
+        else (bool(get_setting(db, "angel_jwt", "")) if trade_provider == "ANGEL" else False)
+    balance = None
+    if trade_provider != "DEMO" and trade_connected \
+            and get_setting(db, "broker_balance_provider", "") == trade_provider:
         bal = get_setting(db, "broker_balance", "")
         balance = float(bal) if bal else None
 
     # Connection-lost warning while trades are running.
     broker_alert, alert_msg = False, ""
     if trade_provider != "DEMO" and active > 0:
-        connected = (get_setting(db, "dhan_connected", "no") == "yes") if trade_provider == "DHAN" \
-            else bool(get_setting(db, "angel_jwt", ""))
-        if not connected:
+        if not trade_connected:
             broker_alert = True
             alert_msg = f"{broker_name} is NOT connected but trades are running — reconnect on the Broker tab."
         elif get_setting(db, "broker_health", "") == "error":
@@ -744,9 +761,13 @@ def get_broker(request: Request, db: Session = Depends(get_db)):
         "has_app": bool(trade["app_id"]),
         "has_app_secret": trade["has_app_secret"],
         "token_hours_left": trade["token_hours_left"],
-        # webhook / redirect URLs to configure on the Dhan app(s)
+        # webhook / redirect URLs to configure on the broker app(s)
         "redirect_url": base + "/api/dhan/callback",
         "postback_url": base + "/api/dhan/postback",
+        "angel_redirect_url": base + "/api/angel/callback",
+        "angel_postback_url": base + "/api/angel/postback",
+        # outbound IP to whitelist with the broker (SEBI static-IP rule)
+        "static_ip": get_setting(db, "static_ip", ""),
     }
 
 
@@ -850,23 +871,30 @@ _PROVIDERS = {"DEMO", "DHAN", "ANGEL"}
 @app.post("/api/providers")
 def set_providers(payload: dict, db: Session = Depends(get_db)):
     """Set the Data and Trading providers (DEMO / DHAN / ANGEL)."""
-    new_data = str(payload.get("data_provider", "")).upper()
-    new_trade = str(payload.get("trade_provider", "")).upper()
-    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
     cur_data = get_setting(db, "data_provider", "DEMO")
     cur_trade = get_setting(db, "trade_provider", "DEMO")
-    if active > 0 and ((new_data and new_data != cur_data) or (new_trade and new_trade != cur_trade)):
+    new_data = str(payload.get("data_provider", cur_data)).upper()
+    new_trade = str(payload.get("trade_provider", cur_trade)).upper()
+    if new_data not in _PROVIDERS:
+        new_data = cur_data
+    if new_trade not in _PROVIDERS:
+        new_trade = cur_trade
+    # Demo is all-or-nothing: it can't be mixed with a live broker.
+    if (new_data == "DEMO") != (new_trade == "DEMO"):
+        raise HTTPException(400, "Demo can't be mixed with a live broker — set both to Demo, "
+                                 "or pick a live broker for both.")
+    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
+    if active > 0 and (new_data != cur_data or new_trade != cur_trade):
         raise HTTPException(400, f"{active} trade(s) are running — close them before switching providers.")
-    if new_data in _PROVIDERS:
-        set_setting(db, "data_provider", new_data)
-    if new_trade in _PROVIDERS:
-        set_setting(db, "trade_provider", new_trade)
-    # keep legacy broker_mode roughly in sync
-    tp = get_setting(db, "trade_provider", "DEMO")
-    set_setting(db, "broker_mode", "DEMO" if tp == "DEMO" else "DHAN")
+    set_setting(db, "data_provider", new_data)
+    set_setting(db, "trade_provider", new_trade)
+    set_setting(db, "broker_mode", "DEMO" if new_trade == "DEMO" else "DHAN")
+    # forget any balance/health from the previous trading provider
+    set_setting(db, "broker_balance", "")
+    set_setting(db, "broker_balance_provider", "")
+    set_setting(db, "broker_health", "")
     db.commit()
-    return {"data_provider": get_setting(db, "data_provider", "DEMO"),
-            "trade_provider": get_setting(db, "trade_provider", "DEMO")}
+    return {"data_provider": new_data, "trade_provider": new_trade}
 
 
 # legacy endpoint kept for safety
@@ -914,6 +942,20 @@ def angel_login(db: Session = Depends(get_db)):
     db.add(LogEntry(message=f"Angel One login failed: {data}", level="ERROR"))
     db.commit()
     raise HTTPException(400, f"Angel login failed: {data}")
+
+
+@app.post("/api/angel/postback")
+async def angel_postback(request: Request, db: Session = Depends(get_db)):
+    """Angel order-update webhook: instant sync of external Angel orders."""
+    try:
+        payload = await request.json()
+        orders = payload if isinstance(payload, list) else [payload]
+        _sync_external_orders(db, [angel.normalize_order(o) for o in orders])
+        db.commit()
+    except Exception as e:
+        db.add(LogEntry(message=f"Angel postback error: {e}", level="ERROR"))
+        db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/broker")

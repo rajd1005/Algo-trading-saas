@@ -767,6 +767,10 @@ async function refreshBroker() {
   setAngelStatus(b.angel || {});
   document.getElementById("redirectUrl").textContent = b.redirect_url || "—";
   document.getElementById("postbackUrl").textContent = b.postback_url || "—";
+  document.getElementById("staticIp").textContent = b.static_ip || "detecting…";
+  document.getElementById("angelRedirectUrl").textContent = b.angel_redirect_url || "—";
+  document.getElementById("angelPostbackUrl").textContent = b.angel_postback_url || "—";
+  document.getElementById("angelStaticIp").textContent = b.static_ip || "detecting…";
   // split provider status pill
   const st = document.getElementById("brokerState");
   const dot = (ok) => (ok ? "🟢" : "🔴");
@@ -774,15 +778,21 @@ async function refreshBroker() {
   st.className = "pill " + (b.data_connected && b.trade_connected ? "pill-ok" : "pill-off");
 }
 
-// provider dropdowns
+// provider dropdowns (Demo is all-or-nothing — it can't be mixed with a live broker)
 ["dataProvider", "tradeProvider"].forEach((id) => {
   document.getElementById(id).onchange = async () => {
+    let dp = document.getElementById("dataProvider").value;
+    let tp = document.getElementById("tradeProvider").value;
+    if (id === "dataProvider") {
+      if (dp === "DEMO") tp = "DEMO"; else if (tp === "DEMO") tp = dp;
+    } else {
+      if (tp === "DEMO") dp = "DEMO"; else if (dp === "DEMO") dp = tp;
+    }
+    document.getElementById("dataProvider").value = dp;
+    document.getElementById("tradeProvider").value = tp;
     const msg = document.getElementById("brokerMsg");
     try {
-      await api.post("/api/providers", {
-        data_provider: document.getElementById("dataProvider").value,
-        trade_provider: document.getElementById("tradeProvider").value,
-      });
+      await api.post("/api/providers", { data_provider: dp, trade_provider: tp });
       msg.textContent = "";
       await refreshBroker();
     } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; await refreshBroker(); }

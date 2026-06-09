@@ -125,6 +125,19 @@ class AngelMapper:
 mapper = AngelMapper()
 
 
+def normalize_order(o):
+    """One Angel order dict -> the Dhan-like shape our sync code expects."""
+    seg = {v: k for k, v in DHAN_TO_ANGEL_EXCH.items()}.get(o.get("exchange", ""), "")
+    return {
+        "orderId": o.get("orderid"), "orderStatus": str(o.get("status", "")).upper(),
+        "transactionType": o.get("transactiontype", ""),
+        "tradingSymbol": o.get("tradingsymbol", ""), "securityId": str(o.get("symboltoken", "")),
+        "exchangeSegment": seg, "quantity": o.get("quantity", 0),
+        "price": o.get("price", 0), "averageTradedPrice": o.get("averageprice", 0),
+        "omsErrorDescription": o.get("text", ""),
+    }
+
+
 # ----------------------------------------------------------------------------
 # Angel One authentication (TOTP login)
 # ----------------------------------------------------------------------------
@@ -291,22 +304,10 @@ class AngelBroker:
 
     def get_orders(self):
         """Return Angel's order book normalised into Dhan-like dicts for sync."""
-        out = []
         try:
-            for o in self._order_book():
-                a_tok = str(o.get("symboltoken", ""))
-                seg = {v: k for k, v in DHAN_TO_ANGEL_EXCH.items()}.get(o.get("exchange", ""), "")
-                out.append({
-                    "orderId": o.get("orderid"), "orderStatus": o.get("status", "").upper(),
-                    "transactionType": o.get("transactiontype", ""),
-                    "tradingSymbol": o.get("tradingsymbol", ""), "securityId": a_tok,
-                    "exchangeSegment": seg, "quantity": o.get("quantity", 0),
-                    "price": o.get("price", 0), "averageTradedPrice": o.get("averageprice", 0),
-                    "omsErrorDescription": o.get("text", ""),
-                })
+            return [normalize_order(o) for o in self._order_book()]
         except Exception:
-            pass
-        return out
+            return []
 
 
 def login(client_id, pin, api_key, totp_secret):
