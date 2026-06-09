@@ -258,6 +258,11 @@ class TradingEngine:
 
     # ---------- entry ----------
     def _handle_pending(self, db, t, price, kill, live_broker):
+        # External (broker-terminal) orders are managed by the sync monitor, not
+        # by us — never place an order on their behalf.
+        if t.source == "EXTERNAL":
+            return
+
         broker = self._broker_for(t, live_broker)
 
         # If we already placed a live entry order, just CONFIRM it (never place

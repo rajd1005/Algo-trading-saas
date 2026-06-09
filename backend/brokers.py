@@ -173,6 +173,17 @@ class DhanBroker:
         except Exception:
             return []
 
+    def get_orders(self):
+        """Return today's full order book from Dhan (all statuses)."""
+        url = f"{config.DHAN_API_BASE}/orders"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=6)
+            r.raise_for_status()
+            data = r.json()
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
 
 def verify_dhan_credentials(client_id: str, access_token: str) -> tuple[bool, str]:
     """

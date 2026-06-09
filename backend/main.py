@@ -150,7 +150,7 @@ def _broker_monitor_loop():
                     else:
                         set_setting(db, "broker_health", "error")
                     try:
-                        _sync_external_positions(db, b.get_positions())
+                        _sync_external_orders(db, b.get_orders())
                     except Exception:
                         pass
             db.commit()
@@ -159,34 +159,66 @@ def _broker_monitor_loop():
             pass
 
 
-def _sync_external_positions(db, positions):
-    """Create a Live Trade for any broker position we aren't already tracking."""
-    for p in positions or []:
-        try:
-            net = int(float(p.get("netQty", 0)))
-        except Exception:
-            net = 0
-        if net == 0:
+# Dhan order status -> our trade status.
+_EXT_STATUS_MAP = {
+    "TRADED": "OPEN", "FILLED": "OPEN",
+    "PENDING": "PENDING", "TRANSIT": "PENDING", "MODIFIED": "PENDING", "OPEN": "PENDING",
+    "REJECTED": "REJECTED", "CANCELLED": "CANCELLED", "EXPIRED": "CANCELLED",
+}
+
+
+def _sync_external_orders(db, orders):
+    """Mirror the broker's ENTIRE order book into our system — every order placed
+    on the broker terminal (filled, pending, rejected, cancelled) shows up here,
+    and its status is kept up to date."""
+    for o in orders or []:
+        oid = str(o.get("orderId", ""))
+        if not oid:
             continue
-        sec = str(p.get("securityId", ""))
-        if not sec:
+        raw = str(o.get("orderStatus", "")).upper()
+        mapped = _EXT_STATUS_MAP.get(raw)
+        if not mapped:
             continue
-        existing = db.query(Trade).filter(
-            Trade.security_id == sec, Trade.status.in_(["OPEN", "PENDING"])).first()
+        avg = float(o.get("averageTradedPrice") or 0)
+        price = float(o.get("price") or 0)
+        reason = o.get("omsErrorDescription") or o.get("text") or ""
+
+        existing = db.query(Trade).filter(Trade.broker_order_id == oid).first()
         if existing:
+            # Keep externally-synced orders in step with the broker.
+            if existing.source == "EXTERNAL" and existing.status not in ("CLOSED",) \
+                    and existing.status != mapped:
+                old = existing.status
+                existing.status = mapped
+                if mapped == "OPEN" and not existing.entry_fill_price:
+                    existing.entry_fill_price = avg or price
+                if mapped == "REJECTED":
+                    existing.exit_reason = "REJECTED"
+                db.add(LogEntry(message=f"External order {existing.symbol} status: {old} -> {mapped}"
+                                        + (f". Reason: {reason}" if reason else ""),
+                                level="ERROR" if mapped == "REJECTED" else "INFO"))
             continue
-        side = "BUY" if net > 0 else "SELL"
-        avg = float(p.get("buyAvg") or p.get("costPrice") or 0) if net > 0 \
-            else float(p.get("sellAvg") or p.get("costPrice") or 0)
-        sym = p.get("tradingSymbol") or sec
-        t = Trade(symbol=sym, name=sym, security_id=sec,
-                  exchange_segment=p.get("exchangeSegment", ""),
-                  instrument_type="OPTION" if "OPT" in str(p.get("drvOptionType", "")) else "EQUITY",
-                  side=side, quantity=abs(net), lot_size=1, mode="LIVE",
-                  status="OPEN", entry_fill_price=avg, broker="DHAN", source="EXTERNAL")
+
+        # New external order we've not seen before.
+        sec = str(o.get("securityId", ""))
+        sym = o.get("tradingSymbol") or sec
+        side = (o.get("transactionType") or "BUY").upper()
+        try:
+            qty = int(float(o.get("quantity") or 0))
+        except Exception:
+            qty = 0
+        seg = o.get("exchangeSegment", "")
+        opt = (o.get("drvOptionType") or "")
+        itype = "OPTION" if opt in ("CALL", "PUT", "CE", "PE") else ("FUTURES" if "FNO" in seg else "EQUITY")
+        t = Trade(symbol=sym, name=sym, security_id=sec, exchange_segment=seg, instrument_type=itype,
+                  side=side, quantity=qty, lot_size=1, mode="LIVE", status=mapped,
+                  entry_fill_price=(avg or 0) if mapped == "OPEN" else 0, entry_price=price,
+                  broker="DHAN", source="EXTERNAL", broker_order_id=oid,
+                  exit_reason="REJECTED" if mapped == "REJECTED" else "")
         db.add(t)
-        db.add(LogEntry(message=f"Synced external {side} position: {sym} x{abs(net)} @ {avg} "
-                                f"(placed on broker terminal)", level="INFO"))
+        db.add(LogEntry(message=f"Synced external order: {sym} {side} x{qty} [{raw}]"
+                                + (f". Reason: {reason}" if reason else ""),
+                        level="ERROR" if mapped == "REJECTED" else "INFO"))
 
 
 def _auto_renew_loop():
