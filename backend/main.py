@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 import dhan_auth
 import auth
+import angel
 
 import config
 from database import init_db, get_db, SessionLocal
@@ -141,6 +142,7 @@ def _startup():
         set_setting(db, "broker_mode", "DEMO")   # start in safe Demo mode
     db.close()
     instruments.load_async()   # download Dhan's symbol list in the background
+    angel.mapper.load_async()  # download Angel One master + build the symbol map
     engine.start()
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
@@ -575,6 +577,7 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
         "kill_switch": get_setting(db, "kill_switch", "off"),
         "md_status": get_setting(db, "md_status", ""),
         "instruments": instruments.status(),
+        "angel_map": angel.mapper.status(),
         "demo_direction": demo_market.direction,
         "broker_name": broker_name,
         "balance": balance,
