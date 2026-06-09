@@ -749,7 +749,10 @@ async function loginAccount(id, broker) {
   try {
     if (broker === "DHAN") {
       const r = await api.get("/api/dhan/login?account_id=" + id);
-      window.location.href = r.login_url;       // redirect to Dhan
+      window.location.href = r.login_url;        // redirect to Dhan
+    } else if (broker === "ZERODHA") {
+      const r = await api.get("/api/zerodha/login?account_id=" + id);
+      window.location.href = r.login_url;        // redirect to Kite
     } else {
       await api.post("/api/angel/login", { account_id: Number(id) });
       msg.textContent = "✅ Logged in to Angel One."; msg.className = "msg pos";
@@ -783,6 +786,8 @@ async function refreshBroker() {
   document.getElementById("postbackUrl").textContent = b.postback_url || "—";
   document.getElementById("angelRedirectUrl").textContent = b.angel_redirect_url || "—";
   document.getElementById("angelPostbackUrl").textContent = b.angel_postback_url || "—";
+  document.getElementById("zerodhaRedirectUrl").textContent = b.zerodha_redirect_url || "—";
+  document.getElementById("zerodhaPostbackUrl").textContent = b.zerodha_postback_url || "—";
   document.getElementById("staticIp").textContent = b.static_ip || "detecting…";
   const st = document.getElementById("brokerState");
   const dot = (ok) => (ok ? "🟢" : "🔴");
@@ -806,17 +811,21 @@ async function refreshBroker() {
 });
 
 // add / edit account form
+const BROKER_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha" };
 function showAcctForm(broker, acc) {
   document.getElementById("acctForm").style.display = "block";
   document.getElementById("acctBroker").value = broker;
   document.getElementById("acctId").value = acc ? acc.id : "";
-  document.getElementById("acctFormTitle").textContent = (acc ? "Edit " : "New ") + (broker === "DHAN" ? "Dhan" : "Angel One") + " account";
+  document.getElementById("acctFormTitle").textContent = (acc ? "Edit " : "New ") + (BROKER_NAME[broker] || broker) + " account";
   document.querySelectorAll(".dhan-f").forEach((e) => e.style.display = broker === "DHAN" ? "" : "none");
+  document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA") ? "" : "none");
   document.querySelectorAll(".angel-f").forEach((e) => e.style.display = broker === "ANGEL" ? "" : "none");
-  ["acctClientId", "acctAppId", "acctAppSecret", "acctApiKey", "acctPin", "acctTotp"].forEach((i) => document.getElementById(i).value = "");
+  document.querySelectorAll(".zerodha-f").forEach((e) => e.style.display = broker === "ZERODHA" ? "" : "none");
+  ["acctClientId", "acctAppId", "acctAppSecret", "acctApiKey", "acctPin", "acctTotp", "acctZSecret"].forEach((i) => document.getElementById(i).value = "");
   document.getElementById("acctClientId").value = acc ? acc.client_id : "";
   if (acc && acc.has_secret) {
-    (broker === "DHAN" ? document.getElementById("acctAppSecret") : document.getElementById("acctApiKey")).placeholder = "•••••• saved (blank = keep)";
+    const f = broker === "DHAN" ? "acctAppSecret" : "acctApiKey";
+    document.getElementById(f).placeholder = "•••••• saved (blank = keep)";
   }
 }
 document.getElementById("addAcctBtn").onclick = () => showAcctForm(document.getElementById("newAcctBroker").value, null);
@@ -829,6 +838,9 @@ document.getElementById("acctSaveBtn").onclick = async () => {
   if (broker === "DHAN") {
     payload.app_id = document.getElementById("acctAppId").value;
     payload.app_secret = document.getElementById("acctAppSecret").value;
+  } else if (broker === "ZERODHA") {
+    payload.api_key = document.getElementById("acctApiKey").value;
+    payload.api_secret = document.getElementById("acctZSecret").value;
   } else {
     payload.api_key = document.getElementById("acctApiKey").value;
     payload.pin = document.getElementById("acctPin").value;

@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 import dhan_auth
 import auth
 import angel
+import zerodha
 
 import config
 from database import init_db, get_db, SessionLocal
@@ -46,7 +47,8 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fronten
 
 
 _OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico",
-               "/api/dhan/postback", "/api/dhan/callback", "/api/angel/postback"}
+               "/api/dhan/postback", "/api/dhan/callback", "/api/angel/postback",
+               "/api/zerodha/callback", "/api/zerodha/postback"}
 
 
 @app.middleware("http")
@@ -132,7 +134,7 @@ def get_data_creds(db):
 
 # ---------- multi-account broker logins ----------
 def _label(broker, client_id):
-    name = "Dhan" if broker == "DHAN" else "Angel One"
+    name = {"DHAN": "Dhan", "ANGEL": "Angel One", "ZERODHA": "Zerodha"}.get(broker, broker)
     return f"{name} · {client_id or '—'}"
 
 
@@ -196,6 +198,8 @@ def _broker_from_account(a):
         return DhanBroker(a.client_id, creds["access_token"])
     if a.broker == "ANGEL" and creds.get("jwt"):
         return angel.AngelBroker(a.client_id, creds.get("api_key", ""), creds["jwt"])
+    if a.broker == "ZERODHA" and creds.get("access_token"):
+        return zerodha.ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
     return None
 
 
@@ -207,7 +211,9 @@ def list_accounts(db: Session = Depends(get_db)):
 @app.post("/api/accounts")
 def save_account(payload: dict, db: Session = Depends(get_db)):
     """Add or update a broker account."""
-    broker = "ANGEL" if str(payload.get("broker", "")).upper() == "ANGEL" else "DHAN"
+    broker = str(payload.get("broker", "")).upper()
+    if broker not in ("DHAN", "ANGEL", "ZERODHA"):
+        broker = "DHAN"
     aid = payload.get("id")
     a = db.get(Account, int(aid)) if aid else None
     if a is None:
@@ -218,8 +224,8 @@ def save_account(payload: dict, db: Session = Depends(get_db)):
     a.broker = broker
     # store secrets (only overwrite when provided)
     _set_acc_creds(a, app_id=payload.get("app_id"), app_secret=payload.get("app_secret"),
-                   api_key=payload.get("api_key"), totp_secret=payload.get("totp_secret"),
-                   pin=payload.get("pin"))
+                   api_key=payload.get("api_key"), api_secret=payload.get("api_secret"),
+                   totp_secret=payload.get("totp_secret"), pin=payload.get("pin"))
     a.label = _label(a.broker, a.client_id)
     db.commit()
     db.refresh(a)
@@ -261,6 +267,7 @@ def _startup():
     db.close()
     instruments.load_async()   # download Dhan's symbol list in the background
     angel.mapper.load_async()  # download Angel One master + build the symbol map
+    zerodha.mapper.load_async()  # download Zerodha (Kite) master + symbol map
     engine.start()
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
@@ -628,6 +635,11 @@ def ltp(payload: dict, db: Session = Depends(get_db)):
         if not (cid and key and jwt) or not by_seg:
             return {"connected": bool(cid and key and jwt), "prices": {}}
         md = angel.AngelMarketData(cid, key, jwt)
+    elif acc.broker == "ZERODHA":
+        key, tok = creds.get("api_key", ""), creds.get("access_token", "")
+        if not (key and tok) or not by_seg:
+            return {"connected": bool(key and tok), "prices": {}}
+        md = zerodha.ZerodhaMarketData(key, tok)
     else:               # DHAN
         cid, tok = acc.client_id, creds.get("access_token", "")
         if not cid or not tok or not by_seg:
@@ -663,6 +675,7 @@ def instruments_status():
 def instruments_refresh():
     instruments.refresh()        # Dhan master (the universal picker base)
     angel.mapper.load_async()    # Angel master (for translation)
+    zerodha.mapper.load_async()  # Zerodha master (for translation)
     return {"ok": True, "message": "Refreshing symbol lists in the background…"}
 
 
@@ -765,6 +778,7 @@ def summary(broker: str = "ALL", db: Session = Depends(get_db)):
         "md_status": get_setting(db, "md_status", ""),
         "instruments": instruments.status(),
         "angel_map": angel.mapper.status(),
+        "zerodha_map": zerodha.mapper.status(),
         "demo_direction": demo_market.direction,
         "data_provider": data_provider, "trade_provider": trade_provider,
         "data_name": data_name, "broker_name": broker_name, "balance": balance,
@@ -839,8 +853,57 @@ def get_broker(request: Request, db: Session = Depends(get_db)):
         "postback_url": base + "/api/dhan/postback",
         "angel_redirect_url": base + "/api/angel/callback",
         "angel_postback_url": base + "/api/angel/postback",
+        "zerodha_redirect_url": base + "/api/zerodha/callback",
+        "zerodha_postback_url": base + "/api/zerodha/postback",
         "static_ip": get_setting(db, "static_ip", ""),
     }
+
+
+# ---------- Zerodha (Kite Connect) login ----------
+@app.get("/api/zerodha/login")
+def zerodha_login(account_id: int = 0, db: Session = Depends(get_db)):
+    a = db.get(Account, account_id)
+    if a is None or a.broker != "ZERODHA":
+        raise HTTPException(400, "Zerodha account not found.")
+    api_key = _acc_creds(a).get("api_key", "")
+    if not api_key:
+        raise HTTPException(400, "Enter the Zerodha API Key & Secret first.")
+    set_setting(db, "pending_login_account", str(a.id))
+    return {"login_url": zerodha.login_url(api_key)}
+
+
+@app.get("/api/zerodha/callback")
+def zerodha_callback(request_token: str = "", db: Session = Depends(get_db)):
+    a = _account_for_provider(db, get_setting(db, "pending_login_account", ""))
+    if a is None or a.broker != "ZERODHA" or not request_token:
+        return RedirectResponse(url="/?login=failed")
+    creds = _acc_creds(a)
+    ok, res = zerodha.exchange_request_token(creds.get("api_key", ""), creds.get("api_secret", ""), request_token)
+    if ok:
+        _set_acc_creds(a, access_token=res)
+        a.connected = 1
+        a.token_time = dt.datetime.utcnow()
+        a.label = _label("ZERODHA", a.client_id)
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO"))
+        db.commit()
+        return RedirectResponse(url="/?login=ok")
+    db.add(LogEntry(message=f"Zerodha login failed: {res}", level="ERROR"))
+    db.commit()
+    return RedirectResponse(url="/?login=failed")
+
+
+@app.post("/api/zerodha/postback")
+async def zerodha_postback(request: Request, db: Session = Depends(get_db)):
+    try:
+        payload = await request.json()
+        orders = payload if isinstance(payload, list) else [payload]
+        _sync_external_orders(db, [zerodha.normalize_order(o) for o in orders],
+                              "ZERODHA", _account_id_for_broker(db, "ZERODHA"))
+        db.commit()
+    except Exception as e:
+        db.add(LogEntry(message=f"Zerodha postback error: {e}", level="ERROR"))
+        db.commit()
+    return {"ok": True}
 
 
 # ---------- "Login with Dhan" (app consent), per account ----------

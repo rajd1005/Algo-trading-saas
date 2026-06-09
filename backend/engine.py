@@ -26,6 +26,7 @@ from market_data import DhanMarketData, demo_market
 from live_feed import feed
 from brokers import PaperBroker, DhanBroker
 from angel import AngelBroker, AngelMarketData
+from zerodha import ZerodhaBroker, ZerodhaMarketData
 import config
 
 
@@ -141,6 +142,8 @@ class TradingEngine:
             return DhanBroker(acc.client_id, creds["access_token"])
         if acc.broker == "ANGEL" and creds.get("jwt"):
             return AngelBroker(acc.client_id, creds.get("api_key", ""), creds["jwt"])
+        if acc.broker == "ZERODHA" and creds.get("access_token"):
+            return ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
         return None
 
     def _fetch_prices(self, db, value, instruments, active):
@@ -173,6 +176,20 @@ class TradingEngine:
                     self._set_setting(db, "md_status", "ok:angel")
                 elif md.last_error:
                     self._set_setting(db, "md_status", f"Angel data error: {md.last_error[:160]}")
+            return prices
+        if acc.broker == "ZERODHA":
+            key, tok = creds.get("api_key", ""), creds.get("access_token", "")
+            if not key or not tok:
+                if active:
+                    self._set_setting(db, "md_status", "Data (Zerodha) not connected — connect on the Broker tab.")
+                return {}
+            md = ZerodhaMarketData(key, tok)
+            prices = md.get_ltp_batch(by_seg)
+            if active:
+                if prices:
+                    self._set_setting(db, "md_status", "ok:zerodha")
+                elif md.last_error:
+                    self._set_setting(db, "md_status", f"Zerodha data error: {md.last_error[:160]}")
             return prices
         return {}
 

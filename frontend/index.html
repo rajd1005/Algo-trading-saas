@@ -195,7 +195,7 @@
       <div class="acct-title">Broker accounts</div>
       <div id="accountsList"></div>
       <div class="row" style="align-items:center; gap:8px;">
-        <select id="newAcctBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option></select>
+        <select id="newAcctBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option><option value="ZERODHA">Zerodha</option></select>
         <button type="button" class="btn" id="addAcctBtn">+ Add account</button>
       </div>
 
@@ -208,9 +208,10 @@
           <label>Client ID <input id="acctClientId" placeholder="client id" /></label>
           <label class="dhan-f">App ID <input id="acctAppId" placeholder="Dhan app id" /></label>
           <label class="dhan-f">App Secret <input id="acctAppSecret" type="password" placeholder="Dhan app secret" /></label>
-          <label class="angel-f">API Key <input id="acctApiKey" placeholder="SmartAPI key" /></label>
+          <label class="api-f">API Key <input id="acctApiKey" placeholder="API key" /></label>
           <label class="angel-f">PIN <input id="acctPin" type="password" placeholder="login PIN" /></label>
           <label class="angel-f">TOTP Secret <input id="acctTotp" type="password" placeholder="TOTP secret" /></label>
+          <label class="zerodha-f">API Secret <input id="acctZSecret" type="password" placeholder="Zerodha API secret" /></label>
         </div>
         <div class="row">
           <button type="button" class="btn btn-primary" id="acctSaveBtn">Save account</button>
@@ -224,7 +225,9 @@
         <div>Dhan Postback URL: <code id="postbackUrl">—</code></div>
         <div>Angel Redirect URL: <code id="angelRedirectUrl">—</code></div>
         <div>Angel Postback URL: <code id="angelPostbackUrl">—</code></div>
-        <div>Static IP to whitelist (both): <code id="staticIp">—</code></div>
+        <div>Zerodha Redirect URL: <code id="zerodhaRedirectUrl">—</code></div>
+        <div>Zerodha Postback URL: <code id="zerodhaPostbackUrl">—</code></div>
+        <div>Static IP to whitelist (all): <code id="staticIp">—</code></div>
       </div>
 
       <div class="row" style="margin-top:10px;">
