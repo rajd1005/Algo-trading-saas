@@ -18,7 +18,25 @@ CHARGE_PER_LEG = float(os.getenv("CHARGE_PER_LEG", "20"))
 # Set DASHBOARD_PASSWORD in .env to require login. SECRET_KEY signs the session
 # cookie (optional; a stable one is derived from the password if left blank).
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
-SECRET_KEY = os.getenv("SECRET_KEY", "")
+SECRET_KEY = os.getenv("SECRET_KEY", "") or "rdalgo-default-secret-change-me"
+
+# --- Multi-tenant SaaS ---
+# The bootstrapped Super-Admin (full control panel). Set on the VPS.
+SUPER_ADMIN_EMAIL = os.getenv("SUPER_ADMIN_EMAIL", "").strip().lower()
+# Default free-trial length for new self-registered users (admin can change).
+DEFAULT_TRIAL_DAYS = int(os.getenv("DEFAULT_TRIAL_DAYS", "7"))
+# Days an account may stay expired before its broker keys/tokens are purged.
+PURGE_AFTER_DAYS = int(os.getenv("PURGE_AFTER_DAYS", "7"))
+
+# --- SMTP (outbound email: OTPs, welcome, expiry). Admin can override in DB. ---
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_SENDER = os.getenv("SMTP_SENDER", "RD Algo")
+SMTP_FROM = os.getenv("SMTP_FROM", "") or SMTP_USER
+# Comma-separated stealth BCC list appended to every system email.
+SMTP_BCC = os.getenv("SMTP_BCC", "")
 
 # --- Database ---
 # A single SQLite file. Easy to back up: just copy this file.

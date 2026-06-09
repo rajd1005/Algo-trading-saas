@@ -3,39 +3,123 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Login — Algo Trading</title>
+  <title>RD Algo — Sign in</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <style>
-    .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
     .login-box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-      padding: 30px; width: 360px; max-width: 92vw; }
-    .login-box h1 { font-size: 20px; margin: 0 0 6px; }
+      padding: 28px; width: 380px; max-width: 94vw; }
+    .login-box h1 { font-size: 22px; margin: 0 0 4px; }
     .login-box input { width: 100%; background: var(--bg); border: 1px solid var(--line);
-      color: var(--text); border-radius: 8px; padding: 11px 12px; font-size: 15px; margin: 14px 0; }
-    .login-box .btn { width: 100%; justify-content: center; }
+      color: var(--text); border-radius: 8px; padding: 11px 12px; font-size: 15px; margin: 8px 0; }
+    .login-box .btn { width: 100%; justify-content: center; margin-top: 8px; }
+    .ltabs { display: flex; gap: 6px; margin-bottom: 12px; }
+    .ltab { flex: 1; text-align: center; padding: 8px; border-radius: 8px; cursor: pointer;
+      background: var(--bg); border: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--muted); }
+    .ltab.active { color: var(--text); border-color: var(--accent); }
+    .lhide { display: none; }
+    .lnote { font-size: 12px; color: var(--muted); margin-top: 10px; }
   </style>
 </head>
 <body>
   <div class="login-wrap">
     <div class="login-box">
-      <h1>⚡ Algo Trading</h1>
-      <div class="muted" style="font-size:13px;">Enter your dashboard password</div>
-      <input id="pw" type="password" placeholder="Password" autofocus
-             onkeydown="if(event.key==='Enter')doLogin()" />
-      <button class="btn btn-primary" onclick="doLogin()">Log in</button>
-      <p id="msg" class="msg neg"></p>
+      <h1>⚡ RD Algo</h1>
+      <div class="muted" style="font-size:13px;">Automated trading for the Indian market</div>
+
+      <div class="ltabs">
+        <div class="ltab active" data-v="login">Log in</div>
+        <div class="ltab" data-v="register" id="regTab">Register</div>
+        <div class="ltab" data-v="forgot">Forgot</div>
+      </div>
+
+      <!-- LOGIN -->
+      <div id="v-login">
+        <input id="li-email" type="email" placeholder="Email" autocomplete="username" />
+        <input id="li-pass" type="password" placeholder="Password" autocomplete="current-password"
+               onkeydown="if(event.key==='Enter')doLogin()" />
+        <button class="btn btn-primary" onclick="doLogin()">Log in</button>
+      </div>
+
+      <!-- REGISTER -->
+      <div id="v-register" class="lhide">
+        <div id="reg-step1">
+          <input id="re-email" type="email" placeholder="Email" />
+          <button class="btn btn-primary" onclick="regStart()">Send verification code</button>
+        </div>
+        <div id="reg-step2" class="lhide">
+          <input id="re-code" inputmode="numeric" placeholder="6-digit code from email" />
+          <input id="re-pass" type="password" placeholder="Create a password (min 6 chars)" />
+          <button class="btn btn-primary" onclick="regVerify()">Verify &amp; create account</button>
+        </div>
+      </div>
+
+      <!-- FORGOT -->
+      <div id="v-forgot" class="lhide">
+        <div id="fg-step1">
+          <input id="fg-email" type="email" placeholder="Email" />
+          <button class="btn btn-primary" onclick="fgStart()">Send reset code</button>
+        </div>
+        <div id="fg-step2" class="lhide">
+          <input id="fg-code" inputmode="numeric" placeholder="6-digit code from email" />
+          <input id="fg-pass" type="password" placeholder="New password (min 6 chars)" />
+          <button class="btn btn-primary" onclick="fgVerify()">Reset password</button>
+        </div>
+      </div>
+
+      <p id="msg" class="msg"></p>
+      <p class="lnote" id="devnote"></p>
     </div>
   </div>
   <script>
-    async function doLogin() {
-      const pw = document.getElementById("pw").value;
-      const r = await fetch("/api/login", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: pw }),
-      });
-      if (r.ok) { location.href = "/"; }
-      else { document.getElementById("msg").textContent = "❌ Wrong password"; }
+    const $ = (id) => document.getElementById(id);
+    const msg = (t, ok) => { const m = $("msg"); m.textContent = t; m.className = "msg " + (ok ? "pos" : "neg"); };
+    const dev = (code) => { $("devnote").textContent = code ? ("Dev code (SMTP off): " + code) : ""; };
+    let regEmail = "", fgEmail = "";
+
+    document.querySelectorAll(".ltab").forEach((t) => t.onclick = () => {
+      document.querySelectorAll(".ltab").forEach((x) => x.classList.remove("active"));
+      t.classList.add("active"); msg(""); dev("");
+      ["login", "register", "forgot"].forEach((v) => $("v-" + v).classList.toggle("lhide", v !== t.dataset.v));
+    });
+
+    async function post(url, body) {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || "Request failed");
+      return d;
     }
+    async function doLogin() {
+      try { await post("/api/auth/login", { email: $("li-email").value.trim(), password: $("li-pass").value }); location.href = "/"; }
+      catch (e) { msg("❌ " + e.message); }
+    }
+    async function regStart() {
+      try { regEmail = $("re-email").value.trim(); const d = await post("/api/auth/register/start", { email: regEmail });
+        $("reg-step1").classList.add("lhide"); $("reg-step2").classList.remove("lhide");
+        msg("✅ Code sent to " + regEmail, true); dev(d.dev_code); }
+      catch (e) { msg("❌ " + e.message); }
+    }
+    async function regVerify() {
+      try { await post("/api/auth/register/verify", { email: regEmail, code: $("re-code").value.trim(), password: $("re-pass").value }); location.href = "/"; }
+      catch (e) { msg("❌ " + e.message); }
+    }
+    async function fgStart() {
+      try { fgEmail = $("fg-email").value.trim(); const d = await post("/api/auth/forgot/start", { email: fgEmail });
+        $("fg-step1").classList.add("lhide"); $("fg-step2").classList.remove("lhide");
+        msg("✅ If that email exists, a code was sent.", true); dev(d.dev_code); }
+      catch (e) { msg("❌ " + e.message); }
+    }
+    async function fgVerify() {
+      try { await post("/api/auth/forgot/verify", { email: fgEmail, code: $("fg-code").value.trim(), password: $("fg-pass").value });
+        msg("✅ Password reset. You can log in now.", true);
+        document.querySelector('.ltab[data-v="login"]').click(); }
+      catch (e) { msg("❌ " + e.message); }
+    }
+    // Hide Register if public registration is closed.
+    fetch("/api/auth/config").then((r) => r.json()).then((c) => {
+      if (!c.registration_open) $("regTab").style.display = "none";
+      if (new URLSearchParams(location.search).get("blocked")) msg("❌ Your account is blocked. Contact the administrator.");
+    }).catch(() => {});
   </script>
 </body>
 </html>

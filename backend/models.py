@@ -11,10 +11,74 @@ The engine watches each Trade and moves it through these states automatically:
     CANCELLED-> cancelled before entry
 """
 import datetime as dt
+import uuid as _uuid
 
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text
 
 from database import Base
+
+
+def _uuid4():
+    return _uuid.uuid4().hex
+
+
+class User(Base):
+    """A tenant account. All trades / accounts / settings are scoped to a user."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    uuid = Column(String, default=_uuid4, unique=True, index=True)   # for webhook URLs
+    email = Column(String, unique=True, index=True, default="")
+    password_hash = Column(String, default="")
+    role = Column(String, default="USER")             # USER / SUPER_ADMIN
+    status = Column(String, default="ACTIVE")         # ACTIVE / BLOCKED
+    plan_name = Column(String, default="Trial")
+    plan_expiry = Column(DateTime, default=None, nullable=True)
+    session_token = Column(String, default="")        # current device (1-device login)
+    created_at = Column(DateTime, default=lambda: dt.datetime.utcnow())
+
+
+class Plan(Base):
+    """Admin-defined subscription plan (duration-based)."""
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, default="")
+    days = Column(Integer, default=30)
+    price = Column(Float, default=0.0)
+    active = Column(Integer, default=1)
+
+
+class OtpCode(Base):
+    """A short-lived email OTP for registration / password reset."""
+    __tablename__ = "otp_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, index=True, default="")
+    code_hash = Column(String, default="")
+    purpose = Column(String, default="REGISTER")      # REGISTER / RESET
+    expires_at = Column(DateTime, default=None, nullable=True)
+    attempts = Column(Integer, default=0)
+    created_at = Column(DateTime, default=lambda: dt.datetime.utcnow())
+
+
+class EmailTemplate(Base):
+    """Admin-editable subject/body for each system email."""
+    __tablename__ = "email_templates"
+
+    key = Column(String, primary_key=True)            # otp_register / otp_reset / welcome / expiry
+    subject = Column(String, default="")
+    body_html = Column(Text, default="")
+
+
+class UserSetting(Base):
+    """Per-user key/value settings (kill switch, providers, daily limits, etc.)."""
+    __tablename__ = "user_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, default=0)
+    key = Column(String, index=True, default="")
+    value = Column(Text, default="")
 
 # India time, for grouping logs by trading day.
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
@@ -88,6 +152,7 @@ class Trade(Base):
     broker_order_id = Column(String, default="")   # id returned by broker (LIVE)
     broker = Column(String, default="")             # which broker executed it (PAPER/DHAN/ANGEL)
     account_id = Column(Integer, default=0)         # which broker account (0 = Demo/paper)
+    user_id = Column(Integer, index=True, default=0)  # tenant owner
     source = Column(String, default="ALGO")         # ALGO or EXTERNAL (synced from broker)
 
     created_at = Column(DateTime, default=_now)
@@ -103,6 +168,7 @@ class LogEntry(Base):
     day = Column(String, default=_ist_date, index=True)   # India date, for day-wise view
     level = Column(String, default="INFO")         # INFO / WARN / ERROR
     trade_id = Column(Integer, default=0)
+    user_id = Column(Integer, index=True, default=0)   # tenant owner (0 = system/global)
     message = Column(Text, default="")
 
 
@@ -119,6 +185,7 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, default=0)   # tenant owner
     broker = Column(String, default="DHAN")        # DHAN / ANGEL / ZERODHA / ALICE
     client_id = Column(String, default="")
     label = Column(String, default="")             # e.g. "Dhan · 1100000000"
@@ -133,6 +200,7 @@ class SymbolPreset(Base):
     __tablename__ = "symbol_presets"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, default=0)   # tenant owner
     symbol = Column(String, index=True, default="")    # underlying, UPPER (BANKNIFTY…)
     kind = Column(String, default="OPTION")            # OPTION / FUTURES / EQUITY
     lots = Column(Integer, default=0)                  # default lots to pre-fill (0 = keep)
@@ -154,6 +222,7 @@ class Watchlist(Base):
     __tablename__ = "watchlist"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, default=0)   # tenant owner
     symbol = Column(String, default="")
     security_id = Column(String, default="")
     exchange_segment = Column(String, default="")

@@ -59,15 +59,24 @@ _MIGRATIONS = {
         "lock_floor": "REAL DEFAULT 0",
         "lock_step": "REAL DEFAULT 0",
         "lock_amount": "REAL DEFAULT 0",
+        "user_id": "INTEGER DEFAULT 0",
     },
     "symbol_presets": {
         "kind": "TEXT DEFAULT 'OPTION'",
         "lots": "INTEGER DEFAULT 0",
         "lock_step": "REAL DEFAULT 0",
         "lock_amount": "REAL DEFAULT 0",
+        "user_id": "INTEGER DEFAULT 0",
+    },
+    "watchlist": {
+        "user_id": "INTEGER DEFAULT 0",
+    },
+    "accounts": {
+        "user_id": "INTEGER DEFAULT 0",
     },
     "logs": {
         "day": "TEXT DEFAULT ''",
+        "user_id": "INTEGER DEFAULT 0",
     },
 }
 

@@ -29,44 +29,97 @@ from sqlalchemy.orm import Session
 
 import dhan_auth
 import auth
+import emailer
 import angel
 import zerodha
 import aliceblue
 
 import config
 from database import init_db, get_db, SessionLocal
-from models import Trade, LogEntry, Setting, Account, SymbolPreset, Watchlist
+from models import (Trade, LogEntry, Setting, Account, SymbolPreset, Watchlist,
+                    User, Plan, EmailTemplate, UserSetting)
 from schemas import (TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn,
                      SymbolPresetIn, WatchlistIn)
 from engine import engine, level_price
 from instruments import store as instruments
 from market_data import DhanMarketData, demo_market
 from brokers import verify_dhan_credentials, DhanBroker
+from usettings import uget, uset, unum
 
 app = FastAPI(title="Algo Trading SaaS (India)")
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 
+# Paths reachable without a logged-in session.
+_OPEN_PREFIXES = ("/static", "/api/auth/", "/api/webhook/")
+_OPEN_PATHS = {"/login", "/register", "/favicon.ico"}
 
-_OPEN_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico",
-               "/api/dhan/postback", "/api/dhan/callback", "/api/angel/postback",
-               "/api/zerodha/callback", "/api/zerodha/postback",
-               "/api/aliceblue/postback"}
+
+def _is_open(path: str) -> bool:
+    return path in _OPEN_PATHS or path.startswith(_OPEN_PREFIXES)
+
+
+def _plan_expired(u: User) -> bool:
+    return bool(u.plan_expiry) and u.plan_expiry < dt.datetime.utcnow()
 
 
 @app.middleware("http")
-async def require_login(request: Request, call_next):
-    """Gate the whole site behind the dashboard password (if one is set)."""
-    if not auth.auth_required():
-        return await call_next(request)
+async def auth_gate(request: Request, call_next):
+    """Resolve the tenant from the session cookie and enforce 1-device login,
+    blocked accounts, and plan expiry. Stashes the user on request.state."""
     path = request.url.path
-    if path in _OPEN_PATHS or path.startswith("/static"):
+    if path == "/" or path.startswith("/api/") or path in ("/login", "/register"):
+        cookie = request.cookies.get("session", "")
+        uid = auth.cookie_user_id(cookie)
+        user = None
+        if uid is not None:
+            db = SessionLocal()
+            try:
+                u = db.get(User, uid)
+                if u and auth.cookie_valid(cookie, u):
+                    user = u
+                    request.state.user = u
+                    request.state.uid = u.id
+            finally:
+                db.close()
+        # Open (public) routes don't need a session.
+        if _is_open(path):
+            return await call_next(request)
+        # Auth pages are reachable while logged out; if logged in, send to app.
+        if path in ("/login", "/register"):
+            return RedirectResponse(url="/") if user else await call_next(request)
+        # Everything else requires a valid session.
+        if user is None:
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Login required"}, status_code=401)
+            return RedirectResponse(url="/login")
+        if user.status == "BLOCKED":
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Your account has been blocked by the administrator."}, status_code=403)
+            return RedirectResponse(url="/login?blocked=1")
+        # Plan expiry: admins never expire; a few endpoints stay reachable so the
+        # user can see the expired screen / log out.
+        if user.role != "SUPER_ADMIN" and _plan_expired(user):
+            allowed = path in ("/", "/api/me", "/api/auth/logout") or path.startswith("/static")
+            if not allowed:
+                if path.startswith("/api/"):
+                    return JSONResponse({"detail": "PLAN_EXPIRED"}, status_code=402)
         return await call_next(request)
-    if auth.token_ok(request.cookies.get("session", "")):
-        return await call_next(request)
-    if path.startswith("/api/"):
-        return JSONResponse({"detail": "Login required"}, status_code=401)
-    return RedirectResponse(url="/login")
+    return await call_next(request)
+
+
+def current_user(request: Request) -> User:
+    u = getattr(request.state, "user", None)
+    if u is None:
+        raise HTTPException(401, "Login required")
+    return u
+
+
+def require_admin(request: Request) -> User:
+    u = current_user(request)
+    if u.role != "SUPER_ADMIN":
+        raise HTTPException(403, "Admin only")
+    return u
 
 
 @app.get("/login")
@@ -74,21 +127,143 @@ def login_page():
     return FileResponse(os.path.join(FRONTEND_DIR, "login.html"))
 
 
-@app.post("/api/login")
-def login(payload: dict):
-    if auth.password_ok(payload.get("password", "")):
-        resp = JSONResponse({"ok": True})
-        resp.set_cookie("session", auth.make_token(), httponly=True, samesite="lax",
-                        max_age=7 * 86400)
-        return resp
-    raise HTTPException(401, "Wrong password")
+@app.get("/register")
+def register_page():
+    return FileResponse(os.path.join(FRONTEND_DIR, "login.html"))
 
 
-@app.post("/api/logout")
-def logout():
+# ---------- authentication / onboarding ----------
+def _set_session(user: User, db) -> JSONResponse:
+    user.session_token = auth.new_session_token()   # rotate -> kicks other devices
+    db.commit()
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("session", auth.make_cookie(user), httponly=True, samesite="lax",
+                    max_age=30 * 86400)
+    return resp
+
+
+@app.post("/api/auth/register/start")
+def register_start(payload: dict, db: Session = Depends(get_db)):
+    if get_setting(db, "registration_open", "yes") != "yes":
+        raise HTTPException(403, "Public registration is currently closed.")
+    email = str(payload.get("email", "")).strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "Enter a valid email address.")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(400, "An account with this email already exists. Please log in.")
+    code = auth.issue_otp(db, email, "REGISTER")
+    ok, _ = emailer.send_email(db, email, "otp_register", code=code, email=email)
+    # If SMTP isn't set up yet, surface the code so onboarding still works.
+    out = {"ok": True, "emailed": ok}
+    if not ok:
+        out["dev_code"] = code
+    return out
+
+
+@app.post("/api/auth/register/verify")
+def register_verify(payload: dict, db: Session = Depends(get_db)):
+    email = str(payload.get("email", "")).strip().lower()
+    code = str(payload.get("code", "")).strip()
+    pw = str(payload.get("password", ""))
+    if len(pw) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters.")
+    if not auth.verify_otp(db, email, code, "REGISTER"):
+        raise HTTPException(400, "Invalid or expired OTP.")
+    trial_days = int(get_setting(db, "trial_days", str(config.DEFAULT_TRIAL_DAYS)) or config.DEFAULT_TRIAL_DAYS)
+    is_admin = bool(config.SUPER_ADMIN_EMAIL) and email == config.SUPER_ADMIN_EMAIL
+    u = User(email=email, password_hash=auth.hash_password(pw),
+             role="SUPER_ADMIN" if is_admin else "USER",
+             plan_name="Admin" if is_admin else "Trial",
+             plan_expiry=(dt.datetime.utcnow() + dt.timedelta(days=3650 if is_admin else trial_days)))
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+    if is_admin:
+        _claim_legacy_data(db, u.id)   # inherit pre-SaaS trades / accounts / settings
+    emailer.send_email(db, email, "welcome", email=email, plan=u.plan_name,
+                       expiry=u.plan_expiry.strftime("%d %b %Y"))
+    return _set_session(u, db)
+
+
+@app.post("/api/auth/login")
+def login(payload: dict, db: Session = Depends(get_db)):
+    email = str(payload.get("email", "")).strip().lower()
+    pw = str(payload.get("password", ""))
+    u = db.query(User).filter(User.email == email).first()
+    if not u or not auth.verify_password(pw, u.password_hash):
+        raise HTTPException(401, "Wrong email or password.")
+    if u.status == "BLOCKED":
+        raise HTTPException(403, "Your account has been blocked by the administrator.")
+    return _set_session(u, db)        # rotating the token logs out the old device
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, db: Session = Depends(get_db)):
+    u = getattr(request.state, "user", None)
+    if u:
+        u.session_token = ""          # invalidate the cookie everywhere
+        db.commit()
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("session")
     return resp
+
+
+@app.post("/api/auth/forgot/start")
+def forgot_start(payload: dict, db: Session = Depends(get_db)):
+    email = str(payload.get("email", "")).strip().lower()
+    u = db.query(User).filter(User.email == email).first()
+    if not u:
+        return {"ok": True}           # don't reveal whether the email exists
+    code = auth.issue_otp(db, email, "RESET")
+    ok, _ = emailer.send_email(db, email, "otp_reset", code=code, email=email)
+    out = {"ok": True, "emailed": ok}
+    if not ok:
+        out["dev_code"] = code
+    return out
+
+
+@app.post("/api/auth/forgot/verify")
+def forgot_verify(payload: dict, db: Session = Depends(get_db)):
+    email = str(payload.get("email", "")).strip().lower()
+    code = str(payload.get("code", "")).strip()
+    pw = str(payload.get("password", ""))
+    if len(pw) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters.")
+    if not auth.verify_otp(db, email, code, "RESET"):
+        raise HTTPException(400, "Invalid or expired OTP.")
+    u = db.query(User).filter(User.email == email).first()
+    if not u:
+        raise HTTPException(400, "Account not found.")
+    u.password_hash = auth.hash_password(pw)
+    u.session_token = ""              # force re-login everywhere
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/auth/config")
+def auth_config(db: Session = Depends(get_db)):
+    """Public: what the login/register page needs to render."""
+    return {"registration_open": get_setting(db, "registration_open", "yes") == "yes"}
+
+
+def _broker_connected(db, uid) -> bool:
+    return db.query(Account).filter(Account.user_id == uid, Account.connected == 1).count() > 0
+
+
+@app.get("/api/me")
+def me(request: Request, db: Session = Depends(get_db)):
+    u = current_user(request)
+    expired = u.role != "SUPER_ADMIN" and _plan_expired(u)
+    return {
+        "email": u.email, "role": u.role, "uuid": u.uuid,
+        "is_admin": u.role == "SUPER_ADMIN",
+        "demo_allowed": u.role == "SUPER_ADMIN",
+        "plan_name": u.plan_name,
+        "plan_expiry": u.plan_expiry.isoformat() if u.plan_expiry else None,
+        "plan_expired": expired,
+        "broker_connected": _broker_connected(db, u.id),
+        "blocked": u.status == "BLOCKED",
+    }
 
 
 @app.exception_handler(Exception)
@@ -136,10 +311,10 @@ def _ist_day_bounds(date_str):
         return None
 
 
-def _daily_halted(db) -> bool:
-    """True when the daily target/drawdown halt has tripped for today."""
-    return (get_setting(db, "daily_halt", "off") == "on"
-            and get_setting(db, "daily_halt_date", "") == _ist_today())
+def _daily_halted(db, uid) -> bool:
+    """True when the user's daily target/drawdown halt has tripped for today."""
+    return (uget(db, uid, "daily_halt", "off") == "on"
+            and uget(db, uid, "daily_halt_date", "") == _ist_today())
 
 
 def get_trade_creds(db):
@@ -196,23 +371,26 @@ def _account_dict(a):
     }
 
 
-def _account_for_provider(db, provider_value):
-    """provider_value is 'DEMO' or an account id (string). Returns Account or None."""
+def _account_for_provider(db, provider_value, uid=None):
+    """provider_value is 'DEMO' or an account id (string). Returns Account or None.
+    When uid is given, the account must belong to that tenant."""
     if not provider_value or provider_value == "DEMO":
         return None
     try:
-        return db.get(Account, int(provider_value))
+        a = db.get(Account, int(provider_value))
     except Exception:
         return None
+    if a is not None and uid is not None and a.user_id != uid:
+        return None
+    return a
 
 
-def _account_id_for_broker(db, broker):
-    """Pick the account id to attribute an external order to (prefer the active
-    trading account of that broker, else the first such account)."""
-    tp = _account_for_provider(db, get_setting(db, "trade_provider", "DEMO"))
+def _account_id_for_broker(db, broker, uid):
+    """Pick this user's account id to attribute an external order to."""
+    tp = _account_for_provider(db, uget(db, uid, "trade_provider", "DEMO"), uid)
     if tp and tp.broker == broker:
         return tp.id
-    a = db.query(Account).filter(Account.broker == broker).first()
+    a = db.query(Account).filter(Account.broker == broker, Account.user_id == uid).first()
     return a.id if a else 0
 
 
@@ -231,26 +409,43 @@ def _broker_from_account(a):
     return None
 
 
+def _broker_in_use_elsewhere(db, broker, client_id, uid):
+    """Anti-abuse: the same broker Client ID may not be linked to another tenant."""
+    if not client_id:
+        return False
+    return (db.query(Account)
+            .filter(Account.broker == broker, Account.client_id == client_id,
+                    Account.user_id != uid).first()) is not None
+
+
 @app.get("/api/accounts")
-def list_accounts(db: Session = Depends(get_db)):
-    return [_account_dict(a) for a in db.query(Account).order_by(Account.id).all()]
+def list_accounts(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    return [_account_dict(a) for a in
+            db.query(Account).filter(Account.user_id == me.id).order_by(Account.id).all()]
 
 
 @app.post("/api/accounts")
-def save_account(payload: dict, db: Session = Depends(get_db)):
-    """Add or update a broker account."""
+def save_account(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Add or update a broker account (scoped to the tenant)."""
+    me = current_user(request)
     broker = str(payload.get("broker", "")).upper()
     if broker not in ("DHAN", "ANGEL", "ZERODHA", "ALICE"):
         broker = "DHAN"
     aid = payload.get("id")
     a = db.get(Account, int(aid)) if aid else None
+    if a is not None and a.user_id != me.id:
+        raise HTTPException(403, "Not your account.")
+    client_id = str(payload.get("client_id", "")).strip()
+    if client_id and _broker_in_use_elsewhere(db, broker, client_id, me.id):
+        raise HTTPException(400, "This broker Client ID is already linked to another RD Algo "
+                                 "account. Each broker account can be used by one user only.")
     if a is None:
-        a = Account(broker=broker)
+        a = Account(broker=broker, user_id=me.id)
         db.add(a)
-    if payload.get("client_id"):
-        a.client_id = str(payload["client_id"]).strip()
+    if client_id:
+        a.client_id = client_id
     a.broker = broker
-    # store secrets (only overwrite when provided)
     _set_acc_creds(a, app_id=payload.get("app_id"), app_secret=payload.get("app_secret"),
                    api_key=payload.get("api_key"), api_secret=payload.get("api_secret"),
                    totp_secret=payload.get("totp_secret"), pin=payload.get("pin"))
@@ -261,37 +456,56 @@ def save_account(payload: dict, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/accounts/{account_id}")
-def delete_account(account_id: int, db: Session = Depends(get_db)):
+def delete_account(account_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     a = db.get(Account, account_id)
-    if a:
-        # if a provider points at it, fall back to Demo
+    if a and a.user_id == me.id:
         for key in ("data_provider", "trade_provider"):
-            if get_setting(db, key, "DEMO") == str(account_id):
-                set_setting(db, key, "DEMO")
+            if uget(db, me.id, key, "DEMO") == str(account_id):
+                uset(db, me.id, key, "DEMO")
         db.delete(a)
         db.commit()
     return {"ok": True}
 
 
 # ---------- startup ----------
+DEFAULT_PLANS = [("15 Days", 15), ("30 Days", 30), ("90 Days", 90)]
+
+
+def _seed_globals(db):
+    if db.get(Setting, "registration_open") is None:
+        set_setting(db, "registration_open", "yes")
+    if db.get(Setting, "trial_days") is None:
+        set_setting(db, "trial_days", str(config.DEFAULT_TRIAL_DAYS))
+    if db.query(Plan).count() == 0:
+        for name, days in DEFAULT_PLANS:
+            db.add(Plan(name=name, days=days))
+        db.commit()
+
+
+def _claim_legacy_data(db, uid):
+    """Assign pre-SaaS (single-user) rows + settings to the first admin."""
+    from sqlalchemy import text
+    for tbl in ("trades", "accounts", "logs", "symbol_presets", "watchlist"):
+        try:
+            db.execute(text(f"UPDATE {tbl} SET user_id = :u WHERE user_id = 0 OR user_id IS NULL"), {"u": uid})
+        except Exception:
+            pass
+    # Copy known per-user settings from the old global table into UserSetting.
+    for key in ("kill_switch", "default_mode", "data_provider", "trade_provider",
+                "broker_mode", "daily_max_profit", "daily_max_loss",
+                "global_lock_step", "global_lock_amount", "use_same_account"):
+        v = get_setting(db, key, "")
+        if v and not uget(db, uid, key, ""):
+            uset(db, uid, key, v)
+    db.commit()
+
+
 @app.on_event("startup")
 def _startup():
     init_db()
-    # sensible defaults on first run
     db = SessionLocal()
-    if db.get(Setting, "kill_switch") is None:
-        set_setting(db, "kill_switch", "off")
-    if db.get(Setting, "default_mode") is None:
-        set_setting(db, "default_mode", "TEST")
-    if db.get(Setting, "broker_mode") is None:
-        set_setting(db, "broker_mode", "DEMO")   # legacy; kept for back-compat
-    # Data/Trading providers (Demo / Dhan / Angel). Migrate from broker_mode.
-    if db.get(Setting, "data_provider") is None or db.get(Setting, "trade_provider") is None:
-        legacy = get_setting(db, "broker_mode", "DEMO")
-        prov = "DHAN" if legacy == "DHAN" else "DEMO"
-        set_setting(db, "data_provider", prov)
-        set_setting(db, "trade_provider", prov)
-    _migrate_accounts(db)
+    _seed_globals(db)
     db.close()
     instruments.load_async()   # download Dhan's symbol list in the background
     angel.mapper.load_async()  # download Angel One master + build the symbol map
@@ -301,6 +515,7 @@ def _startup():
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
     threading.Thread(target=_fetch_static_ip, daemon=True).start()
+    threading.Thread(target=_purge_loop, daemon=True).start()
 
 
 def _migrate_accounts(db):
@@ -350,27 +565,57 @@ def _fetch_static_ip():
 
 
 def _broker_monitor_loop():
-    """Live broker: refresh balance + connection health, and sync any positions
-    placed externally on the broker terminal into our 'Live Trade' list."""
+    """Per-user live broker: refresh balance + health and sync external orders for
+    each tenant's selected trading account."""
     while True:
         time.sleep(12)
         try:
             db = SessionLocal()
-            acc = _account_for_provider(db, get_setting(db, "trade_provider", "DEMO"))
-            b = _broker_from_account(acc)
-            if b is not None:
+            for u in db.query(User).filter(User.status == "ACTIVE").all():
+                if u.role != "SUPER_ADMIN" and _plan_expired(u):
+                    continue
+                acc = _account_for_provider(db, uget(db, u.id, "trade_provider", "DEMO"), u.id)
+                b = _broker_from_account(acc)
+                if b is None:
+                    continue
                 ok, bal = b.fund_limit()
                 if ok:
-                    set_setting(db, "broker_balance", str(bal))
-                    set_setting(db, "broker_balance_provider", str(acc.id))
-                    set_setting(db, "broker_health", "ok")
-                    set_setting(db, "broker_health_time", dt.datetime.utcnow().isoformat())
+                    uset(db, u.id, "broker_balance", str(bal))
+                    uset(db, u.id, "broker_balance_provider", str(acc.id))
+                    uset(db, u.id, "broker_health", "ok")
                 else:
-                    set_setting(db, "broker_health", "error")
+                    uset(db, u.id, "broker_health", "error")
                 try:
-                    _sync_external_orders(db, b.get_orders(), acc.broker, acc.id)
+                    _sync_external_orders(db, b.get_orders(), acc.broker, acc.id, u.id)
                 except Exception:
                     pass
+            db.commit()
+            db.close()
+        except Exception:
+            pass
+
+
+def _purge_loop():
+    """Daily: permanently strip broker keys/tokens, custom symbols and webhooks of
+    accounts that have been expired for PURGE_AFTER_DAYS or more."""
+    while True:
+        time.sleep(6 * 3600)        # check 4x/day
+        try:
+            db = SessionLocal()
+            cutoff = dt.datetime.utcnow() - dt.timedelta(days=config.PURGE_AFTER_DAYS)
+            for u in db.query(User).filter(User.role != "SUPER_ADMIN").all():
+                if not u.plan_expiry or u.plan_expiry > cutoff:
+                    continue
+                if uget(db, u.id, "purged", "") == "yes":
+                    continue
+                db.query(Account).filter(Account.user_id == u.id).delete()
+                db.query(SymbolPreset).filter(SymbolPreset.user_id == u.id).delete()
+                db.query(Watchlist).filter(Watchlist.user_id == u.id).delete()
+                u.uuid = __import__("uuid").uuid4().hex     # rotate webhook URL
+                u.session_token = ""
+                uset(db, u.id, "purged", "yes")
+                db.add(LogEntry(message=f"Auto-purged broker data for expired user {u.email}",
+                                level="WARN", user_id=u.id))
             db.commit()
             db.close()
         except Exception:
@@ -385,10 +630,8 @@ _EXT_STATUS_MAP = {
 }
 
 
-def _sync_external_orders(db, orders, broker="DHAN", account_id=0):
-    """Mirror the broker's ENTIRE order book into our system — every order placed
-    on the broker terminal (filled, pending, rejected, cancelled) shows up here,
-    and its status is kept up to date."""
+def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
+    """Mirror the broker's order book into this tenant's system."""
     for o in orders or []:
         oid = str(o.get("orderId", ""))
         if not oid:
@@ -401,9 +644,9 @@ def _sync_external_orders(db, orders, broker="DHAN", account_id=0):
         price = float(o.get("price") or 0)
         reason = o.get("omsErrorDescription") or o.get("text") or ""
 
-        existing = db.query(Trade).filter(Trade.broker_order_id == oid).first()
+        existing = db.query(Trade).filter(Trade.broker_order_id == oid,
+                                          Trade.user_id == user_id).first()
         if existing:
-            # Keep externally-synced orders in step with the broker.
             if existing.source == "EXTERNAL" and existing.status not in ("CLOSED",) \
                     and existing.status != mapped:
                 old = existing.status
@@ -413,11 +656,10 @@ def _sync_external_orders(db, orders, broker="DHAN", account_id=0):
                 if mapped == "REJECTED":
                     existing.exit_reason = "REJECTED"
                 db.add(LogEntry(message=f"External order {existing.symbol} status: {old} -> {mapped}"
-                                        + (f". Reason: {reason}" if reason else ""),
+                                        + (f". Reason: {reason}" if reason else ""), user_id=user_id,
                                 level="ERROR" if mapped == "REJECTED" else "INFO"))
             continue
 
-        # New external order we've not seen before.
         sec = str(o.get("securityId", ""))
         sym = o.get("tradingSymbol") or sec
         side = (o.get("transactionType") or "BUY").upper()
@@ -431,11 +673,11 @@ def _sync_external_orders(db, orders, broker="DHAN", account_id=0):
         t = Trade(symbol=sym, name=sym, security_id=sec, exchange_segment=seg, instrument_type=itype,
                   side=side, quantity=qty, lot_size=1, mode="LIVE", status=mapped,
                   entry_fill_price=(avg or 0) if mapped == "OPEN" else 0, entry_price=price,
-                  broker=broker, account_id=account_id, source="EXTERNAL", broker_order_id=oid,
-                  exit_reason="REJECTED" if mapped == "REJECTED" else "")
+                  broker=broker, account_id=account_id, user_id=user_id, source="EXTERNAL",
+                  broker_order_id=oid, exit_reason="REJECTED" if mapped == "REJECTED" else "")
         db.add(t)
         db.add(LogEntry(message=f"Synced external order: {sym} {side} x{qty} [{raw}]"
-                                + (f". Reason: {reason}" if reason else ""),
+                                + (f". Reason: {reason}" if reason else ""), user_id=user_id,
                         level="ERROR" if mapped == "REJECTED" else "INFO"))
 
 
@@ -484,9 +726,17 @@ def _auto_renew_loop():
 
 
 # ---------- trades ----------
+def _owned_trade(db, trade_id, uid):
+    t = db.get(Trade, trade_id)
+    if not t or t.user_id != uid:
+        raise HTTPException(404, "Trade not found")
+    return t
+
+
 @app.get("/api/trades", response_model=list[TradeOut])
-def list_trades(date: str = "", db: Session = Depends(get_db)):
-    q = db.query(Trade)
+def list_trades(request: Request, date: str = "", db: Session = Depends(get_db)):
+    me = current_user(request)
+    q = db.query(Trade).filter(Trade.user_id == me.id)
     if date:
         b = _ist_day_bounds(date)
         if b:
@@ -495,14 +745,18 @@ def list_trades(date: str = "", db: Session = Depends(get_db)):
 
 
 @app.post("/api/trades", response_model=TradeOut)
-def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
+def create_trade(payload: TradeCreate, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    # Trial users with no broker connected can't trade.
+    if me.role != "SUPER_ADMIN" and not _broker_connected(db, me.id):
+        raise HTTPException(400, "Please connect and authenticate your broker to start trading.")
     # Safety: block creating LIVE trades while the kill switch is on.
-    if payload.mode == "LIVE" and get_setting(db, "kill_switch", "off") == "on":
+    if payload.mode == "LIVE" and uget(db, me.id, "kill_switch", "off") == "on":
         raise HTTPException(400, "Kill switch is ON. Turn it off to place LIVE trades.")
     # Block new orders once the daily limit halt has tripped for today.
-    if _daily_halted(db):
+    if _daily_halted(db, me.id):
         raise HTTPException(400, "Daily limit hit — trading is halted for today. "
-                                 + (get_setting(db, "daily_halt_reason", "") or ""))
+                                 + (uget(db, me.id, "daily_halt_reason", "") or ""))
     # A real symbol must be picked (we need its Security ID to fetch the LTP).
     if not payload.security_id:
         raise HTTPException(400, "Please search and select a symbol from the list "
@@ -512,6 +766,7 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
     targets = [{"points": float(x["points"]), "qty": int(x["qty"]), "hit": False}
                for x in raw_targets if float(x.get("points", 0)) > 0 and int(x.get("qty", 0)) > 0]
     t = Trade(**data)
+    t.user_id = me.id
     t.name = data.get("name") or data["symbol"]
     t.targets_json = json.dumps(targets) if targets else ""
     # Provisional SL/target prices for display before entry (final ones computed at fill).
@@ -523,24 +778,22 @@ def create_trade(payload: TradeCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(t)
     # Detailed creation log with the target broker / account + entry style.
-    tp = _account_for_provider(db, get_setting(db, "trade_provider", "DEMO"))
+    tp = _account_for_provider(db, uget(db, me.id, "trade_provider", "DEMO"), me.id)
     broker_txt = "Demo/Paper" if (t.mode == "TEST" or tp is None) else (tp.label or _label(tp.broker, tp.client_id))
     entry_txt = {"MARKET": "market", "LIMIT": f"limit @{t.entry_price}",
                  "SCHEDULED": f"scheduled {t.scheduled_time} IST",
                  "TRIGGER": f"trigger {t.trigger_dir or 'auto'} @{t.trigger_price}"}.get(t.entry_type, t.entry_type)
     db.add(LogEntry(message=f"Trade #{t.id} created: {t.side} {t.symbol} x{t.quantity} "
-                            f"[{t.mode}] entry={entry_txt} via {broker_txt}", trade_id=t.id))
+                            f"[{t.mode}] entry={entry_txt} via {broker_txt}", trade_id=t.id, user_id=me.id))
     db.commit()
     return t
 
 
 @app.post("/api/trades/{trade_id}/modify", response_model=TradeOut)
-def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)):
-    """Change stop-loss / targets on an OPEN trade, using DIRECT prices.
-    Supports editing or adding multiple (scale-out) targets here too."""
-    t = db.get(Trade, trade_id)
-    if not t:
-        raise HTTPException(404, "Trade not found")
+def modify_trade(trade_id: int, payload: ModifyIn, request: Request, db: Session = Depends(get_db)):
+    """Change stop-loss / targets / risk on an OPEN or PENDING trade."""
+    me = current_user(request)
+    t = _owned_trade(db, trade_id, me.id)
     if t.status not in ("OPEN", "PENDING"):
         raise HTTPException(400, "Only open or pending trades can be modified.")
 
@@ -611,18 +864,17 @@ def modify_trade(trade_id: int, payload: ModifyIn, db: Session = Depends(get_db)
             changes.append(f"Targets: now {new_targets or '-'}")
 
     msg = f"Trade #{t.id} modified: " + ("; ".join(changes) if changes else "no change")
-    db.add(LogEntry(message=msg, level="INFO", trade_id=t.id))
+    db.add(LogEntry(message=msg, level="INFO", trade_id=t.id, user_id=me.id))
     db.commit()
     db.refresh(t)
     return t
 
 
 @app.post("/api/trades/{trade_id}/close", response_model=TradeOut)
-def close_trade(trade_id: int, db: Session = Depends(get_db)):
+def close_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
     """Manually exit an OPEN trade at the current price."""
-    t = db.get(Trade, trade_id)
-    if not t:
-        raise HTTPException(404, "Trade not found")
+    me = current_user(request)
+    t = _owned_trade(db, trade_id, me.id)
     if t.status != "OPEN":
         raise HTTPException(400, "Only OPEN trades can be closed.")
     price = t.last_price or t.entry_fill_price
@@ -634,32 +886,30 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
     t.status = "CLOSED"
     t.exit_reason = "MANUAL"
     t.pnl = round(t.realized_pnl, 2)
-    db.add(LogEntry(message=f"Manual close {t.symbol} x{remaining} @ {price} P&L={t.pnl}", trade_id=t.id))
+    db.add(LogEntry(message=f"Manual close {t.symbol} x{remaining} @ {price} P&L={t.pnl}", trade_id=t.id, user_id=me.id))
     db.commit()
     db.refresh(t)
     return t
 
 
 @app.post("/api/trades/{trade_id}/cancel", response_model=TradeOut)
-def cancel_trade(trade_id: int, db: Session = Depends(get_db)):
-    t = db.get(Trade, trade_id)
-    if not t:
-        raise HTTPException(404, "Trade not found")
+def cancel_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    t = _owned_trade(db, trade_id, me.id)
     if t.status != "PENDING":
         raise HTTPException(400, "Only PENDING trades can be cancelled.")
     t.status = "CANCELLED"
     t.exit_reason = "MANUAL"
-    db.add(LogEntry(message=f"Trade #{t.id} cancelled (was pending): {t.symbol}", trade_id=t.id))
+    db.add(LogEntry(message=f"Trade #{t.id} cancelled (was pending): {t.symbol}", trade_id=t.id, user_id=me.id))
     db.commit()
     db.refresh(t)
     return t
 
 
 @app.delete("/api/trades/{trade_id}")
-def delete_trade(trade_id: int, db: Session = Depends(get_db)):
-    t = db.get(Trade, trade_id)
-    if not t:
-        raise HTTPException(404, "Trade not found")
+def delete_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    t = _owned_trade(db, trade_id, me.id)
     db.delete(t)
     db.commit()
     return {"ok": True}
@@ -697,8 +947,9 @@ def futures(underlying: str):
 
 
 @app.post("/api/ltp")
-def ltp(payload: dict, db: Session = Depends(get_db)):
+def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
     """Fetch live LTP for a list of instruments (used to fill the option chain)."""
+    me = current_user(request)
     items = payload.get("items", [])
     by_seg = {}
     for it in items:
@@ -707,7 +958,7 @@ def ltp(payload: dict, db: Session = Depends(get_db)):
         if seg and sid:
             by_seg.setdefault(seg, []).append(sid)
 
-    acc = _account_for_provider(db, get_setting(db, "data_provider", "DEMO"))
+    acc = _account_for_provider(db, uget(db, me.id, "data_provider", "DEMO"), me.id)
     if acc is None:     # DEMO
         res = demo_market.get_ltp_batch(by_seg)
         return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()}}
@@ -746,9 +997,10 @@ def demo_direction(payload: dict):
 
 
 @app.post("/api/demo/reset")
-def demo_reset(db: Session = Depends(get_db)):
+def demo_reset(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     demo_market.reset()
-    db.add(LogEntry(message="Demo prices reset", level="INFO"))
+    db.add(LogEntry(message="Demo prices reset", level="INFO", user_id=me.id))
     db.commit()
     return {"ok": True}
 
@@ -804,15 +1056,13 @@ def _metrics(trades):
     }
 
 
-@app.get("/api/summary")
-def summary(broker: str = "ALL", date: str = "", db: Session = Depends(get_db)):
-    q = db.query(Trade)
+def _build_summary(db, uid, broker="ALL", date=""):
+    q = db.query(Trade).filter(Trade.user_id == uid)
     if date:
         b = _ist_day_bounds(date)
         if b:
             q = q.filter(Trade.created_at >= b[0], Trade.created_at < b[1])
     trades = q.all()
-    # Group P&L per ACCOUNT (0 = Demo/paper) — accounts are not merged by broker.
     groups = {}
     for t in trades:
         groups.setdefault(t.account_id or 0, []).append(t)
@@ -826,44 +1076,38 @@ def summary(broker: str = "ALL", date: str = "", db: Session = Depends(get_db)):
             selected = trades
     pnl = _metrics(selected)
     breakdown = [{"key": "0", "label": "Demo / Paper", "net": _metrics(groups.get(0, []))["net"]}]
-    for a in db.query(Account).order_by(Account.id).all():
+    for a in db.query(Account).filter(Account.user_id == uid).order_by(Account.id).all():
         breakdown.append({"key": str(a.id), "label": a.label or _label(a.broker, a.client_id),
                           "net": _metrics(groups.get(a.id, []))["net"]})
-    # The broker-lock / connection alerts must reflect the WHOLE system, not just
-    # the selected day, so compute live activity independently of the date filter.
-    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
-
-    data_provider = get_setting(db, "data_provider", "DEMO")
-    trade_provider = get_setting(db, "trade_provider", "DEMO")
-    data_acc = _account_for_provider(db, data_provider)
-    trade_acc = _account_for_provider(db, trade_provider)
+    active = db.query(Trade).filter(Trade.user_id == uid,
+                                    Trade.status.in_(["OPEN", "PENDING"])).count()
+    data_provider = uget(db, uid, "data_provider", "DEMO")
+    trade_provider = uget(db, uid, "trade_provider", "DEMO")
+    data_acc = _account_for_provider(db, data_provider, uid)
+    trade_acc = _account_for_provider(db, trade_provider, uid)
     data_name = "Demo" if data_acc is None else (data_acc.label or _label(data_acc.broker, data_acc.client_id))
     broker_name = "Demo" if trade_acc is None else (trade_acc.label or _label(trade_acc.broker, trade_acc.client_id))
     trade_connected = trade_acc is not None and bool(trade_acc.connected)
-    # Show the balance ONLY for the connected, currently-selected trading account.
     balance = None
     if trade_acc is not None and trade_connected \
-            and get_setting(db, "broker_balance_provider", "") == str(trade_acc.id):
-        bal = get_setting(db, "broker_balance", "")
+            and uget(db, uid, "broker_balance_provider", "") == str(trade_acc.id):
+        bal = uget(db, uid, "broker_balance", "")
         balance = float(bal) if bal else None
-
-    # Connection-lost warning while trades are running.
     broker_alert, alert_msg = False, ""
     if trade_acc is not None and active > 0:
         if not trade_connected:
             broker_alert = True
             alert_msg = f"{broker_name} is NOT connected but trades are running — reconnect on the Broker tab."
-        elif get_setting(db, "broker_health", "") == "error":
+        elif uget(db, uid, "broker_health", "") == "error":
             broker_alert = True
             alert_msg = f"Lost connection to {broker_name} — exits may not fire. Check the Broker tab."
-
     return {
         "total_trades": len(trades),
         "pending": pnl["pending"], "open": pnl["open"], "closed": pnl["closed"],
         "open_pnl": pnl["open_pnl"], "closed_pnl": pnl["closed_pnl"], "total_pnl": pnl["net"],
         "pnl": pnl, "pnl_filter": flt, "pnl_breakdown": breakdown, "date": date,
-        "kill_switch": get_setting(db, "kill_switch", "off"),
-        "md_status": get_setting(db, "md_status", ""),
+        "kill_switch": uget(db, uid, "kill_switch", "off"),
+        "md_status": uget(db, uid, "md_status", ""),
         "instruments": instruments.status(),
         "angel_map": angel.mapper.status(),
         "zerodha_map": zerodha.mapper.status(),
@@ -872,18 +1116,25 @@ def summary(broker: str = "ALL", date: str = "", db: Session = Depends(get_db)):
         "data_provider": data_provider, "trade_provider": trade_provider,
         "data_name": data_name, "broker_name": broker_name, "balance": balance,
         "broker_alert": broker_alert, "alert_msg": alert_msg,
-        "active_locked": active > 0,     # broker switch is locked while trades run
-        "daily_halt": _daily_halted(db),
-        "daily_halt_reason": get_setting(db, "daily_halt_reason", ""),
+        "active_locked": active > 0,
+        "daily_halt": _daily_halted(db, uid),
+        "daily_halt_reason": uget(db, uid, "daily_halt_reason", ""),
     }
+
+
+@app.get("/api/summary")
+def summary(request: Request, broker: str = "ALL", date: str = "", db: Session = Depends(get_db)):
+    me = current_user(request)
+    return _build_summary(db, me.id, broker, date)
 
 
 # ---------- logs ----------
 @app.get("/api/logs")
-def list_logs(date: str = "", level: str = "", page: int = 1, per_page: int = 25,
+def list_logs(request: Request, date: str = "", level: str = "", page: int = 1, per_page: int = 25,
               db: Session = Depends(get_db)):
     import math
-    q = db.query(LogEntry)
+    me = current_user(request)
+    q = db.query(LogEntry).filter(LogEntry.user_id == me.id)
     if date:
         q = q.filter(LogEntry.day == date)
     if level:
@@ -893,7 +1144,7 @@ def list_logs(date: str = "", level: str = "", page: int = 1, per_page: int = 25
     per_page = min(max(per_page, 1), 200)
     rows = (q.order_by(LogEntry.id.desc())
             .offset((page - 1) * per_page).limit(per_page).all())
-    days = [d[0] for d in db.query(LogEntry.day).distinct()
+    days = [d[0] for d in db.query(LogEntry.day).filter(LogEntry.user_id == me.id).distinct()
             .order_by(LogEntry.day.desc()).all() if d[0]]
     return {
         "logs": [{"id": r.id, "time": r.created_at.isoformat(), "level": r.level,
@@ -903,68 +1154,61 @@ def list_logs(date: str = "", level: str = "", page: int = 1, per_page: int = 25
     }
 
 
-# ---------- settings (kill switch etc.) ----------
-def _num_setting(db, key):
-    try:
-        v = get_setting(db, key, "")
-        return float(v) if v not in ("", None) else 0.0
-    except Exception:
-        return 0.0
-
-
+# ---------- settings (kill switch etc.) — per user ----------
 @app.get("/api/settings")
-def get_settings(db: Session = Depends(get_db)):
+def get_settings(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     return {
-        "kill_switch": get_setting(db, "kill_switch", "off"),
-        "default_mode": get_setting(db, "default_mode", "TEST"),
-        "daily_max_profit": _num_setting(db, "daily_max_profit"),
-        "daily_max_loss": _num_setting(db, "daily_max_loss"),
-        "global_lock_step": _num_setting(db, "global_lock_step"),
-        "global_lock_amount": _num_setting(db, "global_lock_amount"),
-        "daily_halt": _daily_halted(db),
-        "daily_halt_reason": get_setting(db, "daily_halt_reason", ""),
+        "kill_switch": uget(db, me.id, "kill_switch", "off"),
+        "default_mode": uget(db, me.id, "default_mode", "TEST"),
+        "daily_max_profit": unum(db, me.id, "daily_max_profit"),
+        "daily_max_loss": unum(db, me.id, "daily_max_loss"),
+        "global_lock_step": unum(db, me.id, "global_lock_step"),
+        "global_lock_amount": unum(db, me.id, "global_lock_amount"),
+        "daily_halt": _daily_halted(db, me.id),
+        "daily_halt_reason": uget(db, me.id, "daily_halt_reason", ""),
     }
 
 
 @app.post("/api/settings")
-def update_settings(payload: SettingsIn, db: Session = Depends(get_db)):
+def update_settings(payload: SettingsIn, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     changed = []
     if payload.kill_switch is not None:
-        set_setting(db, "kill_switch", "on" if payload.kill_switch else "off")
+        uset(db, me.id, "kill_switch", "on" if payload.kill_switch else "off")
         db.add(LogEntry(message=f"Kill switch set to "
-                                f"{'ON' if payload.kill_switch else 'OFF'}", level="WARN"))
-        db.commit()
+                                f"{'ON' if payload.kill_switch else 'OFF'}", level="WARN", user_id=me.id))
     if payload.default_mode in ("TEST", "LIVE"):
-        set_setting(db, "default_mode", payload.default_mode)
+        uset(db, me.id, "default_mode", payload.default_mode)
     if payload.daily_max_profit is not None:
-        set_setting(db, "daily_max_profit", str(max(0.0, float(payload.daily_max_profit))))
+        uset(db, me.id, "daily_max_profit", str(max(0.0, float(payload.daily_max_profit))))
         changed.append(f"daily max profit ₹{max(0.0, float(payload.daily_max_profit)):.0f}")
     if payload.daily_max_loss is not None:
-        set_setting(db, "daily_max_loss", str(max(0.0, float(payload.daily_max_loss))))
+        uset(db, me.id, "daily_max_loss", str(max(0.0, float(payload.daily_max_loss))))
         changed.append(f"daily max loss ₹{max(0.0, float(payload.daily_max_loss)):.0f}")
     if payload.global_lock_step is not None:
-        set_setting(db, "global_lock_step", str(max(0.0, float(payload.global_lock_step))))
+        uset(db, me.id, "global_lock_step", str(max(0.0, float(payload.global_lock_step))))
     if payload.global_lock_amount is not None:
-        set_setting(db, "global_lock_amount", str(max(0.0, float(payload.global_lock_amount))))
+        uset(db, me.id, "global_lock_amount", str(max(0.0, float(payload.global_lock_amount))))
     if payload.global_lock_step is not None or payload.global_lock_amount is not None:
-        changed.append(f"account profit-lock every ₹{_num_setting(db, 'global_lock_step'):.0f} "
-                       f"secure ₹{_num_setting(db, 'global_lock_amount'):.0f}")
+        changed.append(f"account profit-lock every ₹{unum(db, me.id, 'global_lock_step'):.0f} "
+                       f"secure ₹{unum(db, me.id, 'global_lock_amount'):.0f}")
     if changed:
-        db.add(LogEntry(message="Settings updated: " + ", ".join(changed), level="INFO"))
-        db.commit()
-    return get_settings(db)
+        db.add(LogEntry(message="Settings updated: " + ", ".join(changed), level="INFO", user_id=me.id))
+    db.commit()
+    return get_settings(request, db)
 
 
 @app.post("/api/settings/reset_halt")
-def reset_daily_halt(db: Session = Depends(get_db)):
-    """Manually clear the daily limit halt (e.g. to resume trading deliberately)."""
-    set_setting(db, "daily_halt", "off")
-    set_setting(db, "daily_halt_date", "")
-    set_setting(db, "daily_halt_reason", "")
-    set_setting(db, "global_lock_floor", "0")
-    db.add(LogEntry(message="Daily limit halt manually cleared.", level="WARN"))
+def reset_daily_halt(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    uset(db, me.id, "daily_halt", "off")
+    uset(db, me.id, "daily_halt_date", "")
+    uset(db, me.id, "daily_halt_reason", "")
+    uset(db, me.id, "global_lock_floor", "0")
+    db.add(LogEntry(message="Daily limit halt manually cleared.", level="WARN", user_id=me.id))
     db.commit()
-    return get_settings(db)
+    return get_settings(request, db)
 
 
 # ---------- symbol presets ----------
@@ -983,24 +1227,28 @@ def _preset_dict(p):
 
 
 @app.get("/api/presets")
-def list_presets(db: Session = Depends(get_db)):
-    return [_preset_dict(p) for p in db.query(SymbolPreset).order_by(SymbolPreset.symbol).all()]
+def list_presets(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    return [_preset_dict(p) for p in db.query(SymbolPreset)
+            .filter(SymbolPreset.user_id == me.id).order_by(SymbolPreset.symbol).all()]
 
 
 @app.post("/api/presets")
-def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
+def save_preset(payload: SymbolPresetIn, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     sym = (payload.symbol or "").strip().upper()
     kind = str(payload.kind or "OPTION").upper()
     if kind not in ("OPTION", "FUTURES", "EQUITY"):
         kind = "OPTION"
     if not sym:
         raise HTTPException(400, "Enter a symbol (underlying) for the preset.")
-    # One preset per (symbol, type) — saving for the same symbol+type updates it.
+    # One preset per (symbol, type) per user — saving the same one updates it.
     p = (db.query(SymbolPreset)
-         .filter(SymbolPreset.symbol == sym, SymbolPreset.kind == kind).first())
+         .filter(SymbolPreset.user_id == me.id, SymbolPreset.symbol == sym,
+                 SymbolPreset.kind == kind).first())
     is_new = p is None
     if p is None:
-        p = SymbolPreset(symbol=sym, kind=kind)
+        p = SymbolPreset(symbol=sym, kind=kind, user_id=me.id)
         db.add(p)
     p.kind = kind
     p.lots = max(0, int(payload.lots or 0))
@@ -1016,18 +1264,19 @@ def save_preset(payload: SymbolPresetIn, db: Session = Depends(get_db)):
     p.lock_amount = max(0.0, float(payload.lock_amount))
     db.commit()
     db.refresh(p)
-    db.add(LogEntry(message=f"Symbol preset {'created' if is_new else 'updated'}: {sym} [{kind}]", level="INFO"))
+    db.add(LogEntry(message=f"Symbol preset {'created' if is_new else 'updated'}: {sym} [{kind}]", level="INFO", user_id=me.id))
     db.commit()
     return _preset_dict(p)
 
 
 @app.delete("/api/presets/{preset_id}")
-def delete_preset(preset_id: int, db: Session = Depends(get_db)):
+def delete_preset(preset_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     p = db.get(SymbolPreset, preset_id)
-    if p:
+    if p and p.user_id == me.id:
         sym, kind = p.symbol, p.kind
         db.delete(p)
-        db.add(LogEntry(message=f"Symbol preset deleted: {sym} [{kind}]", level="INFO"))
+        db.add(LogEntry(message=f"Symbol preset deleted: {sym} [{kind}]", level="INFO", user_id=me.id))
         db.commit()
     return {"ok": True}
 
@@ -1040,28 +1289,29 @@ def _watch_dict(w):
 
 
 @app.get("/api/watchlist")
-def list_watchlist(db: Session = Depends(get_db)):
-    return [_watch_dict(w) for w in db.query(Watchlist).order_by(Watchlist.id).all()]
+def list_watchlist(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    return [_watch_dict(w) for w in db.query(Watchlist)
+            .filter(Watchlist.user_id == me.id).order_by(Watchlist.id).all()]
 
 
 @app.post("/api/watchlist")
-def add_watchlist(payload: WatchlistIn, db: Session = Depends(get_db)):
-    # Two kinds of entry: a specific contract (has security_id) or a whole
-    # underlying / symbol (no security_id — loads the chain/list on tap).
+def add_watchlist(payload: WatchlistIn, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     if not payload.security_id and not (payload.underlying or payload.symbol):
         raise HTTPException(400, "Select a symbol first, then add it to the watchlist.")
     if payload.security_id:
         exists = (db.query(Watchlist)
-                  .filter(Watchlist.security_id == payload.security_id,
+                  .filter(Watchlist.user_id == me.id, Watchlist.security_id == payload.security_id,
                           Watchlist.exchange_segment == payload.exchange_segment).first())
     else:
         exists = (db.query(Watchlist)
-                  .filter(Watchlist.security_id == "",
+                  .filter(Watchlist.user_id == me.id, Watchlist.security_id == "",
                           Watchlist.underlying == (payload.underlying or payload.symbol),
                           Watchlist.instrument_type == payload.instrument_type).first())
     if exists:
         return _watch_dict(exists)
-    w = Watchlist(symbol=payload.symbol, security_id=payload.security_id,
+    w = Watchlist(user_id=me.id, symbol=payload.symbol, security_id=payload.security_id,
                   exchange_segment=payload.exchange_segment,
                   instrument_type=payload.instrument_type,
                   underlying=(payload.underlying or payload.symbol),
@@ -1073,9 +1323,10 @@ def add_watchlist(payload: WatchlistIn, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/watchlist/{item_id}")
-def delete_watchlist(item_id: int, db: Session = Depends(get_db)):
+def delete_watchlist(item_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
     w = db.get(Watchlist, item_id)
-    if w:
+    if w and w.user_id == me.id:
         db.delete(w)
         db.commit()
     return {"ok": True}
@@ -1084,47 +1335,84 @@ def delete_watchlist(item_id: int, db: Session = Depends(get_db)):
 # ---------- broker info ----------
 @app.get("/api/broker")
 def get_broker(request: Request, db: Session = Depends(get_db)):
-    data_provider = get_setting(db, "data_provider", "DEMO")
-    trade_provider = get_setting(db, "trade_provider", "DEMO")
-    data_acc = _account_for_provider(db, data_provider)
-    trade_acc = _account_for_provider(db, trade_provider)
+    me = current_user(request)
+    data_provider = uget(db, me.id, "data_provider", "DEMO")
+    trade_provider = uget(db, me.id, "trade_provider", "DEMO")
+    data_acc = _account_for_provider(db, data_provider, me.id)
+    trade_acc = _account_for_provider(db, trade_provider, me.id)
     data_conn = data_acc is None or bool(data_acc.connected)
     trade_conn = trade_acc is None or bool(trade_acc.connected)
     base = str(request.base_url).rstrip("/")
+    hook = f"{base}/api/webhook/{me.uuid}"
     return {
         "data_provider": data_provider,
         "trade_provider": trade_provider,
-        "accounts": [_account_dict(a) for a in db.query(Account).order_by(Account.id).all()],
+        "accounts": [_account_dict(a) for a in db.query(Account)
+                     .filter(Account.user_id == me.id).order_by(Account.id).all()],
         "data_connected": data_conn,
         "trade_connected": trade_conn,
         "connected": data_conn and trade_conn,
+        "demo_allowed": me.role == "SUPER_ADMIN",
         "redirect_url": base + "/api/dhan/callback",
-        "postback_url": base + "/api/dhan/postback",
+        "postback_url": f"{hook}/dhan",
         "angel_redirect_url": base + "/api/angel/callback",
-        "angel_postback_url": base + "/api/angel/postback",
+        "angel_postback_url": f"{hook}/angel",
         "zerodha_redirect_url": base + "/api/zerodha/callback",
-        "zerodha_postback_url": base + "/api/zerodha/postback",
-        "aliceblue_postback_url": base + "/api/aliceblue/postback",
+        "zerodha_postback_url": f"{hook}/zerodha",
+        "aliceblue_postback_url": f"{hook}/aliceblue",
         "static_ip": get_setting(db, "static_ip", ""),
     }
 
 
+# ---------- per-user webhooks (broker order postbacks; no session needed) ----------
+@app.post("/api/webhook/{user_uuid}/{broker}")
+async def user_webhook(user_uuid: str, broker: str, request: Request, db: Session = Depends(get_db)):
+    u = db.query(User).filter(User.uuid == user_uuid).first()
+    if not u:
+        return {"ok": False}
+    broker = broker.upper()
+    bmap = {"DHAN": "DHAN", "ANGEL": "ANGEL", "ZERODHA": "ZERODHA", "ALICEBLUE": "ALICE", "ALICE": "ALICE"}
+    bk = bmap.get(broker)
+    if not bk:
+        return {"ok": False}
+    try:
+        payload = await request.json()
+        orders = payload if isinstance(payload, list) else [payload]
+        norm = {"ANGEL": angel.normalize_order, "ZERODHA": zerodha.normalize_order,
+                "ALICE": aliceblue.normalize_order}.get(bk)
+        rows = [norm(o) for o in orders] if norm else orders
+        _sync_external_orders(db, rows, bk, _account_id_for_broker(db, bk, u.id), u.id)
+        db.commit()
+    except Exception as e:
+        db.add(LogEntry(message=f"{bk} webhook error: {e}", level="ERROR", user_id=u.id))
+        db.commit()
+    return {"ok": True}
+
+
+def _my_account(db, account_id, uid, broker=None):
+    a = db.get(Account, int(account_id or 0))
+    if a is None or a.user_id != uid or (broker and a.broker != broker):
+        raise HTTPException(400, "Account not found.")
+    return a
+
+
 # ---------- Zerodha (Kite Connect) login ----------
 @app.get("/api/zerodha/login")
-def zerodha_login(account_id: int = 0, db: Session = Depends(get_db)):
-    a = db.get(Account, account_id)
-    if a is None or a.broker != "ZERODHA":
-        raise HTTPException(400, "Zerodha account not found.")
+def zerodha_login(request: Request, account_id: int = 0, db: Session = Depends(get_db)):
+    me = current_user(request)
+    a = _my_account(db, account_id, me.id, "ZERODHA")
     api_key = _acc_creds(a).get("api_key", "")
     if not api_key:
         raise HTTPException(400, "Enter the Zerodha API Key & Secret first.")
-    set_setting(db, "pending_login_account", str(a.id))
+    uset(db, me.id, "pending_login_account", str(a.id))
+    db.commit()
     return {"login_url": zerodha.login_url(api_key)}
 
 
 @app.get("/api/zerodha/callback")
-def zerodha_callback(request_token: str = "", db: Session = Depends(get_db)):
-    a = _account_for_provider(db, get_setting(db, "pending_login_account", ""))
+def zerodha_callback(request: Request, request_token: str = "", db: Session = Depends(get_db)):
+    me = current_user(request)
+    a = _account_for_provider(db, uget(db, me.id, "pending_login_account", ""), me.id)
     if a is None or a.broker != "ZERODHA" or not request_token:
         return RedirectResponse(url="/?login=failed")
     creds = _acc_creds(a)
@@ -1134,35 +1422,19 @@ def zerodha_callback(request_token: str = "", db: Session = Depends(get_db)):
         a.connected = 1
         a.token_time = dt.datetime.utcnow()
         a.label = _label("ZERODHA", a.client_id)
-        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO"))
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
         db.commit()
         return RedirectResponse(url="/?login=ok")
-    db.add(LogEntry(message=f"Zerodha login failed: {res}", level="ERROR"))
+    db.add(LogEntry(message=f"Zerodha login failed: {res}", level="ERROR", user_id=me.id))
     db.commit()
     return RedirectResponse(url="/?login=failed")
 
 
-@app.post("/api/zerodha/postback")
-async def zerodha_postback(request: Request, db: Session = Depends(get_db)):
-    try:
-        payload = await request.json()
-        orders = payload if isinstance(payload, list) else [payload]
-        _sync_external_orders(db, [zerodha.normalize_order(o) for o in orders],
-                              "ZERODHA", _account_id_for_broker(db, "ZERODHA"))
-        db.commit()
-    except Exception as e:
-        db.add(LogEntry(message=f"Zerodha postback error: {e}", level="ERROR"))
-        db.commit()
-    return {"ok": True}
-
-
 # ---------- "Login with Dhan" (app consent), per account ----------
 @app.get("/api/dhan/login")
-def dhan_login(account_id: int = 0, db: Session = Depends(get_db)):
-    """Start the Dhan login for an account; returns the URL to send the user to."""
-    a = db.get(Account, account_id)
-    if a is None or a.broker != "DHAN":
-        raise HTTPException(400, "Dhan account not found.")
+def dhan_login(request: Request, account_id: int = 0, db: Session = Depends(get_db)):
+    me = current_user(request)
+    a = _my_account(db, account_id, me.id, "DHAN")
     creds = _acc_creds(a)
     app_id, app_secret = creds.get("app_id", ""), creds.get("app_secret", "")
     if not app_id or not app_secret or not a.client_id:
@@ -1171,7 +1443,8 @@ def dhan_login(account_id: int = 0, db: Session = Depends(get_db)):
         consent = dhan_auth.generate_consent(app_id, app_secret, a.client_id)
         if not consent:
             raise HTTPException(400, "Dhan did not return a consent id. Check your App ID/Secret.")
-        set_setting(db, "pending_login_account", str(a.id))
+        uset(db, me.id, "pending_login_account", str(a.id))
+        db.commit()
         return {"login_url": dhan_auth.login_url(consent)}
     except HTTPException:
         raise
@@ -1180,8 +1453,9 @@ def dhan_login(account_id: int = 0, db: Session = Depends(get_db)):
 
 
 @app.get("/api/dhan/callback")
-def dhan_callback(tokenId: str = "", db: Session = Depends(get_db)):
-    a = _account_for_provider(db, get_setting(db, "pending_login_account", ""))
+def dhan_callback(request: Request, tokenId: str = "", db: Session = Depends(get_db)):
+    me = current_user(request)
+    a = _account_for_provider(db, uget(db, me.id, "pending_login_account", ""), me.id)
     if a is None or not tokenId:
         return RedirectResponse(url="/?login=failed")
     creds = _acc_creds(a)
@@ -1189,191 +1463,373 @@ def dhan_callback(tokenId: str = "", db: Session = Depends(get_db)):
         token, client_id, _ = dhan_auth.consume_consent(creds.get("app_id", ""), creds.get("app_secret", ""), tokenId)
         if not token:
             raise RuntimeError("no access token returned")
+        if client_id and _broker_in_use_elsewhere(db, "DHAN", client_id, me.id):
+            raise RuntimeError("this Dhan account is already linked to another user")
         _set_acc_creds(a, access_token=token)
         if client_id:
             a.client_id = client_id
         a.connected = 1
         a.token_time = dt.datetime.utcnow()
         a.label = _label("DHAN", a.client_id)
-        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO"))
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
         db.commit()
         return RedirectResponse(url="/?login=ok")
     except Exception as e:
-        db.add(LogEntry(message=f"Dhan login callback failed: {e}", level="ERROR"))
+        db.add(LogEntry(message=f"Dhan login callback failed: {e}", level="ERROR", user_id=me.id))
         db.commit()
         return RedirectResponse(url="/?login=failed")
 
 
-@app.post("/api/dhan/postback")
-async def dhan_postback(request: Request, db: Session = Depends(get_db)):
-    """Order-update webhook: Dhan POSTs order status here for instant sync."""
-    try:
-        payload = await request.json()
-        orders = payload if isinstance(payload, list) else [payload]
-        _sync_external_orders(db, orders, "DHAN", _account_id_for_broker(db, "DHAN"))
-        db.commit()
-    except Exception as e:
-        db.add(LogEntry(message=f"Postback error: {e}", level="ERROR"))
-        db.commit()
-    return {"ok": True}
-
-
 @app.post("/api/providers")
-def set_providers(payload: dict, db: Session = Depends(get_db)):
-    """Set the Data and Trading providers — each is 'DEMO' or an account id."""
-    cur_data = get_setting(db, "data_provider", "DEMO")
-    cur_trade = get_setting(db, "trade_provider", "DEMO")
+def set_providers(payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Set this user's Data and Trading providers — each 'DEMO' or an account id."""
+    me = current_user(request)
+    cur_data = uget(db, me.id, "data_provider", "DEMO")
+    cur_trade = uget(db, me.id, "trade_provider", "DEMO")
     new_data = str(payload.get("data_provider", cur_data))
     new_trade = str(payload.get("trade_provider", cur_trade))
 
     def _valid(v):
-        return v == "DEMO" or db.get(Account, int(v)) if v.isdigit() else (v == "DEMO")
+        if v == "DEMO":
+            return True
+        a = db.get(Account, int(v)) if v.isdigit() else None
+        return a is not None and a.user_id == me.id
     if not _valid(new_data):
         new_data = cur_data
     if not _valid(new_trade):
         new_trade = cur_trade
-    # Demo is all-or-nothing.
+    # Demo broker is restricted to the Super Admin (anti-abuse / free-trial).
+    if me.role != "SUPER_ADMIN" and "DEMO" in (new_data, new_trade):
+        raise HTTPException(403, "Demo trading is available to administrators only. "
+                                 "Please connect a real broker.")
     if (new_data == "DEMO") != (new_trade == "DEMO"):
-        raise HTTPException(400, "Demo can't be mixed with a live broker — set both to Demo, "
-                                 "or pick a live account for both.")
-    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
+        raise HTTPException(400, "Demo can't be mixed with a live broker.")
+    active = db.query(Trade).filter(Trade.user_id == me.id,
+                                    Trade.status.in_(["OPEN", "PENDING"])).count()
     if active > 0 and (new_data != cur_data or new_trade != cur_trade):
         raise HTTPException(400, f"{active} trade(s) are running — close them before switching providers.")
     changed = (new_data != cur_data or new_trade != cur_trade)
-    set_setting(db, "data_provider", new_data)
-    set_setting(db, "trade_provider", new_trade)
-    set_setting(db, "broker_mode", "DEMO" if new_trade == "DEMO" else "DHAN")
+    uset(db, me.id, "data_provider", new_data)
+    uset(db, me.id, "trade_provider", new_trade)
     for k in ("broker_balance", "broker_balance_provider", "broker_health", "md_status"):
-        set_setting(db, k, "")
+        uset(db, me.id, k, "")
     if changed:
-        da = _account_for_provider(db, new_data)
-        ta = _account_for_provider(db, new_trade)
+        da = _account_for_provider(db, new_data, me.id)
+        ta = _account_for_provider(db, new_trade, me.id)
         dn = "Demo" if da is None else (da.label or _label(da.broker, da.client_id))
         tn = "Demo" if ta is None else (ta.label or _label(ta.broker, ta.client_id))
-        db.add(LogEntry(message=f"Providers switched — Data: {dn}, Trading: {tn}", level="INFO"))
+        db.add(LogEntry(message=f"Providers switched — Data: {dn}, Trading: {tn}", level="INFO", user_id=me.id))
     db.commit()
     return {"data_provider": new_data, "trade_provider": new_trade}
 
 
-# legacy endpoint kept for safety
-@app.post("/api/broker/mode")
-def set_broker_mode(payload: dict, db: Session = Depends(get_db)):
-    mode = "DEMO" if str(payload.get("mode", "")).upper() == "DEMO" else "DHAN"
-    active = db.query(Trade).filter(Trade.status.in_(["OPEN", "PENDING"])).count()
-    if active > 0 and mode != get_setting(db, "broker_mode", "DHAN"):
-        raise HTTPException(400, f"{active} trade(s) are running — close them before switching.")
-    set_setting(db, "broker_mode", mode)
-    set_setting(db, "data_provider", mode)
-    set_setting(db, "trade_provider", mode)
-    db.commit()
-    return {"mode": mode}
-
-
 # ---------- Angel One (per account) ----------
 @app.post("/api/angel/login")
-def angel_login(payload: dict, db: Session = Depends(get_db)):
-    """Log in to Angel One (password + TOTP) for an account and store the token."""
-    a = db.get(Account, int(payload.get("account_id", 0)))
-    if a is None or a.broker != "ANGEL":
-        raise HTTPException(400, "Angel account not found.")
+def angel_login(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    a = _my_account(db, payload.get("account_id", 0), me.id, "ANGEL")
     creds = _acc_creds(a)
     cid, pin = a.client_id, creds.get("pin", "")
     key, totp = creds.get("api_key", ""), creds.get("totp_secret", "")
     if not all([cid, pin, key, totp]):
         raise HTTPException(400, "Enter Angel Client ID, PIN, API Key and TOTP secret first.")
+    if _broker_in_use_elsewhere(db, "ANGEL", cid, me.id):
+        raise HTTPException(400, "This Angel account is already linked to another user.")
     ok, data = angel.login(cid, pin, key, totp)
     if ok:
         _set_acc_creds(a, jwt=data["jwt"], refresh=data.get("refresh", ""), feed=data.get("feed", ""))
         a.connected = 1
         a.token_time = dt.datetime.utcnow()
         a.label = _label("ANGEL", a.client_id)
-        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO"))
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
         db.commit()
         return {"connected": True}
-    db.add(LogEntry(message=f"Angel One login failed: {data}", level="ERROR"))
+    db.add(LogEntry(message=f"Angel One login failed: {data}", level="ERROR", user_id=me.id))
     db.commit()
     raise HTTPException(400, f"Angel login failed: {data}")
 
 
-@app.post("/api/angel/postback")
-async def angel_postback(request: Request, db: Session = Depends(get_db)):
-    """Angel order-update webhook: instant sync of external Angel orders."""
-    try:
-        payload = await request.json()
-        orders = payload if isinstance(payload, list) else [payload]
-        _sync_external_orders(db, [angel.normalize_order(o) for o in orders],
-                              "ANGEL", _account_id_for_broker(db, "ANGEL"))
-        db.commit()
-    except Exception as e:
-        db.add(LogEntry(message=f"Angel postback error: {e}", level="ERROR"))
-        db.commit()
-    return {"ok": True}
-
-
 # ---------- Alice Blue (ANT API, per account) ----------
 @app.post("/api/aliceblue/login")
-def aliceblue_login(payload: dict, db: Session = Depends(get_db)):
-    """Log in to Alice Blue (User ID + API Key -> session) and store the session."""
-    a = db.get(Account, int(payload.get("account_id", 0)))
-    if a is None or a.broker != "ALICE":
-        raise HTTPException(400, "Alice Blue account not found.")
+def aliceblue_login(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    a = _my_account(db, payload.get("account_id", 0), me.id, "ALICE")
     creds = _acc_creds(a)
     cid, key = a.client_id, creds.get("api_key", "")
     if not cid or not key:
         raise HTTPException(400, "Enter Alice Blue User ID and API Key first.")
+    if _broker_in_use_elsewhere(db, "ALICE", cid, me.id):
+        raise HTTPException(400, "This Alice Blue account is already linked to another user.")
     ok, res = aliceblue.login(cid, key)
     if ok:
         _set_acc_creds(a, session_id=res)
         a.connected = 1
         a.token_time = dt.datetime.utcnow()
         a.label = _label("ALICE", a.client_id)
-        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO"))
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
         db.commit()
         return {"connected": True}
-    db.add(LogEntry(message=f"Alice Blue login failed: {res}", level="ERROR"))
+    db.add(LogEntry(message=f"Alice Blue login failed: {res}", level="ERROR", user_id=me.id))
     db.commit()
     raise HTTPException(400, f"Alice Blue login failed: {res}")
 
 
-@app.post("/api/aliceblue/postback")
-async def aliceblue_postback(request: Request, db: Session = Depends(get_db)):
-    """Alice Blue order-update webhook: instant sync of external Alice orders."""
-    try:
-        payload = await request.json()
-        orders = payload if isinstance(payload, list) else [payload]
-        _sync_external_orders(db, [aliceblue.normalize_order(o) for o in orders],
-                              "ALICE", _account_id_for_broker(db, "ALICE"))
-        db.commit()
-    except Exception as e:
-        db.add(LogEntry(message=f"Alice Blue postback error: {e}", level="ERROR"))
-        db.commit()
-    return {"ok": True}
+# ---------- how-to doc (admin-editable, shown to all users) ----------
+DEFAULT_HOWTO = (
+    "## How to connect each broker\n\n"
+    "**Dhan** — create an app at web.dhan.co, set the Redirect & Postback URLs shown "
+    "on the Broker tab, add the account (Client ID, App ID, App Secret), then click Login.\n\n"
+    "**Angel One** — create a SmartAPI app, enable TOTP, add the account (Client ID, "
+    "API Key, PIN, TOTP secret), then click Login.\n\n"
+    "**Zerodha** — create a Kite Connect app, set the Redirect URL, add the account "
+    "(Client ID, API Key, API Secret), then click Login.\n\n"
+    "**Alice Blue** — enable the ANT API, add the account (User ID, API Key), then click "
+    "Login (no redirect needed)."
+)
 
 
-@app.post("/api/broker")
-def save_broker(payload: BrokerConfigIn, db: Session = Depends(get_db)):
-    if payload.dhan_client_id:
-        set_setting(db, "dhan_client_id", payload.dhan_client_id)
-    if payload.dhan_access_token:
-        set_setting(db, "dhan_access_token", payload.dhan_access_token)
-    set_setting(db, "dhan_connected", "no")  # re-verify after any change
-    return {"ok": True}
+@app.get("/api/howto")
+def get_howto(db: Session = Depends(get_db)):
+    return {"markdown": get_setting(db, "howto_md", "") or DEFAULT_HOWTO}
 
 
-@app.post("/api/broker/connect")
-def connect_broker(db: Session = Depends(get_db)):
-    """Authenticate with Dhan using the saved client id + access token."""
-    if get_setting(db, "broker_mode", "DHAN") == "DEMO":
-        return {"connected": True, "message": "Demo mode — simulated broker connected."}
-    cid = get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID)
-    tok = get_setting(db, "dhan_access_token", config.DHAN_ACCESS_TOKEN)
-    if not cid or not tok:
-        raise HTTPException(400, "Enter your Dhan Client ID and Access Token first.")
-    ok, msg = verify_dhan_credentials(cid, tok)
-    set_setting(db, "dhan_connected", "yes" if ok else "no")
-    db.add(LogEntry(message=f"Dhan connect: {msg}", level="INFO" if ok else "ERROR"))
+# ---------- Super Admin control panel ----------
+def _user_dict(db, u):
+    return {
+        "id": u.id, "email": u.email, "role": u.role, "status": u.status,
+        "plan_name": u.plan_name,
+        "plan_expiry": u.plan_expiry.isoformat() if u.plan_expiry else None,
+        "expired": u.role != "SUPER_ADMIN" and _plan_expired(u),
+        "accounts": db.query(Account).filter(Account.user_id == u.id, Account.connected == 1).count(),
+        "created_at": u.created_at.isoformat() if u.created_at else None,
+        "online": bool(u.session_token),
+    }
+
+
+@app.get("/api/admin/users")
+def admin_users(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    return [_user_dict(db, u) for u in db.query(User).order_by(User.id).all()]
+
+
+@app.post("/api/admin/users")
+def admin_create_user(payload: dict, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    email = str(payload.get("email", "")).strip().lower()
+    days = int(payload.get("days", 30) or 30)
+    if "@" not in email:
+        raise HTTPException(400, "Enter a valid email.")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(400, "User already exists.")
+    u = User(email=email, password_hash="", role="USER", plan_name=f"{days} Days",
+             plan_expiry=dt.datetime.utcnow() + dt.timedelta(days=days))
+    db.add(u); db.commit(); db.refresh(u)
+    # Send a set-password (reset) code so the user can activate.
+    code = auth.issue_otp(db, email, "RESET")
+    ok, _ = emailer.send_email(db, email, "otp_reset", code=code, email=email)
+    return {"ok": True, "id": u.id, "set_password_code": None if ok else code}
+
+
+@app.post("/api/admin/users/{uid}/status")
+def admin_set_status(uid: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "User not found")
+    block = bool(payload.get("blocked"))
+    u.status = "BLOCKED" if block else "ACTIVE"
+    if block:
+        u.session_token = ""        # kill their session immediately
+        uset(db, u.id, "kill_switch", "on")   # halt their algos / flatten positions
     db.commit()
-    return {"connected": ok, "message": msg}
+    return _user_dict(db, u)
+
+
+@app.post("/api/admin/users/{uid}/plan")
+def admin_set_plan(uid: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "User not found")
+    days = int(payload.get("days", 0) or 0)
+    name = str(payload.get("plan_name", "") or f"{days} Days")
+    base = dt.datetime.utcnow()
+    if bool(payload.get("extend")) and u.plan_expiry and u.plan_expiry > base:
+        base = u.plan_expiry           # extend from current expiry
+    u.plan_expiry = base + dt.timedelta(days=days)
+    u.plan_name = name
+    db.commit()
+    return _user_dict(db, u)
+
+
+@app.delete("/api/admin/users/{uid}")
+def admin_delete_user(uid: int, request: Request, db: Session = Depends(get_db)):
+    me = require_admin(request)
+    if uid == me.id:
+        raise HTTPException(400, "You can't delete your own admin account.")
+    u = db.get(User, uid)
+    if u:
+        for M in (Trade, Account, SymbolPreset, Watchlist, LogEntry, UserSetting):
+            db.query(M).filter(M.user_id == uid).delete()
+        db.delete(u)
+        db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{uid}/kill")
+def admin_kill(uid: int, request: Request, db: Session = Depends(get_db)):
+    """Remote kill switch: halt the user's algos + flatten open positions."""
+    require_admin(request)
+    u = db.get(User, uid)
+    if not u:
+        raise HTTPException(404, "User not found")
+    uset(db, u.id, "kill_switch", "on")
+    db.add(LogEntry(message="ADMIN remote kill switch activated.", level="WARN", user_id=u.id))
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/admin/users/{uid}/summary")
+def admin_user_summary(uid: int, request: Request, broker: str = "ALL", date: str = "",
+                       db: Session = Depends(get_db)):
+    require_admin(request)
+    return _build_summary(db, uid, broker, date)
+
+
+@app.get("/api/admin/users/{uid}/logs")
+def admin_user_logs(uid: int, request: Request, page: int = 1, db: Session = Depends(get_db)):
+    require_admin(request)
+    import math
+    per = 30
+    q = db.query(LogEntry).filter(LogEntry.user_id == uid)
+    total = q.count()
+    rows = q.order_by(LogEntry.id.desc()).offset((max(1, page) - 1) * per).limit(per).all()
+    return {"logs": [{"id": r.id, "time": r.created_at.isoformat(), "level": r.level,
+                      "message": r.message, "day": r.day} for r in rows],
+            "page": page, "pages": max(1, math.ceil(total / per))}
+
+
+@app.get("/api/admin/users/{uid}/accounts")
+def admin_user_accounts(uid: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    return [_account_dict(a) for a in db.query(Account).filter(Account.user_id == uid).all()]
+
+
+@app.delete("/api/admin/users/{uid}/accounts/{aid}")
+def admin_remove_account(uid: int, aid: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    a = db.get(Account, aid)
+    if a and a.user_id == uid:
+        db.delete(a); db.commit()
+    return {"ok": True}
+
+
+# ---- global SaaS settings + plans + email ----
+@app.get("/api/admin/settings")
+def admin_get_settings(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    return {
+        "registration_open": get_setting(db, "registration_open", "yes") == "yes",
+        "trial_days": int(get_setting(db, "trial_days", str(config.DEFAULT_TRIAL_DAYS)) or 7),
+        "smtp_host": get_setting(db, "smtp_host", config.SMTP_HOST),
+        "smtp_port": int(get_setting(db, "smtp_port", str(config.SMTP_PORT)) or 587),
+        "smtp_user": get_setting(db, "smtp_user", config.SMTP_USER),
+        "smtp_pass": "********" if get_setting(db, "smtp_pass", config.SMTP_PASS) else "",
+        "smtp_sender": get_setting(db, "smtp_sender", config.SMTP_SENDER),
+        "smtp_from": get_setting(db, "smtp_from", config.SMTP_FROM),
+        "smtp_bcc": get_setting(db, "smtp_bcc", config.SMTP_BCC),
+        "howto_md": get_setting(db, "howto_md", "") or DEFAULT_HOWTO,
+    }
+
+
+@app.post("/api/admin/settings")
+def admin_set_settings(payload: dict, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    if "registration_open" in payload:
+        set_setting(db, "registration_open", "yes" if payload["registration_open"] else "no")
+    if "trial_days" in payload:
+        set_setting(db, "trial_days", str(int(payload["trial_days"])))
+    for k in ("smtp_host", "smtp_user", "smtp_sender", "smtp_from", "smtp_bcc", "howto_md"):
+        if k in payload:
+            set_setting(db, k, str(payload[k]))
+    if "smtp_port" in payload:
+        set_setting(db, "smtp_port", str(int(payload["smtp_port"] or 587)))
+    if payload.get("smtp_pass") and payload["smtp_pass"] != "********":
+        set_setting(db, "smtp_pass", str(payload["smtp_pass"]))
+    return admin_get_settings(request, db)
+
+
+@app.post("/api/admin/test_email")
+def admin_test_email(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = require_admin(request)
+    to = str(payload.get("to", "") or me.email)
+    ok, msg = emailer.send_email(db, to, "welcome", email=to, plan="Test", expiry="—")
+    return {"ok": ok, "message": msg}
+
+
+@app.get("/api/admin/plans")
+def admin_plans(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    return [{"id": p.id, "name": p.name, "days": p.days, "price": p.price, "active": bool(p.active)}
+            for p in db.query(Plan).order_by(Plan.days).all()]
+
+
+@app.post("/api/admin/plans")
+def admin_save_plan(payload: dict, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    pid = payload.get("id")
+    p = db.get(Plan, int(pid)) if pid else None
+    if p is None:
+        p = Plan()
+        db.add(p)
+    p.name = str(payload.get("name", "") or f"{payload.get('days', 30)} Days")
+    p.days = int(payload.get("days", 30) or 30)
+    p.price = float(payload.get("price", 0) or 0)
+    p.active = 1 if payload.get("active", True) else 0
+    db.commit(); db.refresh(p)
+    return {"id": p.id}
+
+
+@app.delete("/api/admin/plans/{pid}")
+def admin_delete_plan(pid: int, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    p = db.get(Plan, pid)
+    if p:
+        db.delete(p); db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/plans")
+def public_plans(db: Session = Depends(get_db)):
+    return [{"name": p.name, "days": p.days, "price": p.price}
+            for p in db.query(Plan).filter(Plan.active == 1).order_by(Plan.days).all()]
+
+
+@app.get("/api/admin/templates")
+def admin_templates(request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    out = {}
+    for key, (subj, body) in emailer.DEFAULT_TEMPLATES.items():
+        row = db.get(EmailTemplate, key)
+        out[key] = {"subject": (row.subject if row and row.subject else subj),
+                    "body_html": (row.body_html if row and row.body_html else body)}
+    return out
+
+
+@app.post("/api/admin/templates")
+def admin_save_template(payload: dict, request: Request, db: Session = Depends(get_db)):
+    require_admin(request)
+    key = str(payload.get("key", ""))
+    if key not in emailer.DEFAULT_TEMPLATES:
+        raise HTTPException(400, "Unknown template")
+    row = db.get(EmailTemplate, key)
+    if row is None:
+        row = EmailTemplate(key=key)
+        db.add(row)
+    row.subject = str(payload.get("subject", ""))
+    row.body_html = str(payload.get("body_html", ""))
+    db.commit()
+    return {"ok": True}
 
 
 # ---------- frontend ----------

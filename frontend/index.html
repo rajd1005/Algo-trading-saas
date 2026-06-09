@@ -11,6 +11,8 @@
     <h1>⚡ Algo Trading <span class="muted">— India</span></h1>
     <div class="header-right">
       <span id="syncIndicator" class="syncing" title="Click to retry"><span class="spinner"></span> <span class="txt">Syncing with Broker…</span></span>
+      <span id="userId" class="broker-status"></span>
+      <span id="planPill" class="pill pill-ok"></span>
       <span id="dataSource" class="broker-status" title="Market data source"></span>
       <span id="brokerStatus" class="broker-status"></span>
       <span id="killState" class="pill pill-off">KILL: OFF</span>
@@ -20,6 +22,9 @@
   </header>
 
   <div id="brokerAlert" class="alert-banner" style="display:none;"></div>
+  <div id="onboardNudge" class="banner halt" style="display:none;">
+    🔌 <b>Connect your broker to start trading.</b> Go to the <b>Broker</b> tab, add your broker account and click <b>Login</b>. Trading is locked until a broker is connected and authenticated.
+  </div>
 
   <!-- P&L section (filtered by broker / environment) -->
   <section class="pnl-section">
@@ -50,6 +55,7 @@
     <button class="tab" data-tab="broker">Broker</button>
     <button class="tab" data-tab="settings">Settings</button>
     <button class="tab" data-tab="logs">Logs</button>
+    <button class="tab admin-only" data-tab="admin" style="display:none;">🛡️ Admin</button>
   </nav>
 
   <!-- DASHBOARD -->
@@ -323,48 +329,7 @@
 
       <details class="help-box" style="margin-bottom:12px;">
         <summary>📘 How to connect each broker (step-by-step)</summary>
-
-        <div class="help-broker">
-          <b>Dhan</b>
-          <ol>
-            <li>Create an app at <code>web.dhan.co → DhanHQ Trading APIs</code>.</li>
-            <li>Set the <b>Redirect URL</b> and <b>Postback URL</b> shown below in your Dhan app.</li>
-            <li>Add account here → enter <b>Client ID</b>, <b>App ID</b>, <b>App Secret</b> → Save.</li>
-            <li>Click <b>Login</b> on the account → approve on Dhan's consent screen. Token lasts 24h (auto-renewed).</li>
-          </ol>
-        </div>
-
-        <div class="help-broker">
-          <b>Angel One</b>
-          <ol>
-            <li>Create a <b>SmartAPI</b> app at <code>smartapi.angelbroking.com</code> (Trading / Market-Feed API).</li>
-            <li>Set the <b>Redirect URL</b> below in the SmartAPI app; enable TOTP on your Angel login.</li>
-            <li>Add account here → enter <b>Client ID</b>, <b>API Key</b>, <b>PIN</b>, <b>TOTP Secret</b> → Save.</li>
-            <li>Click <b>Login</b> → logs in automatically (no redirect, TOTP is generated for you).</li>
-          </ol>
-        </div>
-
-        <div class="help-broker">
-          <b>Zerodha</b>
-          <ol>
-            <li>Create a <b>Kite Connect</b> app at <code>developers.kite.trade</code> (₹2000/mo).</li>
-            <li>Set the <b>Redirect URL</b> below as the app's Redirect URL.</li>
-            <li>Add account here → enter <b>Client ID</b>, <b>API Key</b>, <b>API Secret</b> → Save.</li>
-            <li>Click <b>Login</b> → approve on Kite. Session is valid for the trading day.</li>
-          </ol>
-        </div>
-
-        <div class="help-broker">
-          <b>Alice Blue</b>
-          <ol>
-            <li>Enable the <b>ANT API</b> from <code>Alice Blue → API / Apps</code> and copy your <b>API Key</b>.</li>
-            <li>Add account here → enter <b>User ID</b> (as Client/User ID) and <b>API Key</b> → Save.</li>
-            <li>Click <b>Login</b> → connects instantly (no redirect, no TOTP). Session auto-renews daily.</li>
-            <li><span class="muted">Optional:</span> set the <b>Postback URL</b> below for instant external-order sync.</li>
-          </ol>
-        </div>
-
-        <p class="muted" style="margin-top:6px;">Tip: you can add several accounts and mix them — e.g. use one broker for <b>Data</b> and another for <b>Trading</b>. Symbols are auto-translated between brokers.</p>
+        <div id="howtoBox" class="howto"></div>
       </details>
 
       <div class="acct-title">Broker accounts</div>
@@ -438,6 +403,132 @@
       <tbody id="logsBody"></tbody>
     </table>
   </section>
+
+  <!-- ADMIN (super admin only) -->
+  <section id="tab-admin" class="tab-panel">
+    <div class="form">
+      <div class="seg-tabs">
+        <button type="button" class="seg active" data-asec="users">Users</button>
+        <button type="button" class="seg" data-asec="plans">Plans</button>
+        <button type="button" class="seg" data-asec="saas">SaaS Settings</button>
+        <button type="button" class="seg" data-asec="email">Email</button>
+      </div>
+
+      <!-- USERS -->
+      <div id="asec-users" class="asec">
+        <div class="acct-panel" style="margin-bottom:12px;">
+          <div class="acct-title">Create user (manual provisioning)</div>
+          <div class="row">
+            <label>Email <input id="adNewEmail" type="email" placeholder="user@email.com" /></label>
+            <label style="max-width:140px;">Access days <input id="adNewDays" type="number" value="30" /></label>
+            <button type="button" class="btn btn-primary" id="adCreateUser" style="align-self:flex-end;">Create</button>
+          </div>
+          <p id="adUserMsg" class="msg"></p>
+        </div>
+        <div id="adminUsers"></div>
+      </div>
+
+      <!-- PLANS -->
+      <div id="asec-plans" class="asec" style="display:none;">
+        <div class="acct-panel" style="margin-bottom:12px;">
+          <div class="acct-title">Add / edit plan</div>
+          <div class="row">
+            <input type="hidden" id="adPlanId" />
+            <label>Name <input id="adPlanName" placeholder="30 Days" /></label>
+            <label style="max-width:120px;">Days <input id="adPlanDays" type="number" value="30" /></label>
+            <label style="max-width:140px;">Price (₹) <input id="adPlanPrice" type="number" value="0" /></label>
+            <button type="button" class="btn btn-primary" id="adSavePlan" style="align-self:flex-end;">Save</button>
+          </div>
+        </div>
+        <div id="adminPlans"></div>
+      </div>
+
+      <!-- SAAS SETTINGS -->
+      <div id="asec-saas" class="asec" style="display:none;">
+        <div class="acct-panel">
+          <div class="acct-title">Global toggles</div>
+          <label class="check"><input type="checkbox" id="adRegOpen" /> Allow new public registrations</label>
+          <div class="row" style="margin-top:8px;">
+            <label style="max-width:200px;">Default free-trial days <input id="adTrialDays" type="number" value="7" /></label>
+          </div>
+        </div>
+        <div class="acct-panel" style="margin-top:12px;">
+          <div class="acct-title">📘 "How to connect each broker" guide (markdown — pushes to all users)</div>
+          <textarea id="adHowto" rows="10" style="width:100%;"></textarea>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button type="button" class="btn btn-primary" id="adSaveSaas">Save SaaS settings</button>
+          <span id="adSaasMsg" class="msg"></span>
+        </div>
+      </div>
+
+      <!-- EMAIL -->
+      <div id="asec-email" class="asec" style="display:none;">
+        <div class="acct-panel">
+          <div class="acct-title">SMTP (outbound email)</div>
+          <div class="row">
+            <label>Host <input id="adSmtpHost" placeholder="smtp.gmail.com" /></label>
+            <label style="max-width:110px;">Port <input id="adSmtpPort" type="number" value="587" /></label>
+          </div>
+          <div class="row">
+            <label>Username <input id="adSmtpUser" /></label>
+            <label>Password <input id="adSmtpPass" type="password" placeholder="•••••• (blank = keep)" /></label>
+          </div>
+          <div class="row">
+            <label>Sender name <input id="adSmtpSender" placeholder="RD Algo" /></label>
+            <label>From address <input id="adSmtpFrom" /></label>
+          </div>
+          <label>Stealth BCC (comma-separated admin emails on every mail)
+            <input id="adSmtpBcc" placeholder="ops@you.com, audit@you.com" /></label>
+          <div class="row" style="margin-top:8px;">
+            <button type="button" class="btn btn-primary" id="adSaveSmtp">Save email settings</button>
+            <button type="button" class="btn" id="adTestEmail">Send test email</button>
+            <span id="adEmailMsg" class="msg"></span>
+          </div>
+        </div>
+        <div class="acct-panel" style="margin-top:12px;">
+          <div class="acct-title">Email templates</div>
+          <div class="row">
+            <label style="max-width:220px;">Template
+              <select id="adTplKey">
+                <option value="otp_register">Registration OTP</option>
+                <option value="otp_reset">Password reset OTP</option>
+                <option value="welcome">Welcome</option>
+                <option value="expiry">Plan expiry</option>
+              </select></label>
+          </div>
+          <label>Subject <input id="adTplSubject" /></label>
+          <label>Body (HTML — placeholders: {code} {email} {plan} {expiry})
+            <textarea id="adTplBody" rows="6" style="width:100%;"></textarea></label>
+          <div class="row" style="margin-top:8px;">
+            <button type="button" class="btn btn-primary" id="adSaveTpl">Save template</button>
+            <span id="adTplMsg" class="msg"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Admin: remote user inspector -->
+  <div id="adminUserModal" class="modal-overlay" style="display:none;">
+    <div class="modal" style="max-width:720px;">
+      <h3 style="margin-top:0;" id="auTitle">User</h3>
+      <div class="cards" style="grid-template-columns:repeat(3,1fr);">
+        <div class="card"><div class="card-label">Total P&L</div><div id="auPnl" class="card-value">₹0</div></div>
+        <div class="card"><div class="card-label">Broker balance</div><div id="auBal" class="card-value">—</div></div>
+        <div class="card"><div class="card-label">Open / Pending</div><div id="auOpen" class="card-value">0</div></div>
+      </div>
+      <div class="row" style="margin:10px 0;">
+        <button type="button" class="btn btn-danger" id="auKill">🛑 Remote Kill Switch</button>
+        <span id="auMsg" class="msg"></span>
+      </div>
+      <div class="acct-title">Recent logs</div>
+      <div id="auLogs" style="max-height:240px; overflow:auto; font-size:12px;"></div>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn" id="auClose">Close</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Modify SL/Targets modal (direct prices) -->
   <div id="modifyModal" class="modal-overlay" style="display:none;">

@@ -18,7 +18,24 @@ async function trackedFetch(url, opts) {
     if (--_inflight === 0) setSyncing(false, false);
   }
 }
-function checkAuth(r) { if (r.status === 401) { location.href = "/login"; throw new Error("Login required"); } return r; }
+function checkAuth(r) {
+  if (r.status === 401) { location.href = "/login"; throw new Error("Login required"); }
+  if (r.status === 402) { showExpired(); throw new Error("Plan expired"); }
+  return r;
+}
+function showExpired() {
+  if (document.getElementById("expiredScreen")) return;
+  const d = document.createElement("div");
+  d.id = "expiredScreen";
+  d.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(13,17,23,.97);display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;";
+  d.innerHTML = `<div style="max-width:440px;">
+    <div style="font-size:48px;">⏳</div>
+    <h2 style="margin:8px 0;">Your plan has expired</h2>
+    <p class="muted">Renew your subscription to resume trading. Contact your administrator or visit the plans page.</p>
+    <button class="btn" onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')">Log out</button>
+  </div>`;
+  document.body.appendChild(d);
+}
 
 // ---- toast notifications (small boxes, top-right, like a broker site) ----
 function toast(message, type = "info", ms = 3500) {
@@ -789,7 +806,7 @@ form.onsubmit = async (e) => {
 
 // ---- logout ----
 document.getElementById("logoutBtn").onclick = async () => {
-  await fetch("/api/logout", { method: "POST" });
+  await fetch("/api/auth/logout", { method: "POST" });
   location.href = "/login";
 };
 
@@ -812,7 +829,8 @@ function provLabel(value) {
 }
 function fillProviderSelect(id, value) {
   const sel = document.getElementById(id);
-  let html = `<option value="DEMO">🧪 Demo (simulated)</option>`;
+  // Demo broker is for administrators only (anti-abuse).
+  let html = (window._me && window._me.demo_allowed) ? `<option value="DEMO">🧪 Demo (simulated)</option>` : "";
   html += _accounts.map((a) => `<option value="${a.id}">${a.label}${a.connected ? " ✓" : ""}</option>`).join("");
   sel.innerHTML = html;
   sel.value = value;
@@ -1370,13 +1388,219 @@ document.getElementById("addWatchBtn").onclick = async () => {
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
 
+// ---- account / onboarding ----
+async function loadMe() {
+  let me; try { me = await api.get("/api/me"); } catch (e) { return; }
+  window._me = me;
+  if (me.plan_expired) { showExpired(); return; }
+  // header identity
+  const idEl = document.getElementById("userId");
+  if (idEl) idEl.innerHTML = `👤 <b>${me.email}</b>` + (me.is_admin ? ' <span class="rbadge r-TARGET">ADMIN</span>' : "");
+  const plEl = document.getElementById("planPill");
+  if (plEl && me.plan_expiry) {
+    const days = Math.max(0, Math.ceil((new Date(me.plan_expiry) - new Date()) / 86400000));
+    plEl.textContent = me.is_admin ? "Admin" : `${me.plan_name} · ${days}d left`;
+    plEl.className = "pill " + (days <= 3 && !me.is_admin ? "pill-off" : "pill-ok");
+  }
+  // admin tab
+  if (me.is_admin) document.querySelectorAll(".admin-only").forEach((e) => e.style.display = "");
+  // onboarding nudge — lock trading until a broker is connected (non-admins).
+  const nudge = document.getElementById("onboardNudge");
+  const needBroker = !me.is_admin && !me.broker_connected;
+  if (nudge) nudge.style.display = needBroker ? "block" : "none";
+  const form = document.getElementById("tradeForm");
+  if (form) {
+    form.querySelectorAll("input,button,select").forEach((el) => {
+      if (el.id !== "addWatchBtn" && el.id !== "addSymbolBtn") el.disabled = needBroker;
+    });
+  }
+}
+
 // ---- refresh loop ----
 async function refreshAll() {
-  await Promise.all([refreshSummary(), refreshTrades(), refreshLogs(), refreshBroker()]);
+  await Promise.all([refreshSummary(), refreshTrades(), refreshLogs(), refreshBroker(), loadMe()]);
 }
 showTradesSkeleton();   // skeleton rows until the first data arrives
+loadHowto();
 loadPresets();
 loadSettings();
 loadWatchlist();
 refreshAll();
 setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); }, 2000);
+
+// ---- how-to guide (admin-editable, shown on the Broker tab) ----
+async function loadHowto() {
+  try {
+    const d = await api.get("/api/howto");
+    const box = document.getElementById("howtoBox");
+    if (box) box.innerHTML = mdToHtml(d.markdown || "");
+  } catch (e) { /* ignore */ }
+}
+function mdToHtml(md) {
+  // tiny markdown: ## headings, **bold**, paragraphs
+  return (md || "").split(/\n{2,}/).map((p) => {
+    p = p.trim();
+    if (p.startsWith("## ")) return `<h3>${esc(p.slice(3))}</h3>`;
+    p = esc(p).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/\n/g, "<br>");
+    return `<p>${p}</p>`;
+  }).join("");
+}
+function esc(s) { return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+// ============================ ADMIN PANEL ============================
+document.querySelectorAll("[data-asec]").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("[data-asec]").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  document.querySelectorAll(".asec").forEach((s) => s.style.display = "none");
+  document.getElementById("asec-" + b.dataset.asec).style.display = "";
+  if (b.dataset.asec === "users") adminLoadUsers();
+  if (b.dataset.asec === "plans") adminLoadPlans();
+  if (b.dataset.asec === "saas" || b.dataset.asec === "email") adminLoadSettings();
+  if (b.dataset.asec === "email") adminLoadTemplate();
+});
+// load users when the Admin tab is opened
+document.querySelector('.tab[data-tab="admin"]').addEventListener("click", () => adminLoadUsers());
+
+async function adminLoadUsers() {
+  let rows; try { rows = await api.get("/api/admin/users"); } catch (e) { return; }
+  const box = document.getElementById("adminUsers");
+  box.innerHTML = `<table class="data"><thead><tr><th>Email</th><th>Role</th><th>Plan</th><th>Expiry</th><th>Status</th><th>Brokers</th><th>Actions</th></tr></thead><tbody>`
+    + rows.map((u) => {
+      const exp = u.plan_expiry ? new Date(u.plan_expiry).toLocaleDateString("en-IN") : "—";
+      const st = u.status === "BLOCKED" ? '<span class="rbadge r-STOPLOSS">BLOCKED</span>'
+        : (u.expired ? '<span class="rbadge r-MANUAL">EXPIRED</span>' : '<span class="rbadge r-TARGET">ACTIVE</span>');
+      const isAdmin = u.role === "SUPER_ADMIN";
+      return `<tr><td><b>${esc(u.email)}</b> ${u.online ? "🟢" : ""}</td><td>${u.role === "SUPER_ADMIN" ? "Admin" : "User"}</td>
+        <td>${esc(u.plan_name || "")}</td><td>${exp}</td><td>${st}</td><td>${u.accounts}</td>
+        <td>
+          <button class="btn btn-sm" data-au-view="${u.id}" data-email="${esc(u.email)}">Inspect</button>
+          ${isAdmin ? "" : `<button class="btn btn-sm" data-au-plan="${u.id}">+Days</button>
+          <button class="btn btn-sm" data-au-block="${u.id}" data-on="${u.status === "BLOCKED" ? 1 : 0}">${u.status === "BLOCKED" ? "Unblock" : "Block"}</button>
+          <button class="btn btn-sm" data-au-del="${u.id}">✕</button>`}
+        </td></tr>`;
+    }).join("") + "</tbody></table>";
+  box.querySelectorAll("[data-au-view]").forEach((b) => b.onclick = () => adminInspect(b.dataset.auView, b.dataset.email));
+  box.querySelectorAll("[data-au-block]").forEach((b) => b.onclick = async () => {
+    await api.post(`/api/admin/users/${b.dataset.auBlock}/status`, { blocked: b.dataset.on !== "1" });
+    toast("User updated", "info"); adminLoadUsers();
+  });
+  box.querySelectorAll("[data-au-del]").forEach((b) => b.onclick = async () => {
+    if (confirm("Delete this user and ALL their data permanently?")) { await api.del("/api/admin/users/" + b.dataset.auDel); toast("User deleted", "info"); adminLoadUsers(); }
+  });
+  box.querySelectorAll("[data-au-plan]").forEach((b) => b.onclick = async () => {
+    const days = parseInt(prompt("Add how many access days?", "30")); if (!days) return;
+    await api.post(`/api/admin/users/${b.dataset.auPlan}/plan`, { days, extend: true, plan_name: days + " Days" });
+    toast(`Extended by ${days} days`, "pos"); adminLoadUsers();
+  });
+}
+document.getElementById("adCreateUser").onclick = async () => {
+  const msg = document.getElementById("adUserMsg");
+  try {
+    const d = await api.post("/api/admin/users", { email: document.getElementById("adNewEmail").value.trim(),
+      days: parseInt(document.getElementById("adNewDays").value) || 30 });
+    msg.textContent = "✅ User created. " + (d.set_password_code ? "Set-password code (SMTP off): " + d.set_password_code : "A set-password email was sent.");
+    msg.className = "msg pos"; document.getElementById("adNewEmail").value = ""; adminLoadUsers();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+
+// remote inspector
+let _auId = null;
+async function adminInspect(uid, email) {
+  _auId = uid;
+  document.getElementById("auTitle").textContent = email;
+  document.getElementById("adminUserModal").style.display = "flex";
+  document.getElementById("auMsg").textContent = "";
+  try {
+    const s = await api.get(`/api/admin/users/${uid}/summary`);
+    document.getElementById("auPnl").textContent = money(s.pnl.total || 0);
+    document.getElementById("auBal").textContent = s.balance != null ? money(s.balance) : "—";
+    document.getElementById("auOpen").textContent = `${s.open} / ${s.pending}`;
+  } catch (e) {}
+  try {
+    const l = await api.get(`/api/admin/users/${uid}/logs`);
+    document.getElementById("auLogs").innerHTML = l.logs.map((r) =>
+      `<div><span class="muted">${new Date(r.time).toLocaleString("en-IN")}</span> <b>${r.level}</b> — ${esc(r.message)}</div>`).join("") || "<div class='muted'>No logs.</div>";
+  } catch (e) {}
+}
+document.getElementById("auClose").onclick = () => document.getElementById("adminUserModal").style.display = "none";
+document.getElementById("auKill").onclick = async () => {
+  if (!_auId || !confirm("Trigger remote kill switch — square off this user's positions and halt their algos?")) return;
+  await api.post(`/api/admin/users/${_auId}/kill`, {});
+  document.getElementById("auMsg").textContent = "🛑 Kill switch activated."; document.getElementById("auMsg").className = "msg pos";
+};
+
+async function adminLoadPlans() {
+  let rows; try { rows = await api.get("/api/admin/plans"); } catch (e) { return; }
+  const box = document.getElementById("adminPlans");
+  box.innerHTML = `<table class="data"><thead><tr><th>Name</th><th>Days</th><th>Price</th><th>Active</th><th></th></tr></thead><tbody>`
+    + rows.map((p) => `<tr><td>${esc(p.name)}</td><td>${p.days}</td><td>₹${p.price}</td><td>${p.active ? "✓" : "—"}</td>
+      <td><button class="btn btn-sm" data-pl-edit='${JSON.stringify(p)}'>Edit</button>
+      <button class="btn btn-sm" data-pl-del="${p.id}">✕</button></td></tr>`).join("") + "</tbody></table>";
+  box.querySelectorAll("[data-pl-edit]").forEach((b) => b.onclick = () => {
+    const p = JSON.parse(b.dataset.plEdit);
+    document.getElementById("adPlanId").value = p.id; document.getElementById("adPlanName").value = p.name;
+    document.getElementById("adPlanDays").value = p.days; document.getElementById("adPlanPrice").value = p.price;
+  });
+  box.querySelectorAll("[data-pl-del]").forEach((b) => b.onclick = async () => {
+    if (confirm("Delete plan?")) { await api.del("/api/admin/plans/" + b.dataset.plDel); adminLoadPlans(); }
+  });
+}
+document.getElementById("adSavePlan").onclick = async () => {
+  await api.post("/api/admin/plans", { id: document.getElementById("adPlanId").value || undefined,
+    name: document.getElementById("adPlanName").value, days: parseInt(document.getElementById("adPlanDays").value) || 30,
+    price: parseFloat(document.getElementById("adPlanPrice").value) || 0, active: true });
+  toast("✅ Plan saved", "pos"); document.getElementById("adPlanId").value = ""; adminLoadPlans();
+};
+
+let _adminSettings = null;
+async function adminLoadSettings() {
+  let s; try { s = await api.get("/api/admin/settings"); } catch (e) { return; }
+  _adminSettings = s;
+  document.getElementById("adRegOpen").checked = !!s.registration_open;
+  document.getElementById("adTrialDays").value = s.trial_days;
+  document.getElementById("adHowto").value = s.howto_md || "";
+  document.getElementById("adSmtpHost").value = s.smtp_host || "";
+  document.getElementById("adSmtpPort").value = s.smtp_port || 587;
+  document.getElementById("adSmtpUser").value = s.smtp_user || "";
+  document.getElementById("adSmtpSender").value = s.smtp_sender || "";
+  document.getElementById("adSmtpFrom").value = s.smtp_from || "";
+  document.getElementById("adSmtpBcc").value = s.smtp_bcc || "";
+}
+document.getElementById("adSaveSaas").onclick = async () => {
+  try {
+    await api.post("/api/admin/settings", { registration_open: document.getElementById("adRegOpen").checked,
+      trial_days: parseInt(document.getElementById("adTrialDays").value) || 7,
+      howto_md: document.getElementById("adHowto").value });
+    document.getElementById("adSaasMsg").textContent = "✅ Saved"; document.getElementById("adSaasMsg").className = "msg pos";
+    toast("✅ SaaS settings saved", "pos"); loadHowto();
+  } catch (e) { toast("❌ " + e.message, "neg"); }
+};
+document.getElementById("adSaveSmtp").onclick = async () => {
+  const body = { smtp_host: document.getElementById("adSmtpHost").value, smtp_port: parseInt(document.getElementById("adSmtpPort").value) || 587,
+    smtp_user: document.getElementById("adSmtpUser").value, smtp_sender: document.getElementById("adSmtpSender").value,
+    smtp_from: document.getElementById("adSmtpFrom").value, smtp_bcc: document.getElementById("adSmtpBcc").value };
+  const pw = document.getElementById("adSmtpPass").value; if (pw) body.smtp_pass = pw;
+  try { await api.post("/api/admin/settings", body);
+    document.getElementById("adEmailMsg").textContent = "✅ Saved"; document.getElementById("adEmailMsg").className = "msg pos";
+    toast("✅ Email settings saved", "pos");
+  } catch (e) { toast("❌ " + e.message, "neg"); }
+};
+document.getElementById("adTestEmail").onclick = async () => {
+  try { const d = await api.post("/api/admin/test_email", {}); toast(d.ok ? "✅ Test email queued" : "⚠️ " + d.message, d.ok ? "pos" : "neg"); }
+  catch (e) { toast("❌ " + e.message, "neg"); }
+};
+async function adminLoadTemplate() {
+  const key = document.getElementById("adTplKey").value;
+  try { const all = await api.get("/api/admin/templates"); const t = all[key] || {};
+    document.getElementById("adTplSubject").value = t.subject || "";
+    document.getElementById("adTplBody").value = t.body_html || "";
+  } catch (e) {}
+}
+document.getElementById("adTplKey").onchange = adminLoadTemplate;
+document.getElementById("adSaveTpl").onclick = async () => {
+  try { await api.post("/api/admin/templates", { key: document.getElementById("adTplKey").value,
+    subject: document.getElementById("adTplSubject").value, body_html: document.getElementById("adTplBody").value });
+    document.getElementById("adTplMsg").textContent = "✅ Saved"; document.getElementById("adTplMsg").className = "msg pos";
+    toast("✅ Template saved", "pos");
+  } catch (e) { toast("❌ " + e.message, "neg"); }
+};

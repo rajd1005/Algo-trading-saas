@@ -22,7 +22,8 @@ import threading
 import time
 
 from database import SessionLocal
-from models import Trade, LogEntry, Setting, Account
+from models import Trade, LogEntry, Setting, Account, User
+from usettings import uget, uset
 
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
@@ -62,48 +63,40 @@ class TradingEngine:
         self._thread = None
         self._running = False
         self.paper = PaperBroker()
-        self._last_rest = 0.0          # last time we used the REST fallback
-        self._rest_cache = {}          # last REST prices (warmup / fallback)
-        self._rest_cooldown = 0.0      # back off REST until this time (after a 429)
+        self._rest_cache = {}          # uid -> {instrument: last price}
+        self._rest_cooldowns = {}      # uid -> cooldown-until ts (after a 429)
+        self._rest_times = {}          # uid -> last REST poll ts
         self._demo = False             # DEMO mode (simulated prices + fake broker)
         self._demo_trade = True        # is the trading provider DEMO (paper)?
         self._trade_account_id = 0
+        self._cur_uid = 0
         self._warned_no_broker = False
-        self._last_feed_err = ""       # de-dupe feed errors in the log
-        self._last_rest_err = ""
 
     # ---------- lifecycle ----------
     def start(self):
         if self._running:
             return
         self._running = True
-        feed.start()                   # start the real-time WebSocket feed
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def stop(self):
         self._running = False
 
-    # ---------- settings helpers ----------
-    def _get_setting(self, db, key, default=""):
-        row = db.get(Setting, key)
-        return row.value if row else default
+    # ---------- per-user settings helpers ----------
+    def _get_setting(self, db, uid, key, default=""):
+        return uget(db, uid, key, default)
 
-    def _set_setting(self, db, key, value):
-        row = db.get(Setting, key)
-        if row:
-            if row.value != value:        # avoid a DB write every tick
-                row.value = value
-        else:
-            db.add(Setting(key=key, value=value))
-            db.flush()                    # make it visible to db.get() within this tick
-                                          # (autoflush is off) so we never double-insert
+    def _set_setting(self, db, uid, key, value):
+        uset(db, uid, key, value)
 
-    def _log(self, db, message, level="INFO", trade_id=0):
-        db.add(LogEntry(message=message, level=level, trade_id=trade_id))
+    def _log(self, db, message, level="INFO", trade_id=0, uid=None):
+        if uid is None:
+            uid = getattr(self, "_cur_uid", 0)
+        db.add(LogEntry(message=message, level=level, trade_id=trade_id, user_id=uid))
 
-    def _kill_switch_on(self, db) -> bool:
-        return self._get_setting(db, "kill_switch", "off") == "on"
+    def _kill_switch_on(self, db, uid) -> bool:
+        return uget(db, uid, "kill_switch", "off") == "on"
 
     def _trade_creds(self, db):
         return (self._get_setting(db, "dhan_client_id", config.DHAN_CLIENT_ID),
@@ -141,20 +134,23 @@ class TradingEngine:
                     pass
             time.sleep(config.ENGINE_INTERVAL_MS / 1000.0)
 
-    def _providers(self, db):
-        return (self._get_setting(db, "data_provider", "DEMO"),
-                self._get_setting(db, "trade_provider", "DEMO"))
+    def _providers(self, db, uid):
+        return (uget(db, uid, "data_provider", "DEMO"),
+                uget(db, uid, "trade_provider", "DEMO"))
 
-    def _provider_account(self, db, value):
+    def _provider_account(self, db, value, uid=None):
         if not value or value == "DEMO":
             return None
         try:
-            return db.get(Account, int(value))
+            a = db.get(Account, int(value))
         except Exception:
             return None
+        if a is not None and uid is not None and a.user_id != uid:
+            return None
+        return a
 
-    def _trade_broker(self, db, value):
-        acc = self._provider_account(db, value)
+    def _trade_broker(self, db, value, uid=None):
+        acc = self._provider_account(db, value, uid)
         if acc is None:
             return None     # DEMO -> paper
         creds = json.loads(acc.creds_json or "{}")
@@ -168,261 +164,249 @@ class TradingEngine:
             return AliceBroker(acc.client_id, creds["session_id"])
         return None
 
-    def _fetch_prices(self, db, value, instruments, active):
+    def _fetch_prices(self, db, uid, value, instruments, active):
         by_seg = {}
         for seg, sid in instruments:
             by_seg.setdefault(seg, []).append(sid)
-        acc = self._provider_account(db, value)
+        acc = self._provider_account(db, value, uid)
         if acc is None:     # DEMO
             if active:
-                self._set_setting(db, "md_status", "ok:demo")
+                self._set_setting(db, uid, "md_status", "ok:demo")
             return demo_market.get_ltp_batch(by_seg)
         creds = json.loads(acc.creds_json or "{}")
         if acc.broker == "DHAN":
             cid, tok = acc.client_id, creds.get("access_token", "")
             if not cid or not tok:
                 if active:
-                    self._set_setting(db, "md_status", "Data (Dhan) not connected — connect on the Broker tab.")
+                    self._set_setting(db, uid, "md_status", "Data (Dhan) not connected — connect on the Broker tab.")
                 return {}
-            return self._collect_prices(db, cid, tok, instruments)
+            return self._collect_prices(db, uid, cid, tok, instruments)
         if acc.broker == "ANGEL":
             cid, key, jwt = acc.client_id, creds.get("api_key", ""), creds.get("jwt", "")
             if not cid or not key or not jwt:
                 if active:
-                    self._set_setting(db, "md_status", "Data (Angel) not connected — connect on the Broker tab.")
+                    self._set_setting(db, uid, "md_status", "Data (Angel) not connected — connect on the Broker tab.")
                 return {}
             md = AngelMarketData(cid, key, jwt)
             prices = md.get_ltp_batch(by_seg)
             if active:
                 if prices:
-                    self._set_setting(db, "md_status", "ok:angel")
+                    self._set_setting(db, uid, "md_status", "ok:angel")
                 elif md.last_error:
-                    self._set_setting(db, "md_status", f"Angel data error: {md.last_error[:160]}")
+                    self._set_setting(db, uid, "md_status", f"Angel data error: {md.last_error[:160]}")
             return prices
         if acc.broker == "ZERODHA":
             key, tok = creds.get("api_key", ""), creds.get("access_token", "")
             if not key or not tok:
                 if active:
-                    self._set_setting(db, "md_status", "Data (Zerodha) not connected — connect on the Broker tab.")
+                    self._set_setting(db, uid, "md_status", "Data (Zerodha) not connected — connect on the Broker tab.")
                 return {}
             md = ZerodhaMarketData(key, tok)
             prices = md.get_ltp_batch(by_seg)
             if active:
                 if prices:
-                    self._set_setting(db, "md_status", "ok:zerodha")
+                    self._set_setting(db, uid, "md_status", "ok:zerodha")
                 elif md.last_error:
-                    self._set_setting(db, "md_status", f"Zerodha data error: {md.last_error[:160]}")
+                    self._set_setting(db, uid, "md_status", f"Zerodha data error: {md.last_error[:160]}")
             return prices
         if acc.broker == "ALICE":
             cid, sid = acc.client_id, creds.get("session_id", "")
             if not cid or not sid:
                 if active:
-                    self._set_setting(db, "md_status", "Data (Alice Blue) not connected — connect on the Broker tab.")
+                    self._set_setting(db, uid, "md_status", "Data (Alice Blue) not connected — connect on the Broker tab.")
                 return {}
             md = AliceMarketData(cid, sid)
             prices = md.get_ltp_batch(by_seg)
             if active:
                 if prices:
-                    self._set_setting(db, "md_status", "ok:alice")
+                    self._set_setting(db, uid, "md_status", "ok:alice")
                 elif md.last_error:
-                    self._set_setting(db, "md_status", f"Alice Blue data error: {md.last_error[:160]}")
+                    self._set_setting(db, uid, "md_status", f"Alice Blue data error: {md.last_error[:160]}")
             return prices
         return {}
 
     def _tick(self):
         db = SessionLocal()
         try:
-            active = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
-
-            data_provider, trade_provider = self._providers(db)
-            _trade_acc = self._provider_account(db, trade_provider)
-            self._demo_trade = _trade_acc is None
-            self._trade_account_id = _trade_acc.id if _trade_acc else 0
-            instruments = list({(t.exchange_segment, str(t.security_id))
-                                for t in active if t.security_id})
-
-            prices = self._fetch_prices(db, data_provider, instruments, active)
-            kill = self._kill_switch_on(db)
-            live_broker = self._trade_broker(db, trade_provider)
-
-            # Pass 1: refresh the latest price + live MTM on every OPEN trade, so the
-            # account-level risk checks below see fresh numbers.
-            for t in active:
-                if not t.security_id:
-                    continue
-                price = prices.get((t.exchange_segment, str(t.security_id)), 0.0)
-                if price <= 0:
-                    continue
-                t.last_price = price
-                if t.status == "OPEN":
-                    self._update_pnl(t, price)
-
-            # Account-level daily target / drawdown + step profit-lock (may square
-            # off everything and halt trading for the rest of the day).
-            self._check_daily_limits(db, active, live_broker)
-            self._check_global_lock(db, active, live_broker)
-            halted = self._daily_halted(db)
-
-            # Pass 2: per-trade entry/exit handling.
-            for t in active:
-                if not t.security_id:
-                    continue
-                price = prices.get((t.exchange_segment, str(t.security_id)), 0.0)
-                if price <= 0:
-                    continue
-                if t.status == "PENDING":
-                    self._handle_pending(db, t, price, kill, live_broker, halted)
-                elif t.status == "OPEN":
-                    self._handle_open(db, t, price, kill, live_broker)
-
+            active_all = db.query(Trade).filter(Trade.status.in_(["PENDING", "OPEN"])).all()
+            by_user = {}
+            for t in active_all:
+                by_user.setdefault(t.user_id or 0, []).append(t)
+            # Which users are allowed to run (active + not expired). Cache lookups.
+            for uid, active in by_user.items():
+                u = db.get(User, uid) if uid else None
+                if u is not None:
+                    if u.status == "BLOCKED":
+                        continue
+                    expired = u.role != "SUPER_ADMIN" and u.plan_expiry and \
+                        u.plan_expiry < dt.datetime.utcnow()
+                    if expired:
+                        continue       # plan expired -> halt this user's algos
+                self._tick_user(db, uid, active)
             db.commit()
         finally:
             db.close()
 
+    def _tick_user(self, db, uid, active):
+        self._cur_uid = uid           # engine logs default to this tenant
+        data_provider, trade_provider = self._providers(db, uid)
+        _trade_acc = self._provider_account(db, trade_provider, uid)
+        self._demo_trade = _trade_acc is None
+        self._trade_account_id = _trade_acc.id if _trade_acc else 0
+        instruments = list({(t.exchange_segment, str(t.security_id))
+                            for t in active if t.security_id})
+
+        prices = self._fetch_prices(db, uid, data_provider, instruments, active)
+        kill = self._kill_switch_on(db, uid)
+        live_broker = self._trade_broker(db, trade_provider, uid)
+
+        # Pass 1: refresh latest price + live MTM on every OPEN trade.
+        for t in active:
+            if not t.security_id:
+                continue
+            price = prices.get((t.exchange_segment, str(t.security_id)), 0.0)
+            if price <= 0:
+                continue
+            t.last_price = price
+            if t.status == "OPEN":
+                self._update_pnl(t, price)
+
+        # Account-level daily target / drawdown + step profit-lock.
+        self._check_daily_limits(db, uid, active, live_broker)
+        self._check_global_lock(db, uid, active, live_broker)
+        halted = self._daily_halted(db, uid)
+
+        # Pass 2: per-trade entry/exit handling.
+        for t in active:
+            if not t.security_id:
+                continue
+            price = prices.get((t.exchange_segment, str(t.security_id)), 0.0)
+            if price <= 0:
+                continue
+            if t.status == "PENDING":
+                self._handle_pending(db, t, price, kill, live_broker, halted)
+            elif t.status == "OPEN":
+                self._handle_open(db, t, price, kill, live_broker)
+
     # ---------- account-level daily risk ----------
-    def _account_day_pnl(self, db, account_id):
-        """Combined realized+unrealized P&L for today's trades on this account."""
+    def _account_day_pnl(self, db, uid):
+        """Combined realized+unrealized P&L for this user's trades today."""
         day_start = _ist_day_start_utc()
         rows = (db.query(Trade)
-                .filter(Trade.account_id == (account_id or 0),
+                .filter(Trade.user_id == uid,
                         Trade.status.in_(["OPEN", "CLOSED"]),
                         Trade.created_at >= day_start).all())
         return round(sum(t.pnl or 0 for t in rows), 2)
 
-    def _daily_halted(self, db):
-        return (self._get_setting(db, "daily_halt", "off") == "on"
-                and self._get_setting(db, "daily_halt_date", "") == _ist_today())
+    def _daily_halted(self, db, uid):
+        return (uget(db, uid, "daily_halt", "off") == "on"
+                and uget(db, uid, "daily_halt_date", "") == _ist_today())
 
-    def _reset_daily_if_new_day(self, db):
+    def _reset_daily_if_new_day(self, db, uid):
         today = _ist_today()
-        if self._get_setting(db, "daily_risk_date", "") != today:
-            self._set_setting(db, "daily_risk_date", today)
-            self._set_setting(db, "daily_halt", "off")
-            self._set_setting(db, "daily_halt_date", "")
-            self._set_setting(db, "daily_halt_reason", "")
-            self._set_setting(db, "global_lock_floor", "0")
+        if uget(db, uid, "daily_risk_date", "") != today:
+            self._set_setting(db, uid, "daily_risk_date", today)
+            self._set_setting(db, uid, "daily_halt", "off")
+            self._set_setting(db, uid, "daily_halt_date", "")
+            self._set_setting(db, uid, "daily_halt_reason", "")
+            self._set_setting(db, uid, "global_lock_floor", "0")
 
-    def _halt_account(self, db, active, live_broker, reason, exit_reason):
-        """Square off all OPEN trades on the active account and block new entries."""
-        acct = self._trade_account_id
+    def _halt_account(self, db, uid, active, live_broker, reason, exit_reason):
+        """Square off all OPEN trades of this user and block new entries today."""
         for t in active:
-            if t.status == "OPEN" and (t.account_id or 0) == acct:
+            if t.status == "OPEN":
                 broker = self._broker_for(t, live_broker)
                 if broker is not None:
                     self._exit_all(db, t, t.last_price, broker, exit_reason)
-        self._set_setting(db, "daily_halt", "on")
-        self._set_setting(db, "daily_halt_date", _ist_today())
-        self._set_setting(db, "daily_halt_reason", reason)
+        self._set_setting(db, uid, "daily_halt", "on")
+        self._set_setting(db, uid, "daily_halt_date", _ist_today())
+        self._set_setting(db, uid, "daily_halt_reason", reason)
         self._log(db, f"DAILY LIMIT: {reason} — squared off open positions and halted "
-                      f"new trading for today.", "WARN")
+                      f"new trading for today.", "WARN", uid=uid)
 
-    def _check_daily_limits(self, db, active, live_broker):
-        self._reset_daily_if_new_day(db)
-        if self._daily_halted(db):
+    def _check_daily_limits(self, db, uid, active, live_broker):
+        self._reset_daily_if_new_day(db, uid)
+        if self._daily_halted(db, uid):
             return
         try:
-            maxp = float(self._get_setting(db, "daily_max_profit", "") or 0)
-            maxl = float(self._get_setting(db, "daily_max_loss", "") or 0)
+            maxp = float(uget(db, uid, "daily_max_profit", "") or 0)
+            maxl = float(uget(db, uid, "daily_max_loss", "") or 0)
         except Exception:
             maxp = maxl = 0.0
         if maxp <= 0 and maxl <= 0:
             return
-        pnl = self._account_day_pnl(db, self._trade_account_id)
+        pnl = self._account_day_pnl(db, uid)
         if maxl > 0 and pnl <= -abs(maxl):
-            self._halt_account(db, active, live_broker,
+            self._halt_account(db, uid, active, live_broker,
                                f"Daily max loss ₹{abs(maxl):,.0f} hit (P&L ₹{pnl:,.0f})",
                                "DAILY_LOSS")
         elif maxp > 0 and pnl >= maxp:
-            self._halt_account(db, active, live_broker,
+            self._halt_account(db, uid, active, live_broker,
                                f"Daily max profit ₹{maxp:,.0f} hit (P&L ₹{pnl:,.0f})",
                                "DAILY_PROFIT")
 
     @staticmethod
     def _step_lock_floor(mtm, step, amount):
-        """Auto step profit-lock: for every ₹step of profit, secure ₹amount.
-        Returns the locked floor for the current MTM (0 = not armed)."""
+        """Auto step profit-lock: for every ₹step of profit, secure ₹amount."""
         if step <= 0 or amount <= 0 or mtm <= 0:
             return 0.0
         return math.floor(mtm / step) * amount
 
-    def _check_global_lock(self, db, active, live_broker):
-        if self._daily_halted(db):
+    def _check_global_lock(self, db, uid, active, live_broker):
+        if self._daily_halted(db, uid):
             return
         try:
-            step = float(self._get_setting(db, "global_lock_step", "") or 0)
-            amount = float(self._get_setting(db, "global_lock_amount", "") or 0)
+            step = float(uget(db, uid, "global_lock_step", "") or 0)
+            amount = float(uget(db, uid, "global_lock_amount", "") or 0)
         except Exception:
             step = amount = 0.0
         if step <= 0 or amount <= 0:
             return
-        pnl = self._account_day_pnl(db, self._trade_account_id)
+        pnl = self._account_day_pnl(db, uid)
         try:
-            floor = float(self._get_setting(db, "global_lock_floor", "0") or 0)
+            floor = float(uget(db, uid, "global_lock_floor", "0") or 0)
         except Exception:
             floor = 0.0
         new = self._step_lock_floor(pnl, step, amount)
         if new > floor:                       # ratchet up only
             floor = new
-            self._set_setting(db, "global_lock_floor", str(floor))
+            self._set_setting(db, uid, "global_lock_floor", str(floor))
             self._log(db, f"Account profit-lock armed — securing ₹{floor:,.0f} "
-                          f"(day P&L ₹{pnl:,.0f}).", "INFO")
+                          f"(day P&L ₹{pnl:,.0f}).", "INFO", uid=uid)
         if floor > 0 and pnl <= floor:
-            self._halt_account(db, active, live_broker,
+            self._halt_account(db, uid, active, live_broker,
                                f"Profit lock triggered — securing ₹{floor:,.0f} (P&L ₹{pnl:,.0f})",
                                "GLOBAL_LOCK")
 
-    def _collect_prices(self, db, cid, tok, instruments):
-        """Prefer the real-time WebSocket feed; fall back to REST for anything
-        not yet streaming (and if the websocket isn't connected)."""
-        feed.configure(cid, tok)
-        feed.ensure_subscribed(instruments)
-
-        # Log websocket feed errors (de-duplicated) so they appear in the log.
-        if feed.last_error and feed.last_error != self._last_feed_err:
-            self._last_feed_err = feed.last_error
-            self._log(db, f"WebSocket price feed error: {feed.last_error[:250]}", "ERROR")
-
-        prices = {}
-        for it in instruments:
-            p = feed.get_ltp(it[0], it[1])
-            if p > 0:
-                prices[it] = p
-
-        missing = [it for it in instruments if it not in prices]
-        md = DhanMarketData(cid, tok)
+    def _collect_prices(self, db, uid, cid, tok, instruments):
+        """Per-tenant Dhan prices via REST (the shared WebSocket feed can't serve
+        several tenants' credentials at once, so each user polls its own REST)."""
+        if not instruments:
+            return {}
+        cache = self._rest_cache.setdefault(uid, {})
+        cool = self._rest_cooldowns.get(uid, 0.0)
+        last = self._rest_times.get(uid, 0.0)
         now = time.time()
-        # Only hit REST every ~2s, and not at all during a 429 cool-down. The
-        # WebSocket feed is the primary source; REST is just a fallback.
-        if missing and now >= self._rest_cooldown and (now - self._last_rest) >= 2.0:
-            self._last_rest = now
+        prices = dict(cache)
+        if now >= cool and (now - last) >= 1.0:
+            self._rest_times[uid] = now
+            md = DhanMarketData(cid, tok)
             by_seg = {}
-            for seg, sid in missing:
+            for seg, sid in instruments:
                 by_seg.setdefault(seg, []).append(sid)
             rest = md.get_ltp_batch(by_seg)
             prices.update(rest)
-            self._rest_cache.update(rest)
+            cache.update(rest)
             if md.last_error:
                 if "429" in md.last_error or "Too many" in md.last_error:
-                    self._rest_cooldown = now + 30      # back off for 30s
-                    self._log(db, "Dhan rate-limited the price feed (429) — backing off REST "
-                                  "for 30s; using the WebSocket feed.", "WARN")
-                elif md.last_error != self._last_rest_err:
-                    self._last_rest_err = md.last_error
-                    self._log(db, f"REST price feed error: {md.last_error[:250]}", "ERROR")
+                    self._rest_cooldowns[uid] = now + 30
+                    self._log(db, "Dhan rate-limited the price feed (429) — backing off 30s.", "WARN", uid=uid)
+                else:
+                    self._log(db, f"REST price feed error: {md.last_error[:200]}", "ERROR", uid=uid)
                 if not prices:
-                    self._set_setting(db, "md_status", f"Price feed error: {md.last_error[:200]}")
-        # use last known REST price for anything still missing
-        for it in missing:
-            if it not in prices and it in self._rest_cache:
-                prices[it] = self._rest_cache[it]
-
-        # status banner
-        if not instruments:
-            pass
-        elif feed.connected:
-            self._set_setting(db, "md_status", "ok:ws")
-        elif prices:
-            self._set_setting(db, "md_status", "ok:rest")
+                    self._set_setting(db, uid, "md_status", f"Price feed error: {md.last_error[:160]}")
+        if prices:
+            self._set_setting(db, uid, "md_status", "ok:rest")
         return prices
 
     def _broker_for(self, t, live_broker):

@@ -216,6 +216,11 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
 .wl-x:hover { color: var(--red); background: rgba(248,81,73,.15); }
 .wl-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--accent);
   background: rgba(47,129,247,.15); border-radius: 4px; padding: 1px 5px; }
+.howto h3 { color: var(--accent); font-size: 14px; margin: 10px 0 4px; }
+.howto p { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 4px 0; }
+.howto b { color: var(--text); }
+.asec textarea { background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 8px; padding: 10px; font-size: 13px; font-family: inherit; }
 
 /* toast notifications */
 .toast-host { position: fixed; top: 16px; right: 16px; z-index: 9999;
