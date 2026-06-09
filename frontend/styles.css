@@ -318,3 +318,116 @@ details.live-only summary { cursor: pointer; padding: 8px 0; }
   100% { box-shadow: 0 0 0 9px rgba(47,129,247,0); } }
 .pulse { animation: pulseGlow .8s ease-out; }
 .link { color: var(--accent); cursor: pointer; text-decoration: underline; }
+
+/* ============================================================
+   MOBILE-FIRST RESPONSIVE LAYER  (90% of users are on mobile)
+   Applies the ui-ux-pro-max rules: 44px touch targets, 16px
+   inputs (no iOS auto-zoom), bottom nav, scrollable data tables,
+   bottom-sheet modals, stacked forms, safe-area handling.
+   ============================================================ */
+html { -webkit-text-size-adjust: 100%; }
+/* faster taps + no accidental double-tap zoom on controls */
+button, .btn, .tab, .seg, .opt, .step, input, select, textarea,
+.wl-chip, .chain-cell, .fut-btn, .acct-row, .rte-b, .rte-ph-chip, [data-dir] {
+  touch-action: manipulation;
+}
+img, svg, canvas { max-width: 100%; }
+
+@media (max-width: 760px) {
+  /* ----- global density ----- */
+  body { padding-bottom: calc(60px + env(safe-area-inset-bottom)); }  /* room for bottom nav */
+  .tab-panel { padding: 14px 12px; }
+  .pnl-section { padding: 12px 12px 2px; }
+  .banner, .alert-banner { margin-left: 12px; margin-right: 12px; }
+
+  /* ----- header: logo row + wrapping status chips ----- */
+  header { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 17px; }
+  .header-right { gap: 8px; flex-wrap: wrap; width: 100%; }
+  .broker-status { font-size: 11px; padding: 5px 9px; }
+  #userId { order: -1; }                 /* who-am-i first */
+  .pill { font-size: 11px; }
+
+  /* ----- P&L cards: 2-up, Total full width ----- */
+  .cards { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .card { padding: 12px 13px; }
+  .card-value { font-size: 20px; }
+  .card-total { grid-column: 1 / -1; }
+  .pnl-title { font-size: 15px; }
+  .pnl-head { gap: 8px; }
+  .pnl-head select, .pnl-head input[type=date] { flex: 1 1 auto; min-width: 0; }
+
+  /* ----- TABS -> fixed bottom navigation (thumb reach) ----- */
+  .tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
+    padding: 0 0 env(safe-area-inset-bottom); gap: 0;
+    background: var(--panel); border-top: 1px solid var(--line); border-bottom: none;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    box-shadow: 0 -4px 16px rgba(0,0,0,.35);
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex: 1 0 auto; min-width: 70px; text-align: center;
+    padding: 11px 8px; font-size: 12px; white-space: nowrap;
+    border-bottom: none; border-top: 2px solid transparent;
+  }
+  .tab.active { border-top-color: var(--accent); border-bottom-color: transparent; }
+
+  /* ----- DATA TABLES: horizontal scroll instead of page overflow ----- */
+  table.data {
+    display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    white-space: nowrap; font-size: 12px;
+  }
+  table.data th, table.data td { padding: 10px 9px; }
+
+  /* ----- FORMS: full-width stacked fields, 16px inputs ----- */
+  .form { max-width: 100%; padding: 14px; }
+  .row { gap: 10px; }
+  .form label { min-width: 100%; flex: 1 1 100%; }
+  .form input, .form select, .form textarea,
+  input, select, textarea { font-size: 16px; min-height: 44px; }
+  .lock-rule input, .pnl-head input, .pnl-head select { min-height: 40px; }
+
+  /* comfortable, thumb-sized controls */
+  .btn { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; }
+  .btn-sm { min-height: 34px; padding: 6px 11px; }
+  .btn-group { flex-wrap: wrap; }
+  .opt, .seg, .fut-btn, .step { min-height: 42px; }
+  .seg-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; }
+  .seg { white-space: nowrap; }
+
+  /* ----- OPTION CHAIN: tighter strike column, bigger tap rows ----- */
+  .chain-head, .chain-row { grid-template-columns: 1fr 56px 1fr; }
+  .chain-cell { padding: 13px 8px; font-size: 12px; }
+  .chain-strike { padding: 13px 4px; font-size: 12px; }
+  .chain-body { max-height: 50vh; }
+
+  /* ----- MODALS -> bottom sheet ----- */
+  .modal-overlay { align-items: flex-end; }
+  .modal {
+    width: 100%; max-width: 100%; border-radius: 16px 16px 0 0;
+    max-height: 90vh; overflow-y: auto; padding: 16px 14px;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+  .modal.modal-xl { width: 100%; max-width: 100%; max-height: 94vh; }
+  .au-grid { gap: 12px; }
+
+  /* ----- toasts: full-width banners at the top ----- */
+  .toast-host { left: 8px; right: 8px; top: 8px; max-width: none; }
+
+  /* misc bars wrap nicely */
+  .logs-bar, .demo-bar, .watchlist-bar { gap: 8px; }
+  .webhook-box code { font-size: 11px; }
+}
+
+/* very small phones */
+@media (max-width: 380px) {
+  .cards { grid-template-columns: 1fr; }
+  header h1 { font-size: 16px; }
+  .tab { min-width: 62px; font-size: 11px; padding: 10px 6px; }
+}
+
+/* respect reduced-motion (accessibility) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
