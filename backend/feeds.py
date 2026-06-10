@@ -78,18 +78,23 @@ class BaseFeed:
         self.connected = False
 
     def _run_loop(self):
+        backoff = 3
         while self._running:
             try:
                 self._ws = websocket.WebSocketApp(
                     self._url(), header=self._headers(),
                     on_open=self._on_open, on_message=self._on_message,
                     on_error=self._on_error, on_close=self._on_close)
+                # A connection that opened resets the backoff; one that fails fast grows it.
+                started = time.time()
                 self._ws.run_forever(ping_interval=25, ping_timeout=10)
+                backoff = 3 if (time.time() - started) > 30 else min(backoff * 2, 30)
             except Exception as e:
                 self.last_error = str(e)
+                backoff = min(backoff * 2, 30)
             self.connected = False
             if self._running:
-                time.sleep(3)          # backoff then reconnect
+                time.sleep(backoff)    # exponential backoff so a bad socket can't hammer
 
     # ---- reads / subscriptions (used by the manager) ----
     def subscribe(self, instruments):

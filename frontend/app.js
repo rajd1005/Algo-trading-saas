@@ -763,9 +763,15 @@ let _selContract = null;     // the contract currently shown in "selected"
 let _es = null;
 let _classifyTimer = null;
 
+function stopStream() {
+  try { if (_es) _es.close(); } catch (e) {}
+  _es = null;
+}
 function startStream() {
-  if (_es || typeof EventSource === "undefined") return;
-  try { _es = new EventSource("/api/stream"); } catch (e) { return; }
+  if (typeof EventSource === "undefined") return;
+  if (document.hidden) return;                 // don't stream to a backgrounded tab
+  stopStream();                                // never stack a second connection
+  try { _es = new EventSource("/api/stream"); } catch (e) { _es = null; return; }
   _es.onmessage = (ev) => {
     if (!ev.data) return;
     let obj; try { obj = JSON.parse(ev.data); } catch (e) { return; }
@@ -773,9 +779,14 @@ function startStream() {
   };
   _es.onerror = () => {
     // The browser auto-reconnects an open stream; if it fully closed, retry.
-    if (_es && _es.readyState === EventSource.CLOSED) { _es = null; setTimeout(startStream, 3000); }
+    if (_es && _es.readyState === EventSource.CLOSED) { _es = null; if (!document.hidden) setTimeout(startStream, 3000); }
   };
 }
+// Release the live stream when the tab is hidden (saves a server connection per
+// idle tab); reopen it the moment the user comes back.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopStream(); else startStream();
+});
 
 function onTicks(obj) {
   let touchedChain = false;

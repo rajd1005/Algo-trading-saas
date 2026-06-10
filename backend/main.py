@@ -554,6 +554,23 @@ def _startup():
     threading.Thread(target=_purge_loop, daemon=True).start()
 
 
+@app.on_event("shutdown")
+def _shutdown():
+    """Make `systemctl restart` fast: tell SSE streams to stop and close every
+    broker WebSocket so uvicorn isn't left waiting on long-lived connections."""
+    global _shutting_down
+    _shutting_down = True
+    try:
+        engine.stop()
+    except Exception:
+        pass
+    try:
+        for aid in list(feeds.manager._feeds.keys()):
+            feeds.manager.stop(aid)
+    except Exception:
+        pass
+
+
 def _migrate_accounts(db):
     """One-time: turn legacy single-account settings into Account rows."""
     if db.query(Account).count() > 0:
@@ -1050,6 +1067,7 @@ def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
 # net, so prices keep flowing even if the stream/socket drops.
 _watch = {}                     # uid -> {"acc_id": int, "demo": bool, "items": [(seg, sid)]}
 _watch_lock = threading.Lock()
+_shutting_down = False          # set on app shutdown so SSE streams exit at once
 
 
 @app.post("/api/stream/watch")
@@ -1089,9 +1107,13 @@ async def stream(request: Request):
         hb = t0
         yield "retry: 3000\n\n"
         while True:
+            # Exit promptly on shutdown (so `systemctl restart` is fast) or once
+            # the client goes away (so connections never pile up).
+            if _shutting_down:
+                break
             if await request.is_disconnected():
                 break
-            if time.time() - t0 > 600:          # recycle hourly-ish; client reconnects
+            if time.time() - t0 > 120:          # recycle every 2 min; client reconnects
                 break
             with _watch_lock:
                 w = _watch.get(uid)
@@ -2526,4 +2548,7 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host=config.HOST, port=config.PORT, reload=False)
+    # timeout_graceful_shutdown caps how long uvicorn waits for in-flight
+    # connections (e.g. open SSE streams) before force-closing — keeps restarts fast.
+    uvicorn.run("main:app", host=config.HOST, port=config.PORT, reload=False,
+                timeout_graceful_shutdown=5)
