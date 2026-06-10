@@ -916,6 +916,8 @@ form.onsubmit = async (e) => {
     msg.textContent = "❌ Please search and select a symbol first.";
     msg.className = "msg neg"; return;
   }
+  // Group mode: this form is firing a copy-trading group's master order.
+  if (gpMode.active) { await gpSubmit(payload); return; }
   // Basket mode: this form is configuring a basket leg, not a standalone trade.
   if (bkMode.active) { await bkSubmitLeg(payload); return; }
   try {
@@ -1567,7 +1569,7 @@ loadSettings();
 loadWatchlist();
 refreshAll();
 startStream();          // open the real-time tick stream (SSE)
-setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); bkPoll(); }, 2000);
+setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); bkPoll(); gpPoll(); }, 2000);
 
 // ---- how-to guide (admin-editable rich HTML, shown on the Broker tab) ----
 async function loadHowto() {
@@ -2032,6 +2034,7 @@ function bkExitMode(goBack) {
 }
 function bkStartAddLeg() {
   if (!BK.cur) { toast("⚠️ Create or select a basket first.", "neg"); return; }
+  if (typeof gpExitMode === "function") gpExitMode(false);    // leave group mode if it was on
   bkMode = { active: true, basketId: BK.cur, legId: null };
   ulSearch.value = ""; resetOrderForm(); resetPicker();
   document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
@@ -2236,3 +2239,201 @@ function bkInit() {
 }
 bkInit();
 bkLoad();
+
+// ============================================================================
+// Copy-trading groups (Master -> Slaves replication)
+// ============================================================================
+const GP = { list: [], cur: null, accounts: [] };
+let gpMode = { active: false, groupId: null };
+
+function gpCur() { return GP.list.find((g) => g.id === GP.cur) || null; }
+
+async function gpLoadOptions() {
+  try { GP.accounts = (await api.get("/api/groups/options")).accounts || []; } catch (e) { GP.accounts = []; }
+}
+function gpAcctOptions(selectedId) {
+  return `<option value="0">Demo / Paper</option>` + GP.accounts.map((a) =>
+    `<option value="${a.id}"${a.id === selectedId ? " selected" : ""}>${esc(a.label)}${a.connected ? "" : " (offline)"}</option>`).join("");
+}
+
+async function gpLoad(keepId) {
+  await gpLoadOptions();
+  try { GP.list = await api.get("/api/groups"); } catch { GP.list = []; }
+  if (keepId && GP.list.find((g) => g.id === keepId)) GP.cur = keepId;
+  if (!GP.cur || !GP.list.find((g) => g.id === GP.cur)) GP.cur = GP.list[0] ? GP.list[0].id : null;
+  gpRenderSelect();
+  gpRenderPanel();
+}
+const gpReload = () => gpLoad(GP.cur);
+function gpMerge(g) {
+  const i = GP.list.findIndex((x) => x.id === g.id);
+  if (i >= 0) GP.list[i] = g; else GP.list.unshift(g);
+  GP.cur = g.id; gpRenderSelect(); gpRenderPanel();
+}
+function gpRenderSelect() {
+  const sel = document.getElementById("gpSelect");
+  sel.innerHTML = GP.list.map((g) => `<option value="${g.id}">${esc(g.name)} · ${g.slaves.length} slaves</option>`).join("");
+  document.getElementById("gpEmpty").style.display = GP.list.length ? "none" : "";
+  document.getElementById("gpPanel").style.display = GP.list.length ? "" : "none";
+  if (GP.cur) sel.value = GP.cur;
+}
+function gpRenderPanel() {
+  const g = gpCur();
+  if (!g) { document.getElementById("gpPanel").style.display = "none"; return; }
+  document.getElementById("gpPanel").style.display = "";
+  document.getElementById("gpName").value = g.name;
+  document.getElementById("gpMaster").innerHTML = gpAcctOptions(g.master_account_id);
+  document.getElementById("gpActive").checked = g.is_active;
+  document.getElementById("gpSlaveAcct").innerHTML = gpAcctOptions(0);
+  gpRefreshLive(g);
+}
+function gpRefreshLive(g) {
+  if (!g || gpCur()?.id !== g.id) return;
+  document.getElementById("gpMtm").innerHTML = `Open ${g.open_count} · MTM <b class="${cls(g.slave_mtm)}">${money(g.slave_mtm)}</b>`;
+  document.getElementById("gpStatusMtm").innerHTML = g.open_count ? `— ${g.open_count} slave position(s) open` : "";
+  gpRenderSlaves(g);
+  gpRenderMasters(g);
+  gpRenderScheduled(g);
+  document.getElementById("gpSquareoff").style.display = g.open_count ? "" : "none";
+}
+function gpStatusBadge(s) {
+  const m = { OPEN: ["exec", "Executed"], EXECUTED: ["exec", "Executed"], CLOSED: ["closed", "Closed"],
+              REJECTED: ["fail", "Failed"], FAILED: ["fail", "Failed"], PENDING: ["pend", "Pending"] };
+  const x = m[s] || ["", s || "—"];
+  return `<span class="lst ${x[0]}">${x[1]}</span>`;
+}
+function gpRenderSlaves(g) {
+  const body = document.getElementById("gpSlavesBody");
+  body.innerHTML = g.slaves.length ? g.slaves.map((s) => `<tr>
+    <td>${esc(s.label)}</td>
+    <td>${s.condition_type === "FIXED" ? "Fixed" : "Multiplier"}</td>
+    <td>${s.condition_type === "FIXED" ? s.condition_value + " lots" : s.condition_value + "×"}</td>
+    <td><input type="checkbox" ${s.is_active ? "checked" : ""} onchange="gpToggleSlave(${s.id}, this.checked)"></td>
+    <td><button class="ic-btn" title="Remove" onclick="gpDelSlave(${s.id})">✕</button></td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted" style="text-align:center;padding:10px;">No slaves yet — add follower accounts below.</td></tr>`;
+}
+function gpRenderMasters(g) {
+  const box = document.getElementById("gpMasters");
+  if (!g.masters.length) {
+    box.innerHTML = `<div class="muted" style="padding:10px;">No group trades yet — tap <b>⚡ Execute Group Trade</b>.</div>`;
+    return;
+  }
+  box.innerHTML = g.masters.map((m) => {
+    const done = m.slaves.filter((s) => ["OPEN", "EXECUTED", "CLOSED"].includes(s.status)).length;
+    const open = m.slaves.length > 0 && m.slaves.some((s) => s.status === "FAILED" || s.status === "REJECTED");
+    return `<details class="gp-master"${open ? " open" : ""}>
+      <summary class="gp-master-sum">
+        <span class="gp-m-main"><b class="${m.side === "BUY" ? "pos" : "neg"}">${m.side}</b> ${esc(m.symbol)} ×${m.qty}</span>
+        ${gpStatusBadge(m.status)}
+        <span class="muted gp-m-count">${done}/${m.slaves.length} slaves</span>
+        <span class="${cls(m.pnl)}">${m.pnl ? money(m.pnl) : ""}</span>
+      </summary>
+      <table class="data gp-slave-table"><thead><tr><th>Slave</th><th>Side</th><th>Qty</th><th>LTP</th><th>P&L</th><th>Status</th></tr></thead>
+      <tbody>${m.slaves.map((s) => `<tr class="${s.status === "REJECTED" || s.status === "FAILED" ? "leg-fail" : ""}" title="${esc(s.error || "")}">
+        <td>${esc(s.account)}</td><td class="${s.side === "BUY" ? "pos" : "neg"}">${s.side}</td><td>${s.qty}</td>
+        <td>${s.ltp ? "₹" + s.ltp : "–"}</td><td class="${cls(s.pnl)}">${s.pnl ? money(s.pnl) : "–"}</td>
+        <td>${gpStatusBadge(s.status)}${s.error ? ` <span class="muted" style="font-size:10px;">${esc(s.error)}</span>` : ""}</td></tr>`).join("")}</tbody></table>
+    </details>`;
+  }).join("");
+}
+function gpRenderScheduled(g) {
+  document.getElementById("gpSchedList").innerHTML = (g.scheduled || []).map((o) =>
+    `<div class="gp-sched-item">⏱ <b class="${o.side === "BUY" ? "pos" : "neg"}">${o.side}</b> ${esc(o.symbol)} ×${o.qty_lots} lot @ <b>${esc(o.at)} IST</b>
+      <button class="ic-btn" title="Cancel" onclick="gpCancelSched(${o.id})">✕</button></div>`).join("");
+}
+async function gpLoadLogs() {
+  const g = gpCur(); if (!g) return;
+  let rows; try { rows = await api.get(`/api/groups/${g.id}/logs`); } catch { return; }
+  document.getElementById("gpLogsBody").innerHTML = rows.map((r) =>
+    `<tr><td>${fmtIST(r.time)}</td><td>${r.action}</td><td>${esc(r.account)}</td><td>${gpStatusBadge(r.status)}</td><td class="muted">${esc(r.error || "")}</td></tr>`).join("")
+    || `<tr><td colspan="5" class="muted">No executions yet.</td></tr>`;
+}
+
+// ---- builder actions ----
+async function gpToggleSlave(id, on) { try { gpMerge(await api.post(`/api/groups/${GP.cur}/slaves/${id}`, { is_active: on })); } catch (e) {} }
+async function gpDelSlave(id) { try { gpMerge(await api.del(`/api/groups/${GP.cur}/slaves/${id}`)); } catch (e) {} }
+async function gpCancelSched(id) { try { gpMerge(await api.post(`/api/groups/${GP.cur}/cancel_schedule/${id}`)); toast("Schedule cancelled", "info"); } catch (e) {} }
+
+// ---- instant / scheduled master execution via the full trade form ----
+function gpEnterMode(g) {
+  if (typeof bkExitMode === "function") bkExitMode(false);
+  gpMode = { active: true, groupId: g.id };
+  document.body.classList.add("group-mode");
+  document.getElementById("gpModeBar").style.display = "flex";
+  document.getElementById("gpModeName").textContent = `${g.name} → ${g.master_label}`;
+  document.getElementById("gpFormDate").value = ""; document.getElementById("gpFormTime").value = "";
+  document.getElementById("tradeSubmitBtn").textContent = "⚡ Fire master & copy";
+}
+function gpExitMode(goBack) {
+  gpMode = { active: false, groupId: null };
+  document.body.classList.remove("group-mode");
+  const bar = document.getElementById("gpModeBar"); if (bar) bar.style.display = "none";
+  const btn = document.getElementById("tradeSubmitBtn"); if (btn && !(typeof bkMode !== "undefined" && bkMode.active)) btn.textContent = "Create Trade";
+  if (goBack) switchTab("groups");
+}
+function gpStartExecute() {
+  const g = gpCur(); if (!g) return;
+  if (!g.is_active) { toast("Turn the group ON first.", "neg"); return; }
+  ulSearch.value = ""; resetOrderForm(); resetPicker();
+  document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
+  document.getElementById("formMsg").textContent = "";
+  gpEnterMode(g);
+  switchTab("new");
+}
+async function gpSubmit(payload) {
+  const order = {
+    side: payload.side, security_id: payload.security_id, exchange_segment: payload.exchange_segment,
+    instrument_type: payload.instrument_type, symbol: payload.symbol,
+    lot_size: currentLotSize, qty_lots: parseInt(lotsInput.value) || 1,
+    date: document.getElementById("gpFormDate").value, time: document.getElementById("gpFormTime").value,
+  };
+  try {
+    const r = await api.post(`/api/groups/${gpMode.groupId}/execute`, order);
+    if (r.scheduled) toast(`⏱ Group scheduled for ${r.scheduled_at_ist} IST`, "pos");
+    else toast("⚡ Firing master & copying to slaves…", "pos");
+    gpExitMode(true);
+    setTimeout(gpReload, 1200);
+  } catch (e) {}
+}
+
+function gpPoll() {
+  if (!document.getElementById("tab-groups").classList.contains("active")) return;
+  api.get("/api/groups").then((list) => { GP.list = list; const g = gpCur(); if (g) gpRefreshLive(g); else gpRenderSelect(); }).catch(() => {});
+}
+
+function gpInit() {
+  document.getElementById("gpCreate").onclick = async () => {
+    const name = document.getElementById("gpNewName").value.trim();
+    try { const g = await api.post("/api/groups", { name: name || "Group", master_account_id: 0 });
+      document.getElementById("gpNewName").value = ""; await gpLoad(g.id); toast("✅ Group created", "pos"); } catch (e) {}
+  };
+  document.getElementById("gpSelect").onchange = (e) => { GP.cur = parseInt(e.target.value); gpRenderPanel(); };
+  document.getElementById("gpName").onchange = async (e) => { try { gpMerge(await api.post(`/api/groups/${GP.cur}`, { name: e.target.value })); } catch (er) {} };
+  document.getElementById("gpMaster").onchange = async (e) => { try { gpMerge(await api.post(`/api/groups/${GP.cur}`, { master_account_id: parseInt(e.target.value) })); } catch (er) {} };
+  document.getElementById("gpActive").onchange = async (e) => { try { gpMerge(await api.post(`/api/groups/${GP.cur}`, { is_active: e.target.checked })); } catch (er) {} };
+  document.getElementById("gpAddSlave").onclick = async () => {
+    try {
+      gpMerge(await api.post(`/api/groups/${GP.cur}/slaves`, {
+        slave_account_id: parseInt(document.getElementById("gpSlaveAcct").value),
+        condition_type: document.getElementById("gpSlaveType").value,
+        condition_value: parseFloat(document.getElementById("gpSlaveVal").value) || 1,
+      }));
+      toast("✅ Slave added", "pos");
+    } catch (e) {}
+  };
+  document.getElementById("gpExecute").onclick = gpStartExecute;
+  document.getElementById("gpSquareoff").onclick = async () => {
+    if (!confirm("Square off ALL open slave positions in this group at market?")) return;
+    try { const r = await api.post(`/api/groups/${GP.cur}/squareoff`); toast(`⊗ Closing ${r.closing} position(s)…`, "info"); setTimeout(gpReload, 1200); } catch (e) {}
+  };
+  document.getElementById("gpDelete").onclick = async () => {
+    if (!confirm("Delete this group?")) return;
+    try { await api.del(`/api/groups/${GP.cur}`); GP.cur = null; await gpLoad(); toast("Group deleted", "info"); } catch (e) {}
+  };
+  document.getElementById("gpModeCancel").onclick = () => gpExitMode(true);
+  const logs = document.querySelector(".gp-logs");
+  if (logs) logs.addEventListener("toggle", () => { if (logs.open) gpLoadLogs(); });
+  document.querySelector('.tab[data-tab="groups"]').addEventListener("click", () => gpLoad(GP.cur));
+}
+gpInit();
+gpLoad();

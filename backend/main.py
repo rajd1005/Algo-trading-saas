@@ -38,11 +38,13 @@ import aliceblue
 import feeds
 import baskets
 import margins
+import replication
 
 import config
 from database import init_db, get_db, SessionLocal
 from models import (Trade, LogEntry, Setting, Account, SymbolPreset, Watchlist,
-                    User, Plan, EmailTemplate, UserSetting, Basket, BasketLeg)
+                    User, Plan, EmailTemplate, UserSetting, Basket, BasketLeg,
+                    ExecutionGroup, GroupSlave, GroupTradeLog, GroupScheduledOrder)
 from schemas import (TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn,
                      SymbolPresetIn, WatchlistIn)
 from engine import engine, level_price
@@ -548,6 +550,7 @@ def _startup():
     aliceblue.mapper.load_async()  # download Alice Blue contract masters + symbol map
     engine.start()
     baskets.start()            # basket scheduler + leg/MTM monitor threads
+    replication.start()        # copy-trading: master-fill monitor + group scheduler
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
     threading.Thread(target=_fetch_static_ip, daemon=True).start()
@@ -1866,6 +1869,246 @@ def basket_retry(basket_id: int, request: Request, db: Session = Depends(get_db)
         raise HTTPException(400, "Daily limit hit — trading is halted for today.")
     baskets.retry_failed(b.id)
     return {"dispatching": True}
+
+
+# ---------- replication groups (copy-trading: master -> slaves) ----------
+def _owned_group(db, gid, uid):
+    g = db.get(ExecutionGroup, gid)
+    if g is None or g.user_id != uid:
+        raise HTTPException(404, "Group not found.")
+    return g
+
+
+def _acct_label(db, account_id):
+    if not account_id:
+        return "Demo / Paper"
+    a = db.get(Account, account_id)
+    return (a.label or _label(a.broker, a.client_id)) if a else f"#{account_id}"
+
+
+def _ist_str(d):
+    if not d:
+        return ""
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    return d.replace(tzinfo=dt.timezone.utc).astimezone(ist).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _group_dict(db, g):
+    slaves_cfg = (db.query(GroupSlave).filter(GroupSlave.group_id == g.id)
+                  .order_by(GroupSlave.id).all())
+    slave_trades = (db.query(Trade).filter(Trade.group_id == g.id, Trade.source == "SLAVE")
+                    .order_by(Trade.id.desc()).all())
+    by_master = {}
+    for st in slave_trades:
+        by_master.setdefault(st.master_trade_id, []).append(st)
+    masters = []
+    for mid in sorted(by_master.keys(), reverse=True)[:15]:
+        mt = db.get(Trade, mid)
+        sts = by_master[mid]
+        masters.append({
+            "master_trade_id": mid,
+            "symbol": (mt.symbol if mt else sts[0].symbol),
+            "side": (mt.side if mt else sts[0].side),
+            "qty": (mt.quantity if mt else 0),
+            "status": (mt.status if mt else ""),
+            "entry": (mt.entry_fill_price if mt else 0),
+            "pnl": (mt.pnl if mt else 0),
+            "time": (mt.created_at.isoformat() if mt and mt.created_at else ""),
+            "slaves": [{
+                "id": s.id, "account": _acct_label(db, s.account_id), "side": s.side,
+                "qty": s.quantity, "status": s.status, "entry": s.entry_fill_price,
+                "ltp": s.last_price, "pnl": s.pnl,
+                "error": (s.exit_reason if s.status == "REJECTED" else ""),
+            } for s in sts],
+        })
+    open_slaves = [t for t in slave_trades if t.status == "OPEN"]
+    sched = (db.query(GroupScheduledOrder)
+             .filter(GroupScheduledOrder.group_id == g.id, GroupScheduledOrder.status == "PENDING")
+             .order_by(GroupScheduledOrder.id).all())
+    return {
+        "id": g.id, "name": g.name, "master_account_id": g.master_account_id,
+        "master_label": _acct_label(db, g.master_account_id), "is_active": bool(g.is_active),
+        "open_count": len(open_slaves),
+        "slave_mtm": round(sum((t.pnl or 0) for t in open_slaves), 2),
+        "slaves": [{
+            "id": s.id, "slave_account_id": s.slave_account_id,
+            "label": _acct_label(db, s.slave_account_id), "condition_type": s.condition_type,
+            "condition_value": s.condition_value, "is_active": bool(s.is_active),
+        } for s in slaves_cfg],
+        "masters": masters,
+        "scheduled": [{"id": o.id, "side": o.side, "symbol": o.symbol, "qty_lots": o.qty_lots,
+                       "at": _ist_str(o.scheduled_at)} for o in sched],
+    }
+
+
+@app.get("/api/groups/options")
+def group_options(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    accts = db.query(Account).filter(Account.user_id == me.id).order_by(Account.id).all()
+    return {"accounts": [{"id": a.id, "label": a.label or _label(a.broker, a.client_id),
+                          "broker": a.broker, "connected": bool(a.connected)} for a in accts]}
+
+
+@app.get("/api/groups")
+def group_list(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    gs = db.query(ExecutionGroup).filter(ExecutionGroup.user_id == me.id).order_by(ExecutionGroup.id.desc()).all()
+    return [_group_dict(db, g) for g in gs]
+
+
+@app.post("/api/groups")
+def group_create(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    name = (str(payload.get("name", "")).strip() or "Group")[:60]
+    master = int(payload.get("master_account_id", 0) or 0)
+    if master and not db.query(Account).filter(Account.id == master, Account.user_id == me.id).first():
+        raise HTTPException(400, "Pick one of your own accounts as Master.")
+    g = ExecutionGroup(user_id=me.id, name=name, master_account_id=master, is_active=1)
+    db.add(g)
+    db.commit()
+    return _group_dict(db, g)
+
+
+@app.post("/api/groups/{group_id}")
+def group_update(group_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    if "name" in payload:
+        g.name = (str(payload["name"]).strip()[:60]) or g.name
+    if "master_account_id" in payload:
+        m = int(payload["master_account_id"] or 0)
+        if m and not db.query(Account).filter(Account.id == m, Account.user_id == me.id).first():
+            raise HTTPException(400, "Pick one of your own accounts as Master.")
+        g.master_account_id = m
+    if "is_active" in payload:
+        g.is_active = 1 if payload["is_active"] else 0
+    db.commit()
+    return _group_dict(db, g)
+
+
+@app.delete("/api/groups/{group_id}")
+def group_delete(group_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    db.query(GroupSlave).filter(GroupSlave.group_id == g.id).delete()
+    db.query(GroupScheduledOrder).filter(GroupScheduledOrder.group_id == g.id).delete()
+    db.delete(g)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/groups/{group_id}/slaves")
+def group_add_slave(group_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    sid = int(payload.get("slave_account_id", 0) or 0)
+    if sid:
+        if not db.query(Account).filter(Account.id == sid, Account.user_id == me.id).first():
+            raise HTTPException(400, "Pick one of your own accounts as the slave.")
+        if sid == g.master_account_id:
+            raise HTTPException(400, "The slave can't be the same account as the Master.")
+    ctype = "FIXED" if str(payload.get("condition_type", "MULTIPLIER")).upper() == "FIXED" else "MULTIPLIER"
+    cval = float(payload.get("condition_value", 1) or 1)
+    if cval <= 0:
+        raise HTTPException(400, "Enter a value greater than 0.")
+    db.add(GroupSlave(group_id=g.id, user_id=me.id, slave_account_id=sid,
+                      condition_type=ctype, condition_value=cval, is_active=1))
+    db.commit()
+    return _group_dict(db, g)
+
+
+@app.post("/api/groups/{group_id}/slaves/{sid}")
+def group_update_slave(group_id: int, sid: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    s = db.get(GroupSlave, sid)
+    if not s or s.group_id != g.id:
+        raise HTTPException(404, "Slave not found.")
+    if "condition_type" in payload:
+        s.condition_type = "FIXED" if str(payload["condition_type"]).upper() == "FIXED" else "MULTIPLIER"
+    if "condition_value" in payload:
+        s.condition_value = max(0.0001, float(payload["condition_value"] or 1))
+    if "is_active" in payload:
+        s.is_active = 1 if payload["is_active"] else 0
+    db.commit()
+    return _group_dict(db, g)
+
+
+@app.delete("/api/groups/{group_id}/slaves/{sid}")
+def group_del_slave(group_id: int, sid: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    s = db.get(GroupSlave, sid)
+    if s and s.group_id == g.id:
+        db.delete(s)
+        db.commit()
+    return _group_dict(db, g)
+
+
+@app.post("/api/groups/{group_id}/execute")
+def group_execute(group_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    if not g.is_active:
+        raise HTTPException(400, "Turn the group ON before executing.")
+    if not payload.get("security_id"):
+        raise HTTPException(400, "Search and select a symbol first.")
+    if _daily_halted(db, me.id):
+        raise HTTPException(400, "Daily limit hit — trading is halted for today.")
+    if uget(db, me.id, "kill_switch", "off") == "on" and g.master_account_id:
+        raise HTTPException(400, "Kill switch is ON.")
+    order = {
+        "side": "SELL" if str(payload.get("side", "BUY")).upper() == "SELL" else "BUY",
+        "security_id": str(payload.get("security_id")),
+        "exchange_segment": payload.get("exchange_segment", ""),
+        "instrument_type": payload.get("instrument_type", "OPTION"),
+        "symbol": payload.get("symbol", ""),
+        "lot_size": int(float(payload.get("lot_size", 1) or 1)) or 1,
+        "qty_lots": int(float(payload.get("qty_lots", payload.get("lots", 1)) or 1)) or 1,
+    }
+    if payload.get("date") or payload.get("time"):
+        when = _ist_basket_time(payload.get("date", ""), payload.get("time", ""))
+        o = GroupScheduledOrder(group_id=g.id, user_id=me.id, side=order["side"], symbol=order["symbol"],
+                                security_id=order["security_id"], exchange_segment=order["exchange_segment"],
+                                instrument_type=order["instrument_type"], lot_size=order["lot_size"],
+                                qty_lots=order["qty_lots"], scheduled_at=when, status="PENDING")
+        db.add(o)
+        db.commit()
+        db.add(LogEntry(message=f"Group '{g.name}' order scheduled for {_ist_str(when)} IST.", user_id=me.id))
+        db.commit()
+        return {"scheduled": True, "scheduled_at_ist": _ist_str(when)}
+    replication.execute_group(g.id, order)
+    return {"dispatching": True}
+
+
+@app.post("/api/groups/{group_id}/cancel_schedule/{sched_id}")
+def group_cancel_schedule(group_id: int, sched_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    o = db.get(GroupScheduledOrder, sched_id)
+    if o and o.group_id == g.id and o.status == "PENDING":
+        o.status = "CANCELLED"
+        db.commit()
+    return _group_dict(db, g)
+
+
+@app.post("/api/groups/{group_id}/squareoff")
+def group_squareoff(group_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    n = replication.square_off_group(g.id)
+    return {"ok": True, "closing": n}
+
+
+@app.get("/api/groups/{group_id}/logs")
+def group_logs(group_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    g = _owned_group(db, group_id, me.id)
+    rows = (db.query(GroupTradeLog).filter(GroupTradeLog.group_id == g.id)
+            .order_by(GroupTradeLog.id.desc()).limit(60).all())
+    return [{"time": r.created_at.isoformat() if r.created_at else "", "action": r.action,
+             "side": r.side, "account": _acct_label(db, r.slave_account_id),
+             "status": r.status, "error": r.error_message} for r in rows]
 
 
 # ---------- broker info ----------

@@ -62,6 +62,10 @@ _MIGRATIONS = {
         "user_id": "INTEGER DEFAULT 0",
         "basket_id": "INTEGER DEFAULT 0",
         "leg_id": "INTEGER DEFAULT 0",
+        "group_id": "INTEGER DEFAULT 0",
+        "master_trade_id": "INTEGER DEFAULT 0",
+        "repl_entry": "INTEGER DEFAULT 0",
+        "repl_exit": "INTEGER DEFAULT 0",
     },
     "symbol_presets": {
         "kind": "TEXT DEFAULT 'OPTION'",

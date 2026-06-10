@@ -153,9 +153,13 @@ class Trade(Base):
     broker = Column(String, default="")             # which broker executed it (PAPER/DHAN/ANGEL)
     account_id = Column(Integer, default=0)         # which broker account (0 = Demo/paper)
     user_id = Column(Integer, index=True, default=0)  # tenant owner
-    source = Column(String, default="ALGO")         # ALGO or EXTERNAL (synced from broker)
+    source = Column(String, default="ALGO")         # ALGO / EXTERNAL / BASKET / SLAVE / MASTER
     basket_id = Column(Integer, default=0, index=True)  # owning basket (0 = standalone)
     leg_id = Column(Integer, default=0)             # owning basket leg
+    group_id = Column(Integer, default=0, index=True)   # replication group (slave trades)
+    master_trade_id = Column(Integer, default=0)    # the master Trade this slave mirrors
+    repl_entry = Column(Integer, default=0)         # master: entry already fanned out to slaves
+    repl_exit = Column(Integer, default=0)          # master: exit already fanned out to slaves
 
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
@@ -303,4 +307,68 @@ class Watchlist(Base):
     instrument_type = Column(String, default="")       # OPTION / FUTURES / EQUITY / INDEX
     underlying = Column(String, default="")            # for preset matching on load
     lot_size = Column(Integer, default=1)
+    created_at = Column(DateTime, default=_now)
+
+
+class ExecutionGroup(Base):
+    """A copy-trading group: one Master account whose fills are replicated to slaves."""
+    __tablename__ = "execution_groups"
+
+    id = Column(Integer, primary_key=True, index=True)   # group_id
+    user_id = Column(Integer, index=True, default=0)
+    name = Column(String, default="")
+    master_account_id = Column(Integer, default=0)       # 0 = Demo / paper master
+    is_active = Column(Integer, default=1)               # master ON/OFF for the whole group
+    created_at = Column(DateTime, default=_now)
+
+
+class GroupSlave(Base):
+    """A follower account inside a group, with its sizing rule."""
+    __tablename__ = "group_slaves"
+
+    id = Column(Integer, primary_key=True, index=True)   # slave_row_id
+    group_id = Column(Integer, index=True, default=0)
+    user_id = Column(Integer, index=True, default=0)
+    slave_account_id = Column(Integer, default=0)        # 0 = Demo / paper slave
+    condition_type = Column(String, default="MULTIPLIER")  # MULTIPLIER / FIXED
+    condition_value = Column(Float, default=1.0)         # multiplier (x lots) or fixed lots
+    is_active = Column(Integer, default=1)               # individual slave ON/OFF
+    created_at = Column(DateTime, default=_now)
+
+
+class GroupTradeLog(Base):
+    """Audit map of each parent (master) fill to its child (slave) executions."""
+    __tablename__ = "group_trades_log"
+
+    id = Column(Integer, primary_key=True, index=True)   # log_id
+    group_id = Column(Integer, index=True, default=0)
+    user_id = Column(Integer, index=True, default=0)
+    master_trade_id = Column(Integer, default=0)
+    master_order_id = Column(String, default="")
+    slave_account_id = Column(Integer, default=0)
+    slave_trade_id = Column(Integer, default=0)
+    slave_order_id = Column(String, default="")
+    side = Column(String, default="")                    # BUY / SELL
+    action = Column(String, default="ENTRY")             # ENTRY / EXIT
+    status = Column(String, default="PENDING")           # PENDING / EXECUTED / FAILED
+    error_message = Column(String, default="")
+    created_at = Column(DateTime, default=_now)
+
+
+class GroupScheduledOrder(Base):
+    """A master order queued to fire for a whole group at an exact time (IST)."""
+    __tablename__ = "group_scheduled_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, index=True, default=0)
+    user_id = Column(Integer, index=True, default=0)
+    side = Column(String, default="BUY")
+    symbol = Column(String, default="")
+    security_id = Column(String, default="")
+    exchange_segment = Column(String, default="")
+    instrument_type = Column(String, default="OPTION")
+    lot_size = Column(Integer, default=1)
+    qty_lots = Column(Integer, default=1)
+    scheduled_at = Column(DateTime, default=None, nullable=True)   # UTC
+    status = Column(String, default="PENDING")           # PENDING / EXECUTED / CANCELLED / FAILED
     created_at = Column(DateTime, default=_now)

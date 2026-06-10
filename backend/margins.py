@@ -136,6 +136,17 @@ def _required(acc, creds, legs):
 # ----------------------------------------------------------------------------
 # Public entry point
 # ----------------------------------------------------------------------------
+def single_margin(db, acc, security_id, exchange_segment, instrument_type,
+                  transaction_type, quantity, price=0):
+    """Margin check for ONE order (used by the replication engine per slave)."""
+    from types import SimpleNamespace
+    leg = SimpleNamespace(security_id=security_id, exchange_segment=exchange_segment,
+                          instrument_type=instrument_type, transaction_type=transaction_type,
+                          quantity=int(quantity), price=float(price or 0),
+                          order_type="MARKET", trigger_price=0)
+    return basket_margin(db, acc, [leg])
+
+
 def basket_margin(db, acc, legs):
     """Returns {required, available, ok, verified, detail}.
     `ok` = available >= required (only meaningful when verified)."""

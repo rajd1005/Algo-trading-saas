@@ -59,6 +59,9 @@
     <button class="tab" data-tab="baskets">
       <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11h14l-1.5 7.5a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5z"/><path d="M9 11 12 4l3 7"/></svg>
       <span class="tab-lbl">Basket</span></button>
+    <button class="tab" data-tab="groups">
+      <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="8" r="3"/><circle cx="17" cy="8" r="3"/><path d="M2 20v-1a4 4 0 0 1 4-4h2M22 20v-1a4 4 0 0 0-4-4h-2M12 12v6"/></svg>
+      <span class="tab-lbl">Copy</span></button>
     <button class="tab" data-tab="broker">
       <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       <span class="tab-lbl">Broker</span></button>
@@ -115,6 +118,12 @@
       <div id="bkModeBar" class="bk-mode-bar" style="display:none;">
         <span>🧺 Adding a leg to basket <b id="bkModeName"></b></span>
         <button type="button" id="bkModeCancel" class="btn btn-sm btn-ghost">Cancel</button>
+      </div>
+      <div id="gpModeBar" class="bk-mode-bar" style="display:none; flex-wrap:wrap;">
+        <span>👥 Master order for group <b id="gpModeName"></b></span>
+        <span class="gp-sched-inline">⏱ Schedule (optional):
+          <input type="date" id="gpFormDate" class="bk-sin"><input type="time" step="1" id="gpFormTime" class="bk-sin"></span>
+        <button type="button" id="gpModeCancel" class="btn btn-sm btn-ghost">Cancel</button>
       </div>
       <div class="row" id="modeRow">
         <div class="field" style="max-width:320px;">
@@ -207,7 +216,7 @@
         </div>
       </div>
 
-      <div class="row">
+      <div class="row" id="slTargetRow">
         <label>Stop-loss (points) <input name="sl_points" type="number" step="0.05" value="0" /></label>
         <label>Trailing SL (points)
           <input name="trail_sl" type="number" step="0.05" value="0" />
@@ -220,7 +229,7 @@
         <label id="targetField">Target (points) <input name="target_points" type="number" step="0.05" value="0" /></label>
       </div>
 
-      <div class="field">
+      <div class="field" id="multiField">
         <label class="check"><input type="checkbox" id="multiToggle" /> Use multiple targets (scale-out)</label>
         <div id="multiWrap" style="display:none; margin-top:8px;">
           <div class="autolegs">
@@ -235,7 +244,7 @@
         </div>
       </div>
 
-      <details class="adv-box">
+      <details class="adv-box" id="advBox">
         <summary>⚙️ Risk &amp; profit-lock (optional)</summary>
         <div class="row" style="margin-top:8px;">
           <label>Max Profit (₹) <input name="max_profit_amt" type="number" step="1" value="0" />
@@ -346,6 +355,80 @@
           <button type="button" id="bkSquareoff" class="btn btn-sm btn-danger" style="display:none;">⊗ Square off basket</button>
           <button type="button" id="bkRetry" class="btn btn-sm" style="display:none;">↻ Retry failed legs</button>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- COPY TRADING (GROUPS) -->
+  <section id="tab-groups" class="tab-panel">
+    <details class="watchlist-acc bk-help">
+      <summary><span>📖 How copy-trading groups work</span><span class="acc-caret">▾</span></summary>
+      <div class="bk-help-body">
+        <p>A <b>group</b> copies one <b>Master</b> account's trades onto several <b>Slave</b> accounts automatically.</p>
+        <ol class="bk-steps">
+          <li><b>Pick the Master.</b> Any of your brokers — or <b>Demo/Paper</b> (paper-trade on Demo, fire real orders on the live slaves).</li>
+          <li><b>Add Slaves.</b> For each follower account set a rule: <b>Multiplier</b> (Master 1 lot → Slave 2× = 2 lots) or <b>Fixed</b> (Slave always trades N lots).</li>
+          <li><b>Toggle ON/OFF.</b> The whole group has a master switch; each slave has its own switch too.</li>
+          <li><b>Fire it.</b> <b>Execute Group Trade</b> fires the Master and copies to every active Slave instantly (or schedule it for an exact second). Whatever the Master fills, the slaves follow — and when the Master closes, the slaves close too (full copy).</li>
+          <li><b>Track &amp; panic.</b> Expand any master trade to see each slave's live status; <b>⊗ Square Off Group</b> closes every slave position at once.</li>
+        </ol>
+      </div>
+    </details>
+
+    <div class="bk-bar">
+      <select id="gpSelect" class="bk-pick"></select>
+      <input id="gpNewName" class="bk-newname" placeholder="New group name" maxlength="50">
+      <button type="button" id="gpCreate" class="btn btn-sm">+ Create</button>
+    </div>
+    <div id="gpEmpty" class="muted" style="padding:18px 4px;">No groups yet — name one above and tap <b>+ Create</b> to set up copy-trading.</div>
+
+    <div id="gpPanel" style="display:none;">
+      <div class="bk-head">
+        <input id="gpName" class="bk-name" maxlength="50">
+        <label class="gp-master-pick">Master <select id="gpMaster" class="bk-otype"></select></label>
+        <label class="gp-switch"><input type="checkbox" id="gpActive"> Group ON</label>
+        <span id="gpMtm" class="bk-mtm"></span>
+      </div>
+
+      <!-- Slave configuration -->
+      <div class="gp-slaves-wrap">
+        <table class="data gp-slaves">
+          <thead><tr><th>Slave account</th><th>Condition</th><th>Value</th><th>On</th><th></th></tr></thead>
+          <tbody id="gpSlavesBody"></tbody>
+        </table>
+        <div class="gp-addslave">
+          <select id="gpSlaveAcct" class="bk-otype"></select>
+          <select id="gpSlaveType" class="bk-otype">
+            <option value="MULTIPLIER">Multiplier (× lots)</option>
+            <option value="FIXED">Fixed lots</option>
+          </select>
+          <input id="gpSlaveVal" class="bk-lots" type="number" min="0.1" step="0.1" value="1" title="Multiplier or fixed lots">
+          <button type="button" id="gpAddSlave" class="btn btn-sm">＋ Add slave</button>
+        </div>
+      </div>
+
+      <!-- Execution controls -->
+      <div class="bk-exec">
+        <div class="bk-fire">
+          <button type="button" id="gpExecute" class="btn btn-fire">⚡ Execute Group Trade</button>
+          <button type="button" id="gpSquareoff" class="btn btn-sm btn-danger">⊗ Square Off Group</button>
+        </div>
+        <div id="gpSchedList" class="gp-sched-list"></div>
+      </div>
+
+      <!-- Nested status dashboard -->
+      <div class="gp-status">
+        <div class="gp-status-head">Group trades <span id="gpStatusMtm" class="muted"></span></div>
+        <div id="gpMasters" class="gp-masters"></div>
+      </div>
+
+      <details class="gp-logs">
+        <summary>📜 Execution log</summary>
+        <div class="bk-legs-wrap"><table class="data"><thead><tr><th>Time</th><th>Action</th><th>Account</th><th>Status</th><th>Note</th></tr></thead><tbody id="gpLogsBody"></tbody></table></div>
+      </details>
+
+      <div class="bk-actions" style="margin-top:10px;">
+        <button type="button" id="gpDelete" class="btn btn-sm btn-danger" style="margin-left:auto;">Delete group</button>
       </div>
     </div>
   </section>

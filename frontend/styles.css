@@ -703,3 +703,38 @@ tr.leg-fail { background: rgba(248,81,73,.08); }
 .bk-builder { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .bk-addleg-hint { font-size: 12px; flex: 1; min-width: 180px; }
 @media (max-width: 760px) { .bk-addleg { width: 100%; } }
+
+/* ============================== Copy-trading groups ============================== */
+.gp-master-pick { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.gp-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+.gp-slaves-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+table.gp-slaves { width: 100%; }
+table.gp-slaves td, table.gp-slaves th { padding: 7px 10px; font-size: 13px; }
+.gp-addslave { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.gp-sched-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.gp-sched-item { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+.gp-status { margin-top: 14px; }
+.gp-status-head { font-weight: 700; margin-bottom: 8px; }
+.gp-masters { display: flex; flex-direction: column; gap: 8px; }
+.gp-master { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.gp-master > summary { list-style: none; cursor: pointer; padding: 10px 12px; }
+.gp-master > summary::-webkit-details-marker { display: none; }
+.gp-master-sum { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; }
+.gp-m-main { font-weight: 600; }
+.gp-m-count { font-size: 12px; }
+table.gp-slave-table { width: 100%; border-top: 1px solid var(--line); }
+table.gp-slave-table td, table.gp-slave-table th { padding: 7px 10px; font-size: 12px; }
+.gp-logs { margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.gp-logs > summary { cursor: pointer; padding: 10px 12px; font-weight: 600; }
+.gp-sched-inline { font-size: 12px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+
+/* Hide trade-form sections that don't apply when firing a group master order. */
+body.group-mode #modeRow,
+body.group-mode #slTargetRow,
+body.group-mode #multiField,
+body.group-mode #advBox { display: none !important; }
+
+@media (max-width: 760px) {
+  .gp-master-sum { grid-template-columns: 1fr auto; row-gap: 4px; }
+  table.gp-slaves td, table.gp-slaves th, table.gp-slave-table td, table.gp-slave-table th { padding: 6px 6px; font-size: 11px; }
+}

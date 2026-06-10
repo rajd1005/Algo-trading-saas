@@ -316,6 +316,10 @@ class TradingEngine:
         for t in active:
             if not t.security_id:
                 continue
+            # Replication group trades live on OTHER accounts (their own broker);
+            # replication.py manages their entries/exits — never the trade engine.
+            if t.source in ("SLAVE", "MASTER"):
+                continue
             price = prices.get((t.exchange_segment, str(t.security_id)), 0.0)
             if price <= 0:
                 continue
