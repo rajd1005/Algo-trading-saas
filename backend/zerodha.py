@@ -301,6 +301,14 @@ class ZerodhaBroker:
             time.sleep(config.ORDER_POLL_DELAY)
         return last
 
+    def cancel_order(self, order_id):
+        try:
+            r = requests.delete(f"{API_BASE}/orders/regular/{order_id}",
+                                headers=_headers(self.api_key, self.access_token), timeout=6)
+            return r.json().get("status") == "success"
+        except Exception:
+            return False
+
     def fund_limit(self):
         try:
             r = requests.get(f"{API_BASE}/user/margins", headers=_headers(self.api_key, self.access_token), timeout=6)

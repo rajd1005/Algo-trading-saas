@@ -1436,8 +1436,16 @@ async function loadSettings() {
     setVal("dailyMaxLoss", s.daily_max_loss || 0);
     setVal("globalLockStep", s.global_lock_step || 0);
     setVal("globalLockAmount", s.global_lock_amount || 0);
+    const sq = s.auto_squareoff_time || "15:15:00";
+    const off = String(sq).toLowerCase() === "off";
+    document.getElementById("autoSqoffOff").checked = off;
+    document.getElementById("autoSqoffTime").value = off ? "15:15:00" : sq;
+    document.getElementById("autoSqoffTime").disabled = off;
   } catch (e) { /* ignore */ }
 }
+document.getElementById("autoSqoffOff").onchange = (e) => {
+  document.getElementById("autoSqoffTime").disabled = e.target.checked;
+};
 document.getElementById("saveSettingsBtn").onclick = async () => {
   const msg = document.getElementById("settingsMsg");
   try {
@@ -1446,6 +1454,8 @@ document.getElementById("saveSettingsBtn").onclick = async () => {
       daily_max_loss: numVal("dailyMaxLoss"),
       global_lock_step: numVal("globalLockStep"),
       global_lock_amount: numVal("globalLockAmount"),
+      auto_squareoff_time: document.getElementById("autoSqoffOff").checked
+        ? "off" : (document.getElementById("autoSqoffTime").value || "15:15:00"),
     });
     msg.textContent = "✅ Settings saved."; msg.className = "msg pos";
     toast("✅ Settings saved", "pos");

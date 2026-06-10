@@ -148,6 +148,15 @@ class DhanBroker:
             time.sleep(config.ORDER_POLL_DELAY)
         return last
 
+    def cancel_order(self, order_id):
+        """Cancel a resting (pending) order at Dhan. Best-effort."""
+        try:
+            r = requests.delete(f"{config.DHAN_API_BASE}/orders/{order_id}",
+                                headers=self._headers(), timeout=6)
+            return r.status_code < 300
+        except Exception:
+            return False
+
     def fund_limit(self):
         """Return (ok, available_balance) from Dhan."""
         url = f"{config.DHAN_API_BASE}/fundlimit"

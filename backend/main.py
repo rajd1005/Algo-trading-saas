@@ -39,6 +39,7 @@ import feeds
 import baskets
 import margins
 import replication
+import autosqoff
 
 import config
 from database import init_db, get_db, SessionLocal
@@ -551,6 +552,7 @@ def _startup():
     engine.start()
     baskets.start()            # basket scheduler + leg/MTM monitor threads
     replication.start()        # copy-trading: master-fill monitor + group scheduler
+    autosqoff.start()          # IST-locked daily auto square-off + day halt
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
     threading.Thread(target=_fetch_static_ip, daemon=True).start()
@@ -1324,6 +1326,20 @@ def list_logs(request: Request, date: str = "", level: str = "", page: int = 1, 
     }
 
 
+def _valid_squareoff_time(raw):
+    """Normalise to HH:MM:SS and clamp inside active market hours (09:15–15:29 IST)."""
+    parts = [p for p in str(raw).split(":")]
+    try:
+        hh = int(parts[0]); mm = int(parts[1]) if len(parts) > 1 else 0
+        ss = int(parts[2]) if len(parts) > 2 else 0
+    except Exception:
+        return "15:15:00"
+    total = max(0, min(hh, 23)) * 3600 + max(0, min(mm, 59)) * 60 + max(0, min(ss, 59))
+    lo, hi = 9 * 3600 + 15 * 60, 15 * 3600 + 29 * 60      # 09:15:00 .. 15:29:00
+    total = max(lo, min(total, hi))
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+
 # ---------- settings (kill switch etc.) — per user ----------
 @app.get("/api/settings")
 def get_settings(request: Request, db: Session = Depends(get_db)):
@@ -1335,6 +1351,7 @@ def get_settings(request: Request, db: Session = Depends(get_db)):
         "daily_max_loss": unum(db, me.id, "daily_max_loss"),
         "global_lock_step": unum(db, me.id, "global_lock_step"),
         "global_lock_amount": unum(db, me.id, "global_lock_amount"),
+        "auto_squareoff_time": uget(db, me.id, "auto_squareoff_time", "15:15:00"),
         "daily_halt": _daily_halted(db, me.id),
         "daily_halt_reason": uget(db, me.id, "daily_halt_reason", ""),
     }
@@ -1363,6 +1380,15 @@ def update_settings(payload: SettingsIn, request: Request, db: Session = Depends
     if payload.global_lock_step is not None or payload.global_lock_amount is not None:
         changed.append(f"account profit-lock every ₹{unum(db, me.id, 'global_lock_step'):.0f} "
                        f"secure ₹{unum(db, me.id, 'global_lock_amount'):.0f}")
+    if payload.auto_squareoff_time is not None:
+        raw = str(payload.auto_squareoff_time).strip()
+        if raw.lower() in ("", "off"):
+            uset(db, me.id, "auto_squareoff_time", "off")
+            changed.append("auto square-off OFF")
+        else:
+            t = _valid_squareoff_time(raw)   # clamps to market hours, HH:MM:SS
+            uset(db, me.id, "auto_squareoff_time", t)
+            changed.append(f"auto square-off at {t} IST")
     if changed:
         db.add(LogEntry(message="Settings updated: " + ", ".join(changed), level="INFO", user_id=me.id))
     db.commit()

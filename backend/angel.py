@@ -336,6 +336,15 @@ class AngelBroker:
             time.sleep(config.ORDER_POLL_DELAY)
         return last
 
+    def cancel_order(self, order_id):
+        try:
+            r = requests.post(f"{API_BASE}/rest/secure/angelbroking/order/v1/cancelOrder",
+                              json={"variety": "NORMAL", "orderid": str(order_id)},
+                              headers=_auth_headers(self.api_key, self.jwt), timeout=6)
+            return bool(r.json().get("status"))
+        except Exception:
+            return False
+
     def fund_limit(self):
         url = f"{API_BASE}/rest/secure/angelbroking/user/v1/getRMS"
         try:

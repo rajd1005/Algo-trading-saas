@@ -114,6 +114,7 @@ class SettingsIn(BaseModel):
     daily_max_loss: Optional[float] = None
     global_lock_step: Optional[float] = None       # account-level auto profit-lock step (₹)
     global_lock_amount: Optional[float] = None
+    auto_squareoff_time: Optional[str] = None      # "HH:MM:SS" IST; "" / "off" disables
 
 
 class WatchlistIn(BaseModel):

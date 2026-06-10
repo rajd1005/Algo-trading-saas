@@ -445,7 +445,16 @@
         <label>Daily Max Loss (₹) <input id="dailyMaxLoss" type="number" step="1" value="0" /></label>
       </div>
 
-      <div class="field" style="margin-top:10px;">
+      <div class="field" style="margin-top:14px;">
+        <div class="field-label">Global Auto Square-Off Time</div>
+        <div class="row" style="align-items:center; gap:10px;">
+          <input id="autoSqoffTime" type="time" step="1" min="09:15:00" max="15:29:00" value="15:15:00" style="max-width:160px;" />
+          <label class="check" style="margin:0;"><input type="checkbox" id="autoSqoffOff" /> Disable</label>
+        </div>
+        <div class="muted" style="font-size:12px; margin-top:6px;">ℹ️ System default is <b>3:15 PM</b> (15 minutes before market close). All open positions will be force-closed at this time, pending orders cancelled, and new trades blocked for the rest of the day. Allowed window: 09:15 AM – 03:29 PM IST.</div>
+      </div>
+
+      <div class="field" style="margin-top:14px;">
         <div class="field-label">Account-level auto profit-lock</div>
         <div class="muted" style="font-size:12px; margin-bottom:6px;">Applies to the combined day P&L of the selected trading account. The lock ratchets up automatically; if the day's P&L reverses to the locked level, open positions are squared off.</div>
         <div class="lock-rule">for every ₹<input id="globalLockStep" type="number" step="1" value="0" placeholder="1000" />
