@@ -254,6 +254,22 @@
 
   <!-- BASKETS -->
   <section id="tab-baskets" class="tab-panel">
+    <details class="watchlist-acc bk-help">
+      <summary><span>📖 How baskets work — quick walkthrough</span><span class="acc-caret">▾</span></summary>
+      <div class="bk-help-body">
+        <p>A <b>basket</b> is a group of orders (legs) that fire <b>together</b> — perfect for option strategies like straddles, spreads and hedges. Build it once, then fire instantly or schedule it for an exact second.</p>
+        <ol class="bk-steps">
+          <li><b>Create a basket.</b> Type a name (e.g. “Nifty Straddle”) and tap <b>+ Create</b>. Pick <span class="bk-pillk">TEST</span> to practise with paper money or <span class="bk-pillk">LIVE</span> to use your connected broker.</li>
+          <li><b>Add legs.</b> Choose <b>Option / Futures / Stock</b>, search the symbol, pick the contract (strike &amp; CE/PE for options), set <b>Buy/Sell</b>, order type (<b>Market / Limit / SL</b>), lots, and tap <b>＋ Add leg</b>. Repeat for every leg.</li>
+          <li><b>Quick actions.</b> <b>⇅ Invert</b> flips every Buy↔Sell in one tap, <b>⧉ Clone</b> duplicates the basket, <b>🗑 Clear all</b> empties it, and you can <b>Import/Export CSV</b>.</li>
+          <li><b>Check margin (optional).</b> <b>⚖ Check margin</b> asks your broker how much money the basket needs and shows your available funds.</li>
+          <li><b>Fire it.</b> <b>⚡ Execute Now</b> sends every leg immediately (a tiny gap between each keeps your broker happy). Or tick <b>Schedule execution</b>, pick a date &amp; time, and the system fires it automatically at that exact second (IST).</li>
+          <li><b>Track &amp; manage.</b> Each leg shows its own status — <span class="lst pend">Pending</span> <span class="lst exec">Executed</span> <span class="lst fail">Failed</span>. If some legs fail, tap <b>↻ Retry failed legs</b>. To close the whole strategy, tap <b>⊗ Square off basket</b>.</li>
+          <li><b>Protect profits.</b> Set the <b>🔒 basket profit-lock</b> — “for every ₹X profit, secure ₹Y” — and the system auto-closes the <i>whole</i> basket if the locked profit is given back. Your global Kill Switch and Daily Max Loss/Profit limits always apply too.</li>
+        </ol>
+        <p class="bk-help-tip">💡 New to this? Build a basket in <b>TEST</b> mode first and tap <b>Execute Now</b> — you’ll see the legs fill and the live P&amp;L move with zero risk.</p>
+      </div>
+    </details>
     <div class="bk-bar">
       <select id="bkSelect" class="bk-pick"></select>
       <input id="bkNewName" class="bk-newname" placeholder="New basket name" maxlength="60">
