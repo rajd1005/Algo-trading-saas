@@ -159,7 +159,7 @@ class InstrumentStore:
 
             by_id[sec_id] = {"strike": row["strike"], "option_type": row["option_type"],
                              "underlying": underlying, "instrument_type": itype,
-                             "expiry": expiry}
+                             "expiry": expiry, "lot_size": row["lot_size"]}
 
             if itype in ("EQUITY", "INDEX"):
                 row["_s"] = f"{display} {underlying}".lower()

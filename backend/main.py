@@ -557,6 +557,27 @@ def _startup():
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
     threading.Thread(target=_fetch_static_ip, daemon=True).start()
     threading.Thread(target=_purge_loop, daemon=True).start()
+    threading.Thread(target=_master_refresh_loop, daemon=True).start()
+
+
+def _master_refresh_loop():
+    """Keep symbol masters (and therefore LOT SIZES) current as the exchanges /
+    brokers revise them. The Dhan master re-downloads only when its cache is stale;
+    the per-broker masters (Angel/Zerodha/Alice) reload about once a day."""
+    last_mappers = time.time()
+    while True:
+        time.sleep(3600)
+        try:
+            instruments.load_async()        # re-downloads only if its cache is > 20h old
+        except Exception:
+            pass
+        if time.time() - last_mappers >= 20 * 3600:
+            last_mappers = time.time()
+            for m in (angel, zerodha, aliceblue):
+                try:
+                    m.mapper.load_async()
+                except Exception:
+                    pass
 
 
 @app.on_event("shutdown")
@@ -823,6 +844,19 @@ def create_trade(payload: TradeCreate, request: Request, db: Session = Depends(g
     raw_targets = data.pop("targets", [])
     targets = [{"points": float(x["points"]), "qty": int(x["qty"]), "hit": False}
                for x in raw_targets if float(x.get("points", 0)) > 0 and int(x.get("qty", 0)) > 0]
+    # Authoritative lot size from the executing broker's master (correct per broker,
+    # esp. MCX, and auto-updates as exchanges revise it). Convert lots -> the
+    # broker's quantity units. No-op when the form already used the broker lot.
+    ui_lot = max(1, int(data.get("lot_size") or 1))
+    prov_lot = _provider_lot_size(db, me.id, data.get("security_id", ""),
+                                  data.get("exchange_segment", ""), ui_lot)
+    if prov_lot > 0 and prov_lot != ui_lot:
+        lots = max(1, round((data.get("quantity") or ui_lot) / ui_lot))
+        data["quantity"] = lots * prov_lot
+        for tg in targets:
+            tlots = max(1, round(tg["qty"] / ui_lot))
+            tg["qty"] = tlots * prov_lot
+    data["lot_size"] = prov_lot or ui_lot
     t = Trade(**data)
     t.user_id = me.id
     t.name = data.get("name") or data["symbol"]
@@ -1013,6 +1047,46 @@ def option_chain(underlying: str, expiry: str = ""):
 @app.get("/api/futures")
 def futures(underlying: str):
     return instruments.futures(underlying)
+
+
+def _to_int(v):
+    try:
+        return int(round(float(v)))
+    except Exception:
+        return 0
+
+
+def _provider_lot_size(db, uid, security_id, exchange_segment, fallback=0):
+    """The lot size of the broker that will EXECUTE this trade — sourced from that
+    broker's own (auto-updating) contract master, so it tracks exchange changes and
+    is correct per broker. Lot size is broker-specific (esp. MCX): Dhan/Zerodha use
+    the lot count (1), Angel uses the contract size. Falls back to the Dhan master."""
+    meta = instruments.get_meta(security_id) or {}
+    dhan_lot = _to_int(meta.get("lot_size")) or _to_int(fallback) or 1
+    acc = _account_for_provider(db, uget(db, uid, "trade_provider", "DEMO"), uid)
+    if acc is None or acc.broker == "DHAN":
+        return dhan_lot
+    try:
+        if acc.broker == "ANGEL":
+            a = angel.mapper.translate(security_id, exchange_segment, meta)
+            return _to_int(a and a.get("lotsize")) or dhan_lot
+        if acc.broker == "ZERODHA":
+            z = zerodha.mapper.translate(security_id, exchange_segment, meta)
+            return _to_int(z and z.get("lot_size")) or dhan_lot
+        if acc.broker == "ALICE":
+            al = aliceblue.mapper.translate(security_id, exchange_segment, meta)
+            return _to_int(al and al.get("lot_size")) or dhan_lot
+    except Exception:
+        pass
+    return dhan_lot
+
+
+@app.get("/api/lotsize")
+def lot_size(security_id: str, exchange_segment: str, request: Request,
+             db: Session = Depends(get_db)):
+    """Broker-correct lot size for a contract (used by the trade form on pick)."""
+    me = current_user(request)
+    return {"lot_size": _provider_lot_size(db, me.id, security_id, exchange_segment)}
 
 
 @app.post("/api/ltp")

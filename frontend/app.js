@@ -834,8 +834,13 @@ async function _doPushWatch() {
 function renderFutures(futs) {
   if (!futs.length) { futWrap.style.display = "none"; return; }
   futWrap.innerHTML = futs.map((f, i) => `<button type="button" class="fut-btn" data-i="${i}">
-    ${f.symbol}<br><span class="muted" style="font-size:11px;">exp ${f.expiry} · lot ${parseInt(parseFloat(f.lot_size))}</span></button>`).join("");
+    ${f.symbol}<br><span class="muted" style="font-size:11px;">exp ${f.expiry} · lot <span class="fut-lot">${parseInt(parseFloat(f.lot_size))}</span></span></button>`).join("");
   futWrap.style.display = "flex";
+  // All expiries of one commodity share the same lot — fetch the broker-correct
+  // value once and update every hint (Dhan reports 1 for MCX; brokers differ).
+  api.get(`/api/lotsize?security_id=${encodeURIComponent(futs[0].security_id)}&exchange_segment=${encodeURIComponent(futs[0].exchange_segment)}`)
+    .then((d) => { const L = parseInt(d.lot_size) || 0; if (L > 0) futWrap.querySelectorAll(".fut-lot").forEach((e) => (e.textContent = L)); })
+    .catch(() => {});
   futWrap.querySelectorAll(".fut-btn").forEach((el) => {
     const f = futs[el.dataset.i];
     el.onclick = () => { pickContract(f); futWrap.querySelectorAll(".fut-btn").forEach((x) => x.classList.remove("sel")); el.classList.add("sel"); };
@@ -851,6 +856,14 @@ function pickContract(r) {
   _selContract = r;            // stream updates this contract's LTP live
   currentLotSize = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
   updateQty();
+  // Lot size is broker-specific (esp. MCX) — fetch the correct one from the
+  // connected broker's master and refresh the qty once it returns.
+  api.get(`/api/lotsize?security_id=${encodeURIComponent(r.security_id)}&exchange_segment=${encodeURIComponent(r.exchange_segment)}`)
+    .then((d) => {
+      if (form.security_id.value === r.security_id && d && parseInt(d.lot_size) > 0) {
+        currentLotSize = parseInt(d.lot_size); updateQty();
+      }
+    }).catch(() => {});
   pushWatch();                 // ensure the socket streams the picked contract
   applyPreset((currentSeg === "EQUITY" ? r.symbol : currentUnderlying) || r.symbol, currentSeg);
   // Auto-fetch & live-update the LTP for stocks / futures / index right away.
