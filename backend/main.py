@@ -905,21 +905,32 @@ def modify_trade(trade_id: int, payload: ModifyIn, request: Request, db: Session
             changes.append(f"Trailing SL: Old {old_trail or 0}pt -> New {t.trail_sl}pt")
 
     if payload.targets is not None:
-        clean = [{"price": float(x.price), "qty": int(x.qty), "hit": False}
-                 for x in payload.targets if float(x.price) > 0 and int(x.qty) > 0]
-        if len(clean) <= 1:
-            # single target -> store as the plain target price, clear scale-out
-            t.targets_json = ""
-            t.target = clean[0]["price"] if clean else 0.0
-            t.target_points = 0.0
-            new_targets = str(t.target) if t.target else ""
-        else:
+        # Targets always apply to the CURRENT OPEN quantity (qty already booked via
+        # earlier partial exits is excluded). We cap the total at what's still open
+        # and always store the scale-out format so each target's qty is honoured
+        # (a single target no longer means "dump the whole remaining position").
+        remaining = max(0, int(t.quantity) - int(t.exited_qty or 0))
+        clean, used = [], 0
+        for x in payload.targets:
+            price, q = float(x.price), int(x.qty)
+            if price <= 0 or q <= 0:
+                continue
+            q = min(q, remaining - used)
+            if q <= 0:
+                break
+            clean.append({"price": price, "qty": q, "hit": False})
+            used += q
+        if clean:
             t.targets_json = json.dumps(clean)
             t.target = clean[0]["price"]
             t.target_points = 0.0
-            new_targets = ", ".join(str(c["price"]) for c in clean)
-        if old_targets != (t.targets_json or (str(t.target) if t.target else "")):
-            changes.append(f"Targets: now {new_targets or '-'}")
+            new_targets = ", ".join(f"{c['price']}×{c['qty']}" for c in clean)
+        else:
+            t.targets_json = ""
+            t.target = 0.0
+            t.target_points = 0.0
+            new_targets = ""
+        changes.append("Targets: " + (new_targets or "removed (rides on SL/trailing)"))
 
     msg = f"Trade #{t.id} modified: " + ("; ".join(changes) if changes else "no change")
     db.add(LogEntry(message=msg, level="INFO", trade_id=t.id, user_id=me.id))

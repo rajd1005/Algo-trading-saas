@@ -1172,9 +1172,13 @@ function openModify(id) {
   rows.innerHTML = "";
   let prices = [];
   if (t.targets_json && t.targets_json !== "[]") {
-    try { prices = JSON.parse(t.targets_json).map((tg) => tg.price || ""); } catch (e) { /* ignore */ }
+    // Only the targets that HAVEN'T fired yet — these are the ones that still
+    // apply to the current open position. Already-hit targets are done.
+    try { prices = JSON.parse(t.targets_json).filter((tg) => !tg.hit).map((tg) => tg.price).filter((p) => p > 0); }
+    catch (e) { /* ignore */ }
+  } else if (t.target) {
+    prices = [t.target];
   }
-  if (!prices.length) prices = [t.target || ""];
   prices.slice(0, modRemainingLots).forEach((pr) => modAddTargetRow(pr));
   modDistribute();
   document.getElementById("modMaxProfit").value = t.max_profit_amt || 0;
