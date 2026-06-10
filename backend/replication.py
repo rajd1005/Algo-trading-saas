@@ -98,16 +98,57 @@ def _claim(db, trade_id, field):
 
 
 # ----------------------------------------------------------------------------
-# Slave sizing
+# Lot size & slave sizing (each account uses ITS OWN broker's lot size)
 # ----------------------------------------------------------------------------
-def _slave_qty(master_trade, slave):
-    lot = int(master_trade.lot_size or 1) or 1
-    master_lots = max(1, round((master_trade.quantity or lot) / lot))
+def _to_int(v):
+    try:
+        return int(round(float(v)))
+    except Exception:
+        return 0
+
+
+def _lot_for_account(db, account_id, security_id, exchange_segment, dhan_lot):
+    """Lot size for a contract on a SPECIFIC account's broker (auto-updating from
+    its master). Lot size is broker-specific (esp. MCX). Demo/Dhan -> the Dhan
+    master lot; else translate to the broker and read its lot."""
+    dhan_lot = _to_int(dhan_lot) or 1
+    if not account_id:
+        return dhan_lot
+    acc = db.get(Account, account_id)
+    if acc is None or acc.broker == "DHAN":
+        return dhan_lot
+    from instruments import store
+    meta = store.get_meta(security_id) or {}
+    try:
+        if acc.broker == "ANGEL":
+            import angel
+            a = angel.mapper.translate(security_id, exchange_segment, meta)
+            return _to_int(a and a.get("lotsize")) or dhan_lot
+        if acc.broker == "ZERODHA":
+            import zerodha
+            z = zerodha.mapper.translate(security_id, exchange_segment, meta)
+            return _to_int(z and z.get("lot_size")) or dhan_lot
+        if acc.broker == "ALICE":
+            import aliceblue
+            al = aliceblue.mapper.translate(security_id, exchange_segment, meta)
+            return _to_int(al and al.get("lot_size")) or dhan_lot
+    except Exception:
+        pass
+    return dhan_lot
+
+
+def _slave_qty(db, master_trade, slave):
+    """(quantity, slave_lot_size). The number of LOTS is derived from the master,
+    then converted to the SLAVE broker's own quantity units."""
+    mlot = int(master_trade.lot_size or 1) or 1
+    master_lots = max(1, round((master_trade.quantity or mlot) / mlot))
     if slave.condition_type == "FIXED":
         lots = max(1, int(round(slave.condition_value or 1)))
     else:
         lots = max(1, int(round(master_lots * (slave.condition_value or 1))))
-    return lots * lot
+    slot = _lot_for_account(db, slave.slave_account_id, master_trade.security_id,
+                            master_trade.exchange_segment, mlot)
+    return lots * slot, slot
 
 
 # ----------------------------------------------------------------------------
@@ -126,10 +167,10 @@ def _try_fan_entry(group_id, master_trade_id):
         slaves = (db.query(GroupSlave)
                   .filter(GroupSlave.group_id == group_id, GroupSlave.is_active == 1).all())
         for s in slaves:
-            qty = _slave_qty(mt, s)
+            qty, slot = _slave_qty(db, mt, s)
             st = Trade(symbol=mt.symbol, name=f"{g.name} · slave", security_id=mt.security_id,
                        exchange_segment=mt.exchange_segment, instrument_type=mt.instrument_type,
-                       side=mt.side, quantity=qty, lot_size=mt.lot_size or 1, entry_type="MARKET",
+                       side=mt.side, quantity=qty, lot_size=slot, entry_type="MARKET",
                        mode=("TEST" if not s.slave_account_id else "LIVE"), status="PENDING",
                        source="SLAVE", account_id=s.slave_account_id, user_id=g.user_id,
                        group_id=g.id, master_trade_id=mt.id, last_price=mt.entry_fill_price or 0)
@@ -315,7 +356,9 @@ def fire_master(group_id, order):
             _log(db, g.user_id, f"Group '{g.name}': master not connected ({err}) — cannot fire.", "ERROR")
             db.commit()
             return
-        lot = int(order.get("lot_size", 1) or 1) or 1
+        # The master fires on its OWN account's broker — size with that broker's lot.
+        lot = _lot_for_account(db, g.master_account_id, str(order.get("security_id", "")),
+                               order.get("exchange_segment", ""), int(order.get("lot_size", 1) or 1))
         qty = max(1, int(order.get("qty_lots", 1) or 1)) * lot
         side = "SELL" if str(order.get("side", "BUY")).upper() == "SELL" else "BUY"
         t = Trade(symbol=order.get("symbol", ""), name=f"{g.name} · master",
