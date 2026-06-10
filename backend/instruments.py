@@ -20,6 +20,12 @@ import datetime as dt
 import requests
 
 SCRIP_URL = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
+
+
+def _ist_today():
+    """Today's date in IST as 'YYYY-MM-DD' (expiries are compared against this)."""
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    return dt.datetime.now(ist).strftime("%Y-%m-%d")
 # New filename so an old cache from a previous version is never reused by mistake.
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "instruments_detailed.csv")
 
@@ -236,7 +242,10 @@ class InstrumentStore:
                 exps = list(self._opt.get(underlying, {}).keys())
             else:
                 exps = sorted({r["expiry"] for r in self._fut.get(underlying, [])})
-        return sorted([e for e in exps if e])
+        # Only upcoming / current contracts — never list expired ones (they no
+        # longer exist on Angel/Zerodha/Alice, so prices wouldn't map).
+        today = _ist_today()
+        return sorted([e for e in exps if e and e >= today])
 
     def option_chain(self, underlying, expiry):
         with self._lock:
@@ -254,9 +263,10 @@ class InstrumentStore:
                 "expiries": self.expiries(underlying, "OPTION"), "strikes": rows}
 
     def futures(self, underlying):
+        today = _ist_today()
         with self._lock:
             rows = sorted(self._fut.get(underlying, []), key=lambda r: r["expiry"])
-        return [self._slim(r) for r in rows]
+        return [self._slim(r) for r in rows if r.get("expiry", "") >= today]
 
     # ---------- metadata (used by the Demo price simulator) ----------
     def get_meta(self, security_id):
