@@ -41,7 +41,7 @@ def _ist_day_start_utc():
     midnight_ist = _ist_now().replace(hour=0, minute=0, second=0, microsecond=0)
     return midnight_ist.astimezone(dt.timezone.utc).replace(tzinfo=None)
 from market_data import DhanMarketData, demo_market
-from live_feed import feed
+import feeds
 from brokers import PaperBroker, DhanBroker
 from angel import AngelBroker, AngelMarketData
 from zerodha import ZerodhaBroker, ZerodhaMarketData
@@ -165,14 +165,48 @@ class TradingEngine:
         return None
 
     def _fetch_prices(self, db, uid, value, instruments, active):
-        by_seg = {}
-        for seg, sid in instruments:
-            by_seg.setdefault(seg, []).append(sid)
+        """Real-time first: read whatever the broker's WebSocket is already
+        streaming, then REST-fetch only what the socket hasn't delivered yet.
+        The REST path is the SAFETY NET — if a socket can't connect, every
+        instrument is "missing" and prices keep flowing exactly as before."""
         acc = self._provider_account(db, value, uid)
         if acc is None:     # DEMO
+            by_seg = {}
+            for seg, sid in instruments:
+                by_seg.setdefault(seg, []).append(sid)
             if active:
                 self._set_setting(db, uid, "md_status", "ok:demo")
             return demo_market.get_ltp_batch(by_seg)
+
+        # 1) Live ticks from the per-account WebSocket feed (empty if WS isn't
+        #    available / hasn't connected yet — caller then falls back to REST).
+        ws = {}
+        try:
+            ws = feeds.manager.snapshot(acc, instruments)
+        except Exception:
+            ws = {}
+        missing = [i for i in instruments if i not in ws]
+
+        # 2) REST fallback for the instruments the socket isn't streaming.
+        rest = self._rest_fetch(db, uid, acc, missing, active) if missing else {}
+        prices = dict(rest)
+        prices.update(ws)        # fresh ticks win over the (older) REST snapshot
+
+        # 3) Show "real-time (WebSocket)" once the socket is connected & feeding.
+        if active and ws:
+            try:
+                if feeds.manager.status(acc.id).get("connected"):
+                    self._set_setting(db, uid, "md_status", "ok:ws")
+            except Exception:
+                pass
+        return prices
+
+    def _rest_fetch(self, db, uid, acc, instruments, active):
+        """Per-broker REST price fetch for a set of instruments (the WebSocket
+        fallback). Sets md_status to ok:<broker> / an error string as before."""
+        by_seg = {}
+        for seg, sid in instruments:
+            by_seg.setdefault(seg, []).append(sid)
         creds = json.loads(acc.creds_json or "{}")
         if acc.broker == "DHAN":
             cid, tok = acc.client_id, creds.get("access_token", "")

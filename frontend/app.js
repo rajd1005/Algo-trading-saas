@@ -85,6 +85,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     document.getElementById("tab-" + t.dataset.tab).classList.add("active");
     document.body.setAttribute("data-tab", t.dataset.tab);   // drives P&L visibility on mobile
     window.scrollTo({ top: 0 });
+    pushWatch();   // (un)subscribe the live tick stream for the new tab
   };
 });
 
@@ -592,6 +593,7 @@ const HINTS = { OPTION: "— search index / stock / commodity (NIFTY, RELIANCE, 
 
 function resetPicker() {
   currentUnderlying = null;
+  _selContract = null;        // stop the stream from refreshing a stale selection
   ulResults.classList.remove("show");
   expiryWrap.style.display = "none";
   chainWrap.style.display = "none";
@@ -599,6 +601,7 @@ function resetPicker() {
   futWrap.innerHTML = ""; chainBody.innerHTML = "";
   if (ltpTimer) { clearInterval(ltpTimer); ltpTimer = null; }
   if (typeof selLtpTimer !== "undefined" && selLtpTimer) { clearInterval(selLtpTimer); selLtpTimer = null; }
+  pushWatch();                // clear the server-side watch for this chain
 }
 
 document.querySelectorAll("[data-seg]").forEach((b) => {
@@ -683,6 +686,7 @@ async function loadChain(underlying, expiry) {
     el.onclick = () => { pickContract(JSON.parse(el.dataset.c)); markSelected(el); };
   });
   refreshChainLtp();
+  pushWatch();                 // stream live ticks for this chain
   if (ltpTimer) clearInterval(ltpTimer);
   ltpTimer = setInterval(refreshChainLtp, 5000);
 }
@@ -750,6 +754,72 @@ function classifyChain(prices) {
   }
 }
 
+// ---- real-time tick stream (Server-Sent Events) -------------------------
+// The broker's WebSocket pushes ticks to the server; the server streams them
+// here. The 5s /api/ltp poll stays on as a safety net, so prices keep flowing
+// even if this stream (or the underlying socket) drops.
+let _livePx = {};            // security_id -> latest price (from ticks)
+let _selContract = null;     // the contract currently shown in "selected"
+let _es = null;
+let _classifyTimer = null;
+
+function startStream() {
+  if (_es || typeof EventSource === "undefined") return;
+  try { _es = new EventSource("/api/stream"); } catch (e) { return; }
+  _es.onmessage = (ev) => {
+    if (!ev.data) return;
+    let obj; try { obj = JSON.parse(ev.data); } catch (e) { return; }
+    onTicks(obj);
+  };
+  _es.onerror = () => {
+    // The browser auto-reconnects an open stream; if it fully closed, retry.
+    if (_es && _es.readyState === EventSource.CLOSED) { _es = null; setTimeout(startStream, 3000); }
+  };
+}
+
+function onTicks(obj) {
+  let touchedChain = false;
+  for (const sid in obj) {
+    const px = obj[sid];
+    _livePx[sid] = px;
+    // live option-chain cells
+    chainBody.querySelectorAll(`.ltp[data-ltp="${sid}"]`).forEach((sp) => {
+      sp.textContent = "₹" + px; sp.classList.remove("dim"); touchedChain = true;
+    });
+    // the contract picked into the trade form (futures / equity / option)
+    if (_selContract && String(_selContract.security_id) === String(sid)) showSelected(_selContract, px);
+  }
+  // recompute ATM / ITM / OTM from the freshest prices (throttled)
+  if (touchedChain && !_classifyTimer) {
+    _classifyTimer = setTimeout(() => { _classifyTimer = null; classifyChain(_livePx); }, 600);
+  }
+}
+
+// Tell the server which instruments this browser is looking at, so it keeps the
+// broker socket subscribed to them. Debounced; reads the current chain + pick.
+let _watchTimer = null;
+function pushWatch() {
+  if (_watchTimer) clearTimeout(_watchTimer);
+  _watchTimer = setTimeout(_doPushWatch, 150);
+}
+async function _doPushWatch() {
+  const map = {};
+  const onNew = document.getElementById("tab-new").classList.contains("active");
+  if (onNew) {
+    chainBody.querySelectorAll(".chain-cell[data-c]").forEach((el) => {
+      try {
+        const c = JSON.parse(el.dataset.c);
+        if (c.security_id) map[c.exchange_segment + "|" + c.security_id] =
+          { security_id: c.security_id, exchange_segment: c.exchange_segment };
+      } catch (e) {}
+    });
+    if (form.security_id.value && form.exchange_segment.value)
+      map[form.exchange_segment.value + "|" + form.security_id.value] =
+        { security_id: form.security_id.value, exchange_segment: form.exchange_segment.value };
+  }
+  try { await api.post("/api/stream/watch", { items: Object.values(map).slice(0, 500) }); } catch (e) {}
+}
+
 function renderFutures(futs) {
   if (!futs.length) { futWrap.style.display = "none"; return; }
   futWrap.innerHTML = futs.map((f, i) => `<button type="button" class="fut-btn" data-i="${i}">
@@ -767,8 +837,10 @@ function pickContract(r) {
   form.security_id.value = r.security_id;
   form.exchange_segment.value = r.exchange_segment;
   form.instrument_type.value = r.instrument_type;
+  _selContract = r;            // stream updates this contract's LTP live
   currentLotSize = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
   updateQty();
+  pushWatch();                 // ensure the socket streams the picked contract
   applyPreset((currentSeg === "EQUITY" ? r.symbol : currentUnderlying) || r.symbol, currentSeg);
   // Auto-fetch & live-update the LTP for stocks / futures / index right away.
   if (selLtpTimer) { clearInterval(selLtpTimer); selLtpTimer = null; }
@@ -1481,6 +1553,7 @@ loadPresets();
 loadSettings();
 loadWatchlist();
 refreshAll();
+startStream();          // open the real-time tick stream (SSE)
 setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); }, 2000);
 
 // ---- how-to guide (admin-editable rich HTML, shown on the Broker tab) ----

@@ -7,6 +7,7 @@ Run it with:   uvicorn main:app --host 0.0.0.0 --port 8000
 import os
 import json
 import time
+import asyncio
 import threading
 import datetime as dt
 
@@ -23,7 +24,8 @@ def _ipv4_only_getaddrinfo(host, *args, **kwargs):
 _socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -33,6 +35,7 @@ import emailer
 import angel
 import zerodha
 import aliceblue
+import feeds
 
 import config
 from database import init_db, get_db, SessionLocal
@@ -994,6 +997,20 @@ def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
             return {"connected": False, "prices": {}, "need_broker": True}
         res = demo_market.get_ltp_batch(by_seg)
         return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()}}
+
+    # Real-time first: read whatever the broker's WebSocket already streams, and
+    # REST-fetch only the rest (the socket keeps prices snappy; REST is the net).
+    instruments = [(seg, sid) for seg, ids in by_seg.items() for sid in ids]
+    ws = {}
+    try:
+        ws = feeds.manager.snapshot(acc, instruments)
+    except Exception:
+        ws = {}
+    missing = {}
+    for (seg, sid) in instruments:
+        if (seg, sid) not in ws:
+            missing.setdefault(seg, []).append(sid)
+
     creds = _acc_creds(acc)
     if acc.broker == "ANGEL":
         cid, key, jwt = acc.client_id, creds.get("api_key", ""), creds.get("jwt", "")
@@ -1015,9 +1032,89 @@ def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
         if not cid or not tok or not by_seg:
             return {"connected": bool(cid and tok), "prices": {}}
         md = DhanMarketData(cid, tok)
-    res = md.get_ltp_batch(by_seg)
-    return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()},
-            "error": md.last_error}
+    res = md.get_ltp_batch(missing) if missing else {}
+    prices = {sid: px for (seg, sid), px in res.items()}
+    prices.update({sid: px for (seg, sid), px in ws.items()})   # live ticks win
+    return {"connected": True, "prices": prices,
+            "ws": bool(ws) and feeds.manager.status(acc.id).get("connected", False),
+            "error": md.last_error if not prices else ""}
+
+
+# ---------- real-time tick stream (Server-Sent Events) ----------
+# The browser registers the instruments it's looking at (option chain / selected
+# contract) and then opens an EventSource; the server pushes price changes as the
+# broker's WebSocket delivers them. The 5-second /api/ltp poll stays as a safety
+# net, so prices keep flowing even if the stream/socket drops.
+_watch = {}                     # uid -> {"acc_id": int, "demo": bool, "items": [(seg, sid)]}
+_watch_lock = threading.Lock()
+
+
+@app.post("/api/stream/watch")
+def stream_watch(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    items = []
+    for it in payload.get("items", []):
+        seg = it.get("exchange_segment")
+        sid = str(it.get("security_id"))
+        if seg and sid:
+            items.append((seg, sid))
+    acc = _account_for_provider(db, uget(db, me.id, "data_provider", "DEMO"), me.id)
+    demo = acc is None and me.role == "SUPER_ADMIN"
+    with _watch_lock:
+        _watch[me.id] = {"acc_id": acc.id if acc else 0, "demo": demo, "items": items}
+    # Prime the feed now (creates / subscribes with the account's fresh creds) so
+    # ticks begin flowing before the next engine pass.
+    if acc is not None and items:
+        try:
+            feeds.manager.snapshot(acc, items)
+        except Exception:
+            pass
+    ws_on = feeds.manager.available and acc is not None
+    return {"ok": True, "ws": ws_on}
+
+
+@app.get("/api/stream")
+async def stream(request: Request):
+    """Server-Sent Events stream of live price ticks for this user's watched
+    instruments. Sends only changed prices; heartbeats keep the line open."""
+    me = current_user(request)
+    uid = me.id
+
+    async def gen():
+        last = {}
+        t0 = time.time()
+        hb = t0
+        yield "retry: 3000\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            if time.time() - t0 > 600:          # recycle hourly-ish; client reconnects
+                break
+            with _watch_lock:
+                w = _watch.get(uid)
+            prices = {}
+            if w and w["items"]:
+                if w["demo"]:
+                    by_seg = {}
+                    for seg, sid in w["items"]:
+                        by_seg.setdefault(seg, []).append(sid)
+                    res = demo_market.get_ltp_batch(by_seg)
+                    prices = {sid: px for (seg, sid), px in res.items()}
+                elif w["acc_id"]:
+                    snap = feeds.manager.snapshot_cached(w["acc_id"], w["items"])
+                    prices = {sid: px for (seg, sid), px in snap.items()}
+            delta = {k: v for k, v in prices.items() if last.get(k) != v}
+            if delta:
+                last.update(delta)
+                yield "data: " + json.dumps(delta) + "\n\n"
+                hb = time.time()
+            elif time.time() - hb > 15:
+                yield ": hb\n\n"
+                hb = time.time()
+            await asyncio.sleep(0.3)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 
 # ---------- demo controls (push price up/down, reset) ----------
