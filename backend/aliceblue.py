@@ -164,6 +164,10 @@ class AliceMarketData:
 
     def get_ltp_batch(self, by_segment):
         from instruments import store
+        if not mapper.ready():
+            mapper.load_async()
+            self.last_error = "Alice Blue symbol list is still downloading — prices will appear shortly."
+            return {}
         items = []
         for seg, ids in by_segment.items():
             for sid in ids:
@@ -171,7 +175,7 @@ class AliceMarketData:
                 if a:
                     items.append((seg, str(sid), a["exchange"], a["token"]))
         if not items:
-            self.last_error = "No symbols could be mapped to Alice Blue."
+            self.last_error = "No matching Alice Blue contracts for these strikes — pick one nearer ATM."
             return {}
         out, err = {}, ""
         for seg, sid, exch, tok in items[:40]:    # cap (per-scrip REST is slow)

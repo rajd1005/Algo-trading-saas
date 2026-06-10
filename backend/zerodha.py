@@ -156,6 +156,10 @@ class ZerodhaMarketData:
 
     def get_ltp_batch(self, by_segment):
         from instruments import store
+        if not mapper.ready():
+            mapper.load_async()
+            self.last_error = "Zerodha symbol list is still downloading — prices will appear shortly."
+            return {}
         keys, back = [], {}
         for seg, ids in by_segment.items():
             for sid in ids:
@@ -165,7 +169,7 @@ class ZerodhaMarketData:
                     keys.append(k)
                     back[k] = (seg, str(sid))
         if not keys:
-            self.last_error = "No symbols could be mapped to Zerodha."
+            self.last_error = "No matching Zerodha contracts for these strikes — pick one nearer ATM."
             return {}
         out, err = {}, ""
         for i in range(0, len(keys), 400):

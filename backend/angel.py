@@ -48,6 +48,7 @@ class AngelMapper:
         self._by_eq = {}         # (exch, name) -> row
         self.loaded_at = None
         self.loading = False
+        self.last_error = ""
 
     def ready(self):
         return bool(self._by_token)
@@ -55,19 +56,41 @@ class AngelMapper:
     def status(self):
         return {"count": len(self._by_token),
                 "loaded_at": self.loaded_at.isoformat() if self.loaded_at else None,
-                "loading": self.loading}
+                "loading": self.loading, "error": self.last_error}
 
     def load_async(self):
         threading.Thread(target=self._load, daemon=True).start()
+
+    @staticmethod
+    def _log(msg, level="WARN"):
+        try:
+            from database import SessionLocal
+            from models import LogEntry
+            db = SessionLocal()
+            db.add(LogEntry(message=msg, level=level))
+            db.commit(); db.close()
+        except Exception:
+            pass
 
     def _load(self):
         if self.loading:
             return
         self.loading = True
         try:
-            r = requests.get(SCRIP_URL, timeout=90, headers={"User-Agent": "algo"})
-            r.raise_for_status()
-            rows = r.json()
+            rows = None
+            for attempt in range(4):       # Angel rate-limits/503s the master; retry
+                try:
+                    r = requests.get(SCRIP_URL, timeout=90, headers={"User-Agent": "algo"})
+                    r.raise_for_status()
+                    rows = r.json()
+                    break
+                except Exception as e:
+                    self.last_error = f"Angel symbol list download failed (try {attempt + 1}): {e}"
+                    time.sleep(3 * (attempt + 1))
+            if rows is None:
+                self._log(f"Angel One symbol list could not be downloaded — option prices "
+                          f"unavailable until it loads. {self.last_error}", "ERROR")
+                return
             by_token, by_opt, by_fut, by_eq = {}, {}, {}, {}
             for x in rows:
                 exch = x.get("exch_seg", "")
@@ -91,8 +114,10 @@ class AngelMapper:
                 self._by_token, self._by_opt = by_token, by_opt
                 self._by_fut, self._by_eq = by_fut, by_eq
             self.loaded_at = dt.datetime.utcnow()
+            self.last_error = ""
         except Exception as e:
-            print(f"[angel] master load failed: {e}")
+            self.last_error = f"Angel symbol list parse failed: {e}"
+            self._log(self.last_error, "ERROR")
         finally:
             self.loading = False
 
@@ -180,6 +205,11 @@ class AngelMarketData:
         """Input Dhan-style {NSE_FNO:[ids]}; output {(dhan_seg, id): ltp}.
         Angel's quote API allows ~50 tokens per call, so we chunk."""
         from instruments import store
+        if not mapper.ready():
+            mapper.load_async()       # kick a (re)download in the background
+            self.last_error = ("Angel symbol list is still downloading — live prices will "
+                               "appear in a few seconds. " + (mapper.last_error or ""))
+            return {}
         pairs, back = [], {}      # pairs = list of (angel_exchange, token)
         for seg, ids in by_segment.items():
             for sid in ids:
@@ -188,7 +218,8 @@ class AngelMarketData:
                     pairs.append((a["exchange"], a["token"]))
                     back[(a["exchange"], a["token"])] = (seg, str(sid))
         if not pairs:
-            self.last_error = "No symbols could be mapped to Angel One."
+            self.last_error = ("No matching Angel contracts for these strikes (Angel lists "
+                               "fewer strikes than Dhan). Pick a strike nearer to ATM.")
             return {}
         url = f"{API_BASE}/rest/secure/angelbroking/market/v1/quote"
         out, err = {}, ""
