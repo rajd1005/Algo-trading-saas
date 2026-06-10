@@ -25,7 +25,7 @@ _socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
-                               StreamingResponse)
+                               StreamingResponse, PlainTextResponse)
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -36,11 +36,13 @@ import angel
 import zerodha
 import aliceblue
 import feeds
+import baskets
+import margins
 
 import config
 from database import init_db, get_db, SessionLocal
 from models import (Trade, LogEntry, Setting, Account, SymbolPreset, Watchlist,
-                    User, Plan, EmailTemplate, UserSetting)
+                    User, Plan, EmailTemplate, UserSetting, Basket, BasketLeg)
 from schemas import (TradeCreate, TradeOut, BrokerConfigIn, SettingsIn, ModifyIn,
                      SymbolPresetIn, WatchlistIn)
 from engine import engine, level_price
@@ -545,6 +547,7 @@ def _startup():
     zerodha.mapper.load_async()  # download Zerodha (Kite) master + symbol map
     aliceblue.mapper.load_async()  # download Alice Blue contract masters + symbol map
     engine.start()
+    baskets.start()            # basket scheduler + leg/MTM monitor threads
     threading.Thread(target=_auto_renew_loop, daemon=True).start()
     threading.Thread(target=_broker_monitor_loop, daemon=True).start()
     threading.Thread(target=_fetch_static_ip, daemon=True).start()
@@ -1459,6 +1462,330 @@ def delete_watchlist(item_id: int, request: Request, db: Session = Depends(get_d
         db.delete(w)
         db.commit()
     return {"ok": True}
+
+
+# ---------- baskets (multi-leg orders: build / execute / schedule) ----------
+def _owned_basket(db, basket_id, uid):
+    b = db.get(Basket, basket_id)
+    if b is None or b.user_id != uid:
+        raise HTTPException(404, "Basket not found.")
+    return b
+
+
+def _ist_basket_time(date_str, time_str):
+    """IST date (YYYY-MM-DD, default today) + time (HH:MM:SS) -> naive UTC datetime.
+    With no date given, a time already past today rolls to tomorrow."""
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    now_ist = dt.datetime.now(ist)
+    try:
+        parts = [int(x) for x in str(time_str).split(":")]
+        hh, mm, ss = (parts + [0, 0])[:3]
+    except Exception:
+        raise HTTPException(400, "Enter the time as HH:MM:SS.")
+    if date_str:
+        try:
+            d = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            raise HTTPException(400, "Enter the date as YYYY-MM-DD.")
+    else:
+        d = now_ist.date()
+    fire = dt.datetime(d.year, d.month, d.day, hh, mm, ss, tzinfo=ist)
+    if not date_str and fire <= now_ist:
+        fire += dt.timedelta(days=1)
+    return fire.astimezone(dt.timezone.utc).replace(tzinfo=None)
+
+
+def _basket_dict(db, b):
+    legs = (db.query(BasketLeg).filter(BasketLeg.basket_id == b.id)
+            .order_by(BasketLeg.seq, BasketLeg.id).all())
+    trades = db.query(Trade).filter(Trade.basket_id == b.id).all()
+    by_leg = {}
+    for t in trades:
+        by_leg.setdefault(t.leg_id, t)
+    active_mtm = round(sum((t.pnl or 0) for t in trades if t.status == "OPEN"), 2)
+    booked = round(sum((t.pnl or 0) for t in trades if t.status == "CLOSED")
+                   + sum((t.realized_pnl or 0) for t in trades if t.status == "OPEN"), 2)
+    sched_ist = ""
+    if b.scheduled_at:
+        ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+        sched_ist = (b.scheduled_at.replace(tzinfo=dt.timezone.utc)
+                     .astimezone(ist).strftime("%Y-%m-%d %H:%M:%S"))
+    return {
+        "id": b.id, "name": b.name, "mode": b.mode, "is_active": bool(b.is_active),
+        "is_scheduled": bool(b.is_scheduled), "schedule_status": b.schedule_status,
+        "scheduled_at_ist": sched_ist, "exec_status": b.exec_status,
+        "lock_step": b.lock_step, "lock_amount": b.lock_amount, "lock_floor": b.lock_floor,
+        "active_mtm": active_mtm, "booked": booked, "mtm": round(active_mtm + booked, 2),
+        "legs": [{
+            "id": l.id, "seq": l.seq, "symbol": l.symbol, "security_id": l.security_id,
+            "exchange_segment": l.exchange_segment, "instrument_type": l.instrument_type,
+            "underlying": l.underlying, "lot_size": l.lot_size,
+            "transaction_type": l.transaction_type, "order_type": l.order_type,
+            "quantity": l.quantity, "price": l.price, "trigger_price": l.trigger_price,
+            "status": l.status, "broker_order_id": l.broker_order_id,
+            "fill_price": l.fill_price, "error": l.error,
+            "ltp": (by_leg[l.id].last_price if l.id in by_leg else 0),
+            "pnl": (by_leg[l.id].pnl if l.id in by_leg else 0),
+        } for l in legs],
+    }
+
+
+def _add_leg(db, b, d, seq):
+    leg = BasketLeg(
+        basket_id=b.id, user_id=b.user_id, seq=seq,
+        symbol=str(d.get("symbol", "")).strip(),
+        security_id=str(d.get("security_id", "") or ""),
+        exchange_segment=str(d.get("exchange_segment", "") or ""),
+        instrument_type=str(d.get("instrument_type", "OPTION") or "OPTION"),
+        underlying=str(d.get("underlying", "") or ""),
+        lot_size=int(float(d.get("lot_size", 1) or 1)) or 1,
+        transaction_type="SELL" if str(d.get("transaction_type", "BUY")).upper() == "SELL" else "BUY",
+        order_type={"LIMIT": "LIMIT", "SL": "SL"}.get(str(d.get("order_type", "MARKET")).upper(), "MARKET"),
+        quantity=int(float(d.get("quantity", 1) or 1)) or 1,
+        price=float(d.get("price", 0) or 0),
+        trigger_price=float(d.get("trigger_price", 0) or 0),
+    )
+    db.add(leg)
+    return leg
+
+
+@app.get("/api/baskets")
+def basket_list(request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    bs = (db.query(Basket).filter(Basket.user_id == me.id, Basket.is_active == 1)
+          .order_by(Basket.id.desc()).all())
+    return [_basket_dict(db, b) for b in bs]
+
+
+@app.post("/api/baskets")
+def basket_create(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    name = (str(payload.get("name", "")).strip() or "Basket")[:80]
+    mode = "LIVE" if str(payload.get("mode", "TEST")).upper() == "LIVE" else "TEST"
+    b = Basket(user_id=me.id, name=name, mode=mode)
+    db.add(b)
+    db.commit()
+    for i, d in enumerate(payload.get("legs", []) or []):
+        if str(d.get("symbol", "")).strip():
+            _add_leg(db, b, d, i)
+    db.commit()
+    return _basket_dict(db, b)
+
+
+@app.post("/api/baskets/{basket_id}")
+def basket_update(basket_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    if "name" in payload:
+        b.name = (str(payload["name"]).strip()[:80]) or b.name
+    if "mode" in payload:
+        b.mode = "LIVE" if str(payload["mode"]).upper() == "LIVE" else "TEST"
+    if "is_active" in payload:
+        b.is_active = 1 if payload["is_active"] else 0
+    if "lock_step" in payload:
+        b.lock_step = max(0.0, float(payload.get("lock_step") or 0))
+    if "lock_amount" in payload:
+        b.lock_amount = max(0.0, float(payload.get("lock_amount") or 0))
+    if "lock_step" in payload or "lock_amount" in payload:
+        b.lock_floor = 0.0
+    db.commit()
+    return _basket_dict(db, b)
+
+
+@app.delete("/api/baskets/{basket_id}")
+def basket_delete(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    db.query(BasketLeg).filter(BasketLeg.basket_id == b.id).delete()
+    db.delete(b)
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/baskets/{basket_id}/legs")
+def basket_set_legs(basket_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    """Save the builder's legs. replace=true wipes & re-adds (also used by CSV import);
+    replace=false appends (used to add a single leg)."""
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    replace = bool(payload.get("replace", True))
+    if replace:
+        db.query(BasketLeg).filter(BasketLeg.basket_id == b.id).delete()
+        base = 0
+    else:
+        base = db.query(BasketLeg).filter(BasketLeg.basket_id == b.id).count()
+    for i, d in enumerate(payload.get("legs", []) or []):
+        if str(d.get("symbol", "")).strip():
+            _add_leg(db, b, d, base + i)
+    db.commit()
+    return _basket_dict(db, b)
+
+
+@app.delete("/api/baskets/{basket_id}/legs/{leg_id}")
+def basket_del_leg(basket_id: int, leg_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    l = db.get(BasketLeg, leg_id)
+    if l and l.basket_id == b.id:
+        db.delete(l)
+        db.commit()
+    return _basket_dict(db, b)
+
+
+@app.post("/api/baskets/{basket_id}/clear")
+def basket_clear(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    db.query(BasketLeg).filter(BasketLeg.basket_id == b.id).delete()
+    b.exec_status = ""
+    db.commit()
+    return _basket_dict(db, b)
+
+
+@app.post("/api/baskets/{basket_id}/invert")
+def basket_invert(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    for l in db.query(BasketLeg).filter(BasketLeg.basket_id == b.id).all():
+        l.transaction_type = "SELL" if l.transaction_type == "BUY" else "BUY"
+    db.commit()
+    return _basket_dict(db, b)
+
+
+@app.post("/api/baskets/{basket_id}/clone")
+def basket_clone(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    nb = Basket(user_id=me.id, name=(b.name + " (copy)")[:80], mode=b.mode,
+                lock_step=b.lock_step, lock_amount=b.lock_amount)
+    db.add(nb)
+    db.flush()
+    legs = (db.query(BasketLeg).filter(BasketLeg.basket_id == b.id)
+            .order_by(BasketLeg.seq, BasketLeg.id).all())
+    for i, l in enumerate(legs):
+        db.add(BasketLeg(basket_id=nb.id, user_id=me.id, seq=i, symbol=l.symbol,
+                         security_id=l.security_id, exchange_segment=l.exchange_segment,
+                         instrument_type=l.instrument_type, underlying=l.underlying,
+                         lot_size=l.lot_size, transaction_type=l.transaction_type,
+                         order_type=l.order_type, quantity=l.quantity, price=l.price,
+                         trigger_price=l.trigger_price))
+    db.commit()
+    return _basket_dict(db, nb)
+
+
+@app.get("/api/baskets/{basket_id}/export")
+def basket_export(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    import io
+    import csv as _csv
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    legs = (db.query(BasketLeg).filter(BasketLeg.basket_id == b.id)
+            .order_by(BasketLeg.seq, BasketLeg.id).all())
+    buf = io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(["symbol", "security_id", "exchange_segment", "instrument_type", "underlying",
+                "transaction_type", "order_type", "quantity", "price", "trigger_price", "lot_size"])
+    for l in legs:
+        w.writerow([l.symbol, l.security_id, l.exchange_segment, l.instrument_type, l.underlying,
+                    l.transaction_type, l.order_type, l.quantity, l.price, l.trigger_price, l.lot_size])
+    fn = (b.name or "basket").replace(" ", "_") + ".csv"
+    return PlainTextResponse(buf.getvalue(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
+@app.post("/api/baskets/{basket_id}/margin")
+def basket_margin_check(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    legs = (db.query(BasketLeg).filter(BasketLeg.basket_id == b.id)
+            .order_by(BasketLeg.seq, BasketLeg.id).all())
+    if not legs:
+        raise HTTPException(400, "Add at least one leg first.")
+    acc = _account_for_provider(db, uget(db, me.id, "trade_provider", "DEMO"), me.id)
+    if acc is None:
+        return {"required": margins._estimate(legs), "available": 0, "ok": True,
+                "verified": False, "detail": "No live broker selected — showing a local estimate."}
+    return margins.basket_margin(db, acc, legs)
+
+
+@app.post("/api/baskets/{basket_id}/execute")
+def basket_execute(basket_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    force = bool(payload.get("force"))
+    pending_legs = (db.query(BasketLeg)
+                    .filter(BasketLeg.basket_id == b.id,
+                            BasketLeg.status.in_(["PENDING", "FAILED"])).count())
+    if pending_legs == 0:
+        raise HTTPException(400, "This basket has no legs left to execute.")
+    # Conflict: a schedule is pending — let the UI confirm cancel-and-fire-now.
+    if b.is_scheduled and b.schedule_status == "PENDING" and not force:
+        return {"conflict": True, "scheduled_at_ist": _basket_dict(db, b)["scheduled_at_ist"]}
+    # Immediate guardrails (the dispatch re-checks too).
+    if b.mode == "LIVE":
+        if me.role != "SUPER_ADMIN" and not _broker_connected(db, me.id):
+            raise HTTPException(400, "Connect your broker before firing a LIVE basket.")
+        if uget(db, me.id, "kill_switch", "off") == "on":
+            raise HTTPException(400, "Kill switch is ON. Turn it off to fire a LIVE basket.")
+    if _daily_halted(db, me.id):
+        raise HTTPException(400, "Daily limit hit — trading is halted for today.")
+    if force and b.is_scheduled:
+        baskets.cancel_schedule(db, b.id)
+        db.add(LogEntry(message=f"Basket '{b.name}': schedule cancelled — firing manually now.",
+                        user_id=me.id))
+        db.commit()
+    baskets.execute_now(b.id)
+    return {"dispatching": True}
+
+
+@app.post("/api/baskets/{basket_id}/schedule")
+def basket_schedule(basket_id: int, payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    if not payload.get("enabled", True):
+        baskets.cancel_schedule(db, b.id)
+        db.refresh(b)
+        return _basket_dict(db, b)
+    if db.query(BasketLeg).filter(BasketLeg.basket_id == b.id).count() == 0:
+        raise HTTPException(400, "Add at least one leg before scheduling.")
+    b.scheduled_at = _ist_basket_time(payload.get("date", ""), payload.get("time", ""))
+    b.is_scheduled = 1
+    b.schedule_status = "PENDING"
+    b.timezone = "IST"
+    b.exec_status = ""
+    db.commit()
+    d = _basket_dict(db, b)
+    db.add(LogEntry(message=f"Basket '{b.name}' scheduled for {d['scheduled_at_ist']} IST.",
+                    user_id=me.id))
+    db.commit()
+    return d
+
+
+@app.post("/api/baskets/{basket_id}/cancel_schedule")
+def basket_cancel_schedule(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    baskets.cancel_schedule(db, b.id)
+    db.refresh(b)
+    return _basket_dict(db, b)
+
+
+@app.post("/api/baskets/{basket_id}/squareoff")
+def basket_squareoff(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    baskets.square_off(b.id)
+    return {"ok": True}
+
+
+@app.post("/api/baskets/{basket_id}/retry")
+def basket_retry(basket_id: int, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    if _daily_halted(db, me.id):
+        raise HTTPException(400, "Daily limit hit — trading is halted for today.")
+    baskets.retry_failed(b.id)
+    return {"dispatching": True}
 
 
 # ---------- broker info ----------

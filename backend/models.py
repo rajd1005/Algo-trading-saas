@@ -154,6 +154,8 @@ class Trade(Base):
     account_id = Column(Integer, default=0)         # which broker account (0 = Demo/paper)
     user_id = Column(Integer, index=True, default=0)  # tenant owner
     source = Column(String, default="ALGO")         # ALGO or EXTERNAL (synced from broker)
+    basket_id = Column(Integer, default=0, index=True)  # owning basket (0 = standalone)
+    leg_id = Column(Integer, default=0)             # owning basket leg
 
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
@@ -214,6 +216,64 @@ class SymbolPreset(Base):
     lock_step = Column(Float, default=0.0)             # auto profit-lock: every ₹step…
     lock_amount = Column(Float, default=0.0)           # …secure ₹amount
     profit_lock_json = Column(Text, default="")        # legacy (tiers); no longer used
+    created_at = Column(DateTime, default=_now)
+
+
+class Basket(Base):
+    """A named group of order legs that fire together (instantly or scheduled)."""
+    __tablename__ = "user_baskets"
+
+    id = Column(Integer, primary_key=True, index=True)   # basket_id
+    user_id = Column(Integer, index=True, default=0)     # tenant owner
+    name = Column(String, default="")                    # basket_name
+    mode = Column(String, default="TEST")                # TEST (paper) / LIVE
+    is_active = Column(Integer, default=1)
+
+    # --- scheduling ---
+    is_scheduled = Column(Integer, default=0)
+    scheduled_at = Column(DateTime, default=None, nullable=True)   # UTC instant to fire
+    schedule_status = Column(String, default="")         # PENDING/EXECUTED/FAILED/CANCELLED
+    timezone = Column(String, default="IST")
+
+    # --- basket-level step profit-lock on the COMBINED MTM ---
+    lock_step = Column(Float, default=0.0)               # for every ₹step of basket profit…
+    lock_amount = Column(Float, default=0.0)             # …secure ₹amount
+    lock_floor = Column(Float, default=0.0)              # currently-armed secured floor (₹)
+
+    # --- execution bookkeeping ---
+    exec_status = Column(String, default="")             # DISPATCHING/EXECUTED/PARTIAL/FAILED
+    last_exec_at = Column(DateTime, default=None, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class BasketLeg(Base):
+    """One order inside a basket. Becomes a Trade row when the basket executes."""
+    __tablename__ = "basket_legs"
+
+    id = Column(Integer, primary_key=True, index=True)   # leg_id
+    basket_id = Column(Integer, index=True, default=0)
+    user_id = Column(Integer, index=True, default=0)
+    seq = Column(Integer, default=0)                     # order within the basket
+
+    symbol = Column(String, default="")                  # universal symbol label
+    security_id = Column(String, default="")             # Dhan-space security id
+    exchange_segment = Column(String, default="")        # NSE_EQ / NSE_FNO / …
+    instrument_type = Column(String, default="OPTION")   # OPTION / FUTURES / EQUITY / INDEX
+    underlying = Column(String, default="")
+    lot_size = Column(Integer, default=1)
+
+    transaction_type = Column(String, default="BUY")     # BUY / SELL
+    order_type = Column(String, default="MARKET")        # MARKET / LIMIT / SL
+    quantity = Column(Integer, default=1)
+    price = Column(Float, default=0.0)                   # limit price
+    trigger_price = Column(Float, default=0.0)           # SL trigger price
+
+    # --- live state ---
+    status = Column(String, default="PENDING")           # PENDING/EXECUTED/FAILED/CANCELLED/CLOSED
+    trade_id = Column(Integer, default=0)                # linked Trade row
+    broker_order_id = Column(String, default="")
+    fill_price = Column(Float, default=0.0)
+    error = Column(String, default="")
     created_at = Column(DateTime, default=_now)
 
 

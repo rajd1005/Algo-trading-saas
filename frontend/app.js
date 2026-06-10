@@ -1554,7 +1554,7 @@ loadSettings();
 loadWatchlist();
 refreshAll();
 startStream();          // open the real-time tick stream (SSE)
-setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); }, 2000);
+setInterval(() => { refreshSummary(); refreshTrades(); refreshLogs(); bkPoll(); }, 2000);
 
 // ---- how-to guide (admin-editable rich HTML, shown on the Broker tab) ----
 async function loadHowto() {
@@ -1879,3 +1879,369 @@ async function adminLoadAllLogs() {
   document.getElementById("adLogPrev").onclick = () => { if (adLog.page > 1) { adLog.page--; adminLoadAllLogs(); } };
   document.getElementById("adLogNext").onclick = () => { if (adLog.page < adLog.pages) { adLog.page++; adminLoadAllLogs(); } };
 })();
+
+// ============================================================================
+// Baskets — build a multi-leg strategy, fire instantly or at an exact second.
+// ============================================================================
+const BK = { list: [], cur: null, seg: "OPTION", picked: null, lot: 1 };
+
+function bkCur() { return BK.list.find((b) => b.id === BK.cur) || null; }
+
+async function bkLoad(keepId) {
+  try { BK.list = await api.get("/api/baskets"); } catch { BK.list = []; }
+  if (keepId && BK.list.find((b) => b.id === keepId)) BK.cur = keepId;
+  if (!BK.cur || !BK.list.find((b) => b.id === BK.cur)) BK.cur = BK.list[0] ? BK.list[0].id : null;
+  bkRenderSelect();
+  bkRenderPanel();
+}
+const bkReload = () => bkLoad(BK.cur);
+
+function bkMerge(b) {
+  const i = BK.list.findIndex((x) => x.id === b.id);
+  if (i >= 0) BK.list[i] = b; else BK.list.unshift(b);
+  BK.cur = b.id; bkRenderSelect(); bkRenderPanel();
+}
+
+function bkRenderSelect() {
+  const sel = document.getElementById("bkSelect");
+  sel.innerHTML = BK.list.map((b) =>
+    `<option value="${b.id}">${esc(b.name)} · ${b.legs.length} legs</option>`).join("");
+  document.getElementById("bkEmpty").style.display = BK.list.length ? "none" : "";
+  document.getElementById("bkPanel").style.display = BK.list.length ? "" : "none";
+  if (BK.cur) sel.value = BK.cur;
+}
+
+function bkRenderPanel() {
+  const b = bkCur();
+  if (!b) { document.getElementById("bkPanel").style.display = "none"; return; }
+  document.getElementById("bkPanel").style.display = "";
+  document.getElementById("bkName").value = b.name;
+  document.querySelectorAll("#bkMode button").forEach((x) => x.classList.toggle("active", x.dataset.m === b.mode));
+  document.getElementById("bkLockStep").value = b.lock_step || "";
+  document.getElementById("bkLockAmt").value = b.lock_amount || "";
+  bkRefreshLive(b);
+}
+
+// Live-only refresh (won't clobber inputs the user is editing).
+function bkRefreshLive(b) {
+  if (!b || bkCur()?.id !== b.id) return;
+  const mtm = document.getElementById("bkMtm");
+  mtm.innerHTML = b.legs.length
+    ? `MTM <b class="${cls(b.mtm)}">${money(b.mtm)}</b> · Booked <b class="${cls(b.booked)}">${money(b.booked)}</b>` : "";
+  document.getElementById("bkLockState").textContent =
+    b.lock_floor > 0 ? `🔒 securing ₹${b.lock_floor.toLocaleString("en-IN")}` : "";
+  bkRenderLegs(b);
+  bkRenderSchedule(b);
+  const anyOpen = b.legs.some((l) => l.status === "EXECUTED");
+  const anyFailed = b.legs.some((l) => l.status === "FAILED");
+  document.getElementById("bkSquareoff").style.display = anyOpen ? "" : "none";
+  document.getElementById("bkRetry").style.display = anyFailed ? "" : "none";
+}
+
+function bkLegBadge(s) {
+  const m = { PENDING: "pend", EXECUTED: "exec", FAILED: "fail", CANCELLED: "canc", CLOSED: "closed" };
+  const t = { PENDING: "Pending", EXECUTED: "Executed", FAILED: "Failed", CANCELLED: "Cancelled", CLOSED: "Closed" };
+  return `<span class="lst ${m[s] || ""}">${t[s] || s}</span>`;
+}
+
+function bkRenderLegs(b) {
+  const body = document.getElementById("bkLegsBody");
+  if (!b.legs.length) {
+    body.innerHTML = `<tr><td colspan="10" class="muted" style="text-align:center;padding:14px;">No legs yet — search a symbol above and add legs.</td></tr>`;
+    return;
+  }
+  body.innerHTML = b.legs.map((l, i) => {
+    const px = l.order_type === "LIMIT" ? ("₹" + l.price)
+      : l.order_type === "SL" ? ("SL ₹" + l.trigger_price) : "Mkt";
+    return `<tr class="${l.status === "FAILED" ? "leg-fail" : ""}" title="${esc(l.error || "")}">
+      <td>${i + 1}</td><td>${esc(l.symbol)}</td>
+      <td class="${l.transaction_type === "BUY" ? "pos" : "neg"}">${l.transaction_type}</td>
+      <td>${l.order_type}</td><td>${l.quantity}</td><td>${px}</td>
+      <td>${l.ltp ? "₹" + l.ltp : "–"}</td>
+      <td class="${cls(l.pnl)}">${l.pnl ? money(l.pnl) : "–"}</td>
+      <td>${bkLegBadge(l.status)}</td>
+      <td>${l.status === "PENDING" ? `<button class="ic-btn" title="Remove" onclick="bkDelLeg(${l.id})">✕</button>` : ""}</td>
+    </tr>`;
+  }).join("");
+}
+
+function bkRenderSchedule(b) {
+  const toggle = document.getElementById("bkSchedToggle");
+  const scheduled = b.is_scheduled && b.schedule_status === "PENDING";
+  if (scheduled) toggle.checked = true;
+  document.getElementById("bkSchedRow").style.display = toggle.checked ? "" : "none";
+  document.getElementById("bkSchedCancel").style.display = scheduled ? "" : "none";
+  const st = document.getElementById("bkSchedState");
+  if (scheduled) st.innerHTML = `⏱ Scheduled for <b>${esc(b.scheduled_at_ist)} IST</b>`;
+  else if (b.schedule_status) st.textContent = "Last schedule: " + b.schedule_status.toLowerCase();
+  else st.textContent = "";
+}
+
+async function bkDelLeg(id) {
+  try { bkMerge(await api.del(`/api/baskets/${BK.cur}/legs/${id}`)); } catch (e) {}
+}
+
+// ---- add-leg picker (hooked to the Universal Symbol Mapper) ----
+let bkSearchTimer;
+function bkSearchInput() {
+  clearTimeout(bkSearchTimer);
+  const q = document.getElementById("bkSearch").value.trim();
+  const res = document.getElementById("bkSearchRes");
+  if (!q) { res.classList.remove("show"); return; }
+  bkSearchTimer = setTimeout(async () => {
+    let items = [];
+    try {
+      items = BK.seg === "EQUITY"
+        ? await api.get("/api/equities/search?q=" + encodeURIComponent(q))
+        : await api.get("/api/underlyings/search?q=" + encodeURIComponent(q) + "&kind=" + BK.seg);
+    } catch { items = []; }
+    if (BK.seg === "EQUITY") {
+      res.innerHTML = items.map((r, i) => `<div class="sr-item" data-i="${i}">${esc(r.symbol)} <span class="muted">${esc(r.exchange_segment)}</span></div>`).join("")
+        || `<div class="sr-item muted">No matches</div>`;
+      res.querySelectorAll(".sr-item[data-i]").forEach((el) => el.onclick = () => bkPickEquity(items[el.dataset.i]));
+    } else {
+      res.innerHTML = items.map((r, i) => `<div class="sr-item" data-i="${i}">${esc(r.underlying)} <span class="muted">${esc(r.exchange || "")}</span></div>`).join("")
+        || `<div class="sr-item muted">No matches</div>`;
+      res.querySelectorAll(".sr-item[data-i]").forEach((el) => el.onclick = () => bkPickUnderlying(items[el.dataset.i]));
+    }
+    res.classList.add("show");
+  }, 250);
+}
+
+async function bkPickUnderlying(u) {
+  document.getElementById("bkSearchRes").classList.remove("show");
+  document.getElementById("bkSearch").value = u.underlying;
+  const wrap = document.getElementById("bkContractPick");
+  BK.picked = null; document.getElementById("bkLegForm").style.display = "none";
+  if (BK.seg === "FUTURES") {
+    let futs = [];
+    try { futs = await api.get("/api/futures?underlying=" + encodeURIComponent(u.underlying)); } catch {}
+    wrap.innerHTML = futs.length
+      ? futs.map((f, i) => `<button type="button" class="bk-cbtn" data-i="${i}">${esc(f.symbol)}<span class="muted"> · exp ${f.expiry}</span></button>`).join("")
+      : `<span class="muted">No futures contracts.</span>`;
+    wrap.querySelectorAll(".bk-cbtn").forEach((el) => el.onclick = () => {
+      wrap.querySelectorAll(".bk-cbtn").forEach((x) => x.classList.remove("sel")); el.classList.add("sel");
+      bkPickContract(futs[el.dataset.i]);
+    });
+  } else {
+    let exps = [];
+    try { exps = await api.get("/api/expiries?underlying=" + encodeURIComponent(u.underlying) + "&kind=OPTION"); } catch {}
+    if (!exps.length) { wrap.innerHTML = `<span class="muted">No option expiries.</span>`; return; }
+    wrap.innerHTML = `<select id="bkExpiry" class="bk-exp">${exps.map((e) => `<option>${e}</option>`).join("")}</select><div id="bkStrikes" class="bk-strikes"></div>`;
+    const load = () => bkLoadStrikes(u.underlying, document.getElementById("bkExpiry").value);
+    document.getElementById("bkExpiry").onchange = load; load();
+  }
+}
+
+async function bkLoadStrikes(underlying, expiry) {
+  const box = document.getElementById("bkStrikes");
+  box.innerHTML = `<span class="muted">Loading chain…</span>`;
+  let data;
+  try { data = await api.get(`/api/optionchain?underlying=${encodeURIComponent(underlying)}&expiry=${encodeURIComponent(expiry)}`); }
+  catch { box.innerHTML = `<span class="muted">Failed to load chain.</span>`; return; }
+  box.innerHTML = data.strikes.map((row, i) => {
+    const ce = row.ce ? `<button type="button" class="bk-opt ce" data-i="${i}" data-t="ce">CE</button>` : `<span class="bk-opt dis">–</span>`;
+    const pe = row.pe ? `<button type="button" class="bk-opt pe" data-i="${i}" data-t="pe">PE</button>` : `<span class="bk-opt dis">–</span>`;
+    return `<div class="bk-srow">${ce}<span class="bk-strike">${row.strike}</span>${pe}</div>`;
+  }).join("");
+  box.querySelectorAll(".bk-opt[data-i]").forEach((el) => el.onclick = () => {
+    const row = data.strikes[el.dataset.i];
+    box.querySelectorAll(".bk-opt").forEach((x) => x.classList.remove("sel")); el.classList.add("sel");
+    bkPickContract(el.dataset.t === "ce" ? row.ce : row.pe);
+  });
+}
+
+function bkPickContract(c) {
+  if (!c) return;
+  BK.picked = c;
+  BK.lot = (c.lot_size && parseInt(parseFloat(c.lot_size)) > 0) ? parseInt(parseFloat(c.lot_size)) : 1;
+  bkShowLegForm();
+}
+function bkPickEquity(r) {
+  document.getElementById("bkSearchRes").classList.remove("show");
+  document.getElementById("bkContractPick").innerHTML = "";
+  document.getElementById("bkSearch").value = r.symbol;
+  BK.picked = { symbol: r.symbol, security_id: r.security_id, exchange_segment: r.exchange_segment,
+                instrument_type: r.instrument_type || "EQUITY", lot_size: r.lot_size || 1, underlying: r.underlying || "" };
+  BK.lot = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
+  bkShowLegForm();
+}
+function bkShowLegForm() {
+  document.getElementById("bkLegForm").style.display = "";
+  const c = BK.picked;
+  document.getElementById("bkLegPicked").innerHTML =
+    `✅ <b>${esc(c.symbol)}</b> · ${esc(c.instrument_type)} · ${esc(c.exchange_segment)} · lot ${BK.lot}`;
+  document.getElementById("bkLots").value = 1;
+  bkQtyHint();
+}
+function bkQtyHint() {
+  const lots = parseInt(document.getElementById("bkLots").value) || 1;
+  document.getElementById("bkQtyHint").textContent = `${lots} lot × ${BK.lot} = ${lots * BK.lot} qty`;
+}
+
+async function bkAddLeg() {
+  if (!BK.picked || !BK.cur) { toast("⚠️ Pick a symbol first.", "neg"); return; }
+  const lots = parseInt(document.getElementById("bkLots").value) || 1;
+  const ot = document.getElementById("bkOrderType").value;
+  const side = document.querySelector("#bkSide .active").dataset.side;
+  const price = parseFloat(document.getElementById("bkPrice").value) || 0;
+  const c = BK.picked;
+  const leg = {
+    symbol: c.symbol, security_id: c.security_id, exchange_segment: c.exchange_segment,
+    instrument_type: c.instrument_type, underlying: c.underlying || "", lot_size: BK.lot,
+    transaction_type: side, order_type: ot, quantity: lots * BK.lot,
+    price: ot === "LIMIT" ? price : 0, trigger_price: ot === "SL" ? price : 0,
+  };
+  try {
+    bkMerge(await api.post(`/api/baskets/${BK.cur}/legs`, { replace: false, legs: [leg] }));
+    toast("✅ Leg added", "pos");
+    BK.picked = null;
+    document.getElementById("bkLegForm").style.display = "none";
+    document.getElementById("bkSearch").value = "";
+    document.getElementById("bkContractPick").innerHTML = "";
+  } catch (e) {}
+}
+
+// ---- execution / scheduling / quick actions ----
+async function bkExecute() {
+  if (!BK.cur) return;
+  const btn = document.getElementById("bkExecute");
+  if (btn.disabled) return;
+  const old = btn.innerHTML;
+  btn.disabled = true; btn.classList.add("loading"); btn.innerHTML = "Dispatching…";
+  try {
+    let res = await api.post(`/api/baskets/${BK.cur}/execute`, {});
+    if (res.conflict) {
+      const go = confirm(`This basket is scheduled for ${res.scheduled_at_ist} IST.\n\nCancel the schedule and execute now?`);
+      if (!go) return;
+      res = await api.post(`/api/baskets/${BK.cur}/execute`, { force: true });
+    }
+    if (res.dispatching) { toast("⚡ Dispatching basket…", "pos"); setTimeout(bkReload, 1300); }
+  } catch (e) {} finally {
+    btn.disabled = false; btn.classList.remove("loading"); btn.innerHTML = old;
+  }
+}
+async function bkSchedSet() {
+  const date = document.getElementById("bkSchedDate").value;
+  const time = document.getElementById("bkSchedTime").value;
+  if (!time) { toast("⚠️ Pick a time.", "neg"); return; }
+  try { const b = await api.post(`/api/baskets/${BK.cur}/schedule`, { date, time });
+    bkMerge(b); toast(`⏱ Scheduled for ${b.scheduled_at_ist} IST`, "pos"); } catch (e) {}
+}
+async function bkSchedCancel() {
+  try { bkMerge(await api.post(`/api/baskets/${BK.cur}/cancel_schedule`)); toast("Schedule cancelled", "info"); } catch (e) {}
+}
+async function bkSquareoff() {
+  if (!confirm("Square off all open legs in this basket at market?")) return;
+  try { await api.post(`/api/baskets/${BK.cur}/squareoff`); toast("⊗ Squaring off basket…", "info"); setTimeout(bkReload, 1200); } catch (e) {}
+}
+async function bkRetry() {
+  try { await api.post(`/api/baskets/${BK.cur}/retry`); toast("↻ Retrying failed legs…", "info"); setTimeout(bkReload, 1300); } catch (e) {}
+}
+async function bkMargin() {
+  const out = document.getElementById("bkMarginOut");
+  out.textContent = "checking…";
+  try {
+    const m = await api.post(`/api/baskets/${BK.cur}/margin`);
+    const req = `Required <b>₹${Math.round(m.required).toLocaleString("en-IN")}</b>`;
+    out.innerHTML = m.verified
+      ? `${req} · Available <b>₹${Math.round(m.available).toLocaleString("en-IN")}</b> · ${m.ok ? '<span class="pos">✓ sufficient</span>' : '<span class="neg">⚠ looks short</span>'}`
+      : `${req} · <span class="muted">${esc(m.detail || "estimate (not broker-verified)")}</span>`;
+  } catch (e) { out.textContent = ""; }
+}
+async function bkSaveLock() {
+  try {
+    const b = await api.post(`/api/baskets/${BK.cur}`, {
+      lock_step: parseFloat(document.getElementById("bkLockStep").value) || 0,
+      lock_amount: parseFloat(document.getElementById("bkLockAmt").value) || 0,
+    });
+    bkMerge(b); toast("✅ Basket profit-lock saved", "pos");
+  } catch (e) {}
+}
+function bkParseCSV(text) {
+  const lines = text.split(/\r?\n/).filter((x) => x.trim());
+  if (lines.length < 2) return [];
+  const head = lines[0].split(",").map((s) => s.trim().toLowerCase());
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const c = lines[i].split(",");
+    const g = (n) => { const j = head.indexOf(n); return j >= 0 ? (c[j] || "").trim() : ""; };
+    if (!g("symbol")) continue;
+    out.push({ symbol: g("symbol"), security_id: g("security_id"), exchange_segment: g("exchange_segment"),
+      instrument_type: g("instrument_type") || "OPTION", underlying: g("underlying"),
+      transaction_type: (g("transaction_type") || "BUY").toUpperCase(),
+      order_type: (g("order_type") || "MARKET").toUpperCase(),
+      quantity: parseInt(g("quantity")) || 1, price: parseFloat(g("price")) || 0,
+      trigger_price: parseFloat(g("trigger_price")) || 0, lot_size: parseInt(g("lot_size")) || 1 });
+  }
+  return out;
+}
+
+function bkPoll() {
+  if (!document.getElementById("tab-baskets").classList.contains("active")) return;
+  api.get("/api/baskets").then((list) => {
+    BK.list = list;
+    const b = bkCur();
+    if (b) bkRefreshLive(b); else bkRenderSelect();
+  }).catch(() => {});
+}
+
+function bkInit() {
+  document.getElementById("bkCreate").onclick = async () => {
+    const name = document.getElementById("bkNewName").value.trim();
+    try { const b = await api.post("/api/baskets", { name: name || "Basket", mode: "TEST" });
+      document.getElementById("bkNewName").value = ""; await bkLoad(b.id); toast("✅ Basket created", "pos"); } catch (e) {}
+  };
+  document.getElementById("bkSelect").onchange = (e) => { BK.cur = parseInt(e.target.value); bkRenderPanel(); };
+  document.getElementById("bkName").onchange = async (e) => {
+    try { bkMerge(await api.post(`/api/baskets/${BK.cur}`, { name: e.target.value })); } catch (err) {}
+  };
+  document.querySelectorAll("#bkMode button").forEach((btn) => btn.onclick = async () => {
+    try { bkMerge(await api.post(`/api/baskets/${BK.cur}`, { mode: btn.dataset.m })); } catch (e) {}
+  });
+  document.querySelectorAll("#bkSeg button").forEach((btn) => btn.onclick = () => {
+    document.querySelectorAll("#bkSeg button").forEach((x) => x.classList.remove("active"));
+    btn.classList.add("active"); BK.seg = btn.dataset.seg;
+    document.getElementById("bkSearch").value = ""; document.getElementById("bkSearchRes").classList.remove("show");
+    document.getElementById("bkContractPick").innerHTML = ""; document.getElementById("bkLegForm").style.display = "none";
+  });
+  document.querySelectorAll("#bkSide button").forEach((btn) => btn.onclick = () => {
+    document.querySelectorAll("#bkSide button").forEach((x) => x.classList.remove("active"));
+    btn.classList.add("active");
+  });
+  document.getElementById("bkOrderType").onchange = (e) => {
+    const p = document.getElementById("bkPrice");
+    if (e.target.value === "MARKET") { p.style.display = "none"; }
+    else { p.style.display = ""; p.placeholder = e.target.value === "SL" ? "Trigger price" : "Limit price"; }
+  };
+  document.getElementById("bkSearch").oninput = bkSearchInput;
+  document.getElementById("bkLots").oninput = bkQtyHint;
+  document.getElementById("bkAddLeg").onclick = bkAddLeg;
+  document.getElementById("bkInvert").onclick = async () => { try { bkMerge(await api.post(`/api/baskets/${BK.cur}/invert`)); toast("⇅ Sides inverted", "info"); } catch (e) {} };
+  document.getElementById("bkClone").onclick = async () => { try { const b = await api.post(`/api/baskets/${BK.cur}/clone`); await bkLoad(b.id); toast("⧉ Basket cloned", "pos"); } catch (e) {} };
+  document.getElementById("bkClear").onclick = async () => { if (!confirm("Remove all legs from this basket?")) return; try { bkMerge(await api.post(`/api/baskets/${BK.cur}/clear`)); } catch (e) {} };
+  document.getElementById("bkDelete").onclick = async () => { if (!confirm("Delete this basket and its legs?")) return; try { await api.del(`/api/baskets/${BK.cur}`); BK.cur = null; await bkLoad(); toast("Basket deleted", "info"); } catch (e) {} };
+  document.getElementById("bkExport").onclick = () => { if (BK.cur) window.location = `/api/baskets/${BK.cur}/export`; };
+  document.getElementById("bkImport").onclick = () => document.getElementById("bkImportFile").click();
+  document.getElementById("bkImportFile").onchange = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = async () => { const legs = bkParseCSV(r.result);
+      if (!legs.length) { toast("⚠️ No valid rows in CSV.", "neg"); return; }
+      try { bkMerge(await api.post(`/api/baskets/${BK.cur}/legs`, { replace: true, legs })); toast(`⬆ Imported ${legs.length} legs`, "pos"); } catch (er) {} };
+    r.readAsText(f); e.target.value = "";
+  };
+  document.getElementById("bkLockSave").onclick = bkSaveLock;
+  document.getElementById("bkMargin").onclick = bkMargin;
+  document.getElementById("bkExecute").onclick = bkExecute;
+  document.getElementById("bkSquareoff").onclick = bkSquareoff;
+  document.getElementById("bkRetry").onclick = bkRetry;
+  document.getElementById("bkSchedToggle").onchange = (e) => {
+    document.getElementById("bkSchedRow").style.display = e.target.checked ? "" : "none";
+  };
+  document.getElementById("bkSchedSet").onclick = bkSchedSet;
+  document.getElementById("bkSchedCancel").onclick = bkSchedCancel;
+  document.querySelector('.tab[data-tab="baskets"]').addEventListener("click", () => bkLoad(BK.cur));
+}
+bkInit();
+bkLoad();

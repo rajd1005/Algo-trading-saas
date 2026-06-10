@@ -60,6 +60,8 @@ _MIGRATIONS = {
         "lock_step": "REAL DEFAULT 0",
         "lock_amount": "REAL DEFAULT 0",
         "user_id": "INTEGER DEFAULT 0",
+        "basket_id": "INTEGER DEFAULT 0",
+        "leg_id": "INTEGER DEFAULT 0",
     },
     "symbol_presets": {
         "kind": "TEXT DEFAULT 'OPTION'",

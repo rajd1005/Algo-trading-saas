@@ -56,6 +56,9 @@
     <button class="tab" data-tab="new">
       <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
       <span class="tab-lbl">Trade</span></button>
+    <button class="tab" data-tab="baskets">
+      <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11h14l-1.5 7.5a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5z"/><path d="M9 11 12 4l3 7"/></svg>
+      <span class="tab-lbl">Basket</span></button>
     <button class="tab" data-tab="broker">
       <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       <span class="tab-lbl">Broker</span></button>
@@ -247,6 +250,110 @@
       <button type="submit" class="btn btn-primary">Create Trade</button>
       <p id="formMsg" class="msg"></p>
     </form>
+  </section>
+
+  <!-- BASKETS -->
+  <section id="tab-baskets" class="tab-panel">
+    <div class="bk-bar">
+      <select id="bkSelect" class="bk-pick"></select>
+      <input id="bkNewName" class="bk-newname" placeholder="New basket name" maxlength="60">
+      <button type="button" id="bkCreate" class="btn btn-sm">+ Create</button>
+    </div>
+
+    <div id="bkEmpty" class="muted" style="padding:18px 4px;">No baskets yet — name one above and tap <b>+ Create</b> to start building a multi-leg strategy.</div>
+
+    <div id="bkPanel" style="display:none;">
+      <div class="bk-head">
+        <input id="bkName" class="bk-name" maxlength="60">
+        <div class="seg-toggle bk-mode" id="bkMode">
+          <button type="button" data-m="TEST" class="active">TEST</button>
+          <button type="button" data-m="LIVE">LIVE</button>
+        </div>
+        <span id="bkMtm" class="bk-mtm"></span>
+      </div>
+
+      <!-- Add-leg builder (search hooked to the Universal Symbol Mapper) -->
+      <div class="bk-builder">
+        <div class="seg-toggle bk-seg" id="bkSeg">
+          <button type="button" data-seg="OPTION" class="active">Option</button>
+          <button type="button" data-seg="FUTURES">Futures</button>
+          <button type="button" data-seg="EQUITY">Stock</button>
+        </div>
+        <div class="bk-search-wrap">
+          <input id="bkSearch" class="bk-search" placeholder="Search symbol (NIFTY, RELIANCE…)" autocomplete="off">
+          <div id="bkSearchRes" class="search-results"></div>
+        </div>
+        <div id="bkContractPick" class="bk-contract"></div>
+        <div id="bkLegForm" class="bk-legform" style="display:none;">
+          <div id="bkLegPicked" class="bk-picked"></div>
+          <div class="bk-legrow">
+            <div class="seg-toggle bk-side" id="bkSide">
+              <button type="button" data-side="BUY" class="active buy">BUY</button>
+              <button type="button" data-side="SELL">SELL</button>
+            </div>
+            <select id="bkOrderType" class="bk-otype">
+              <option value="MARKET">Market</option>
+              <option value="LIMIT">Limit</option>
+              <option value="SL">SL</option>
+            </select>
+            <input id="bkLots" class="bk-lots" type="number" min="1" value="1" title="Lots">
+            <input id="bkPrice" class="bk-price" type="number" min="0" step="0.05" placeholder="Price" style="display:none;">
+            <button type="button" id="bkAddLeg" class="btn btn-sm">＋ Add leg</button>
+          </div>
+          <div id="bkQtyHint" class="muted bk-qhint"></div>
+        </div>
+      </div>
+
+      <!-- Live status grid of every leg -->
+      <div class="bk-legs-wrap">
+        <table class="data bk-legs">
+          <thead><tr><th>#</th><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th><th>Price</th><th>LTP</th><th>P&L</th><th>Status</th><th></th></tr></thead>
+          <tbody id="bkLegsBody"></tbody>
+        </table>
+      </div>
+
+      <!-- Quick actions -->
+      <div class="bk-actions">
+        <button type="button" id="bkInvert" class="btn btn-sm btn-ghost">⇅ Invert</button>
+        <button type="button" id="bkClone" class="btn btn-sm btn-ghost">⧉ Clone</button>
+        <button type="button" id="bkClear" class="btn btn-sm btn-ghost">🗑 Clear all</button>
+        <button type="button" id="bkExport" class="btn btn-sm btn-ghost">⬇ Export CSV</button>
+        <button type="button" id="bkImport" class="btn btn-sm btn-ghost">⬆ Import CSV</button>
+        <input id="bkImportFile" type="file" accept=".csv" style="display:none;">
+        <button type="button" id="bkDelete" class="btn btn-sm btn-danger" style="margin-left:auto;">Delete basket</button>
+      </div>
+
+      <!-- Basket-level step profit-lock on the COMBINED MTM -->
+      <div class="bk-risk">
+        <span class="bk-risk-lbl">🔒 Basket profit-lock —</span> for every ₹
+        <input id="bkLockStep" type="number" min="0" class="bk-rin" placeholder="0">
+        profit, secure ₹
+        <input id="bkLockAmt" type="number" min="0" class="bk-rin" placeholder="0">
+        <button type="button" id="bkLockSave" class="btn btn-sm">Save</button>
+        <span id="bkLockState" class="muted"></span>
+      </div>
+
+      <!-- Margin + dual execution controls -->
+      <div class="bk-exec">
+        <div class="bk-exec-row">
+          <button type="button" id="bkMargin" class="btn btn-sm btn-ghost">⚖ Check margin</button>
+          <span id="bkMarginOut" class="bk-margin-out"></span>
+        </div>
+        <label class="bk-sched-toggle"><input type="checkbox" id="bkSchedToggle"> Schedule execution</label>
+        <div id="bkSchedRow" class="bk-sched" style="display:none;">
+          <input id="bkSchedDate" type="date" class="bk-sin">
+          <input id="bkSchedTime" type="time" step="1" class="bk-sin">
+          <button type="button" id="bkSchedSet" class="btn btn-sm">Schedule</button>
+          <button type="button" id="bkSchedCancel" class="btn btn-sm btn-ghost" style="display:none;">Cancel schedule</button>
+          <span id="bkSchedState" class="muted"></span>
+        </div>
+        <div class="bk-fire">
+          <button type="button" id="bkExecute" class="btn btn-fire">⚡ Execute Now</button>
+          <button type="button" id="bkSquareoff" class="btn btn-sm btn-danger" style="display:none;">⊗ Square off basket</button>
+          <button type="button" id="bkRetry" class="btn btn-sm" style="display:none;">↻ Retry failed legs</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- SETTINGS -->
