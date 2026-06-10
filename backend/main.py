@@ -1039,7 +1039,7 @@ def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
     prices = {sid: px for (seg, sid), px in res.items()}
     prices.update({sid: px for (seg, sid), px in ws.items()})   # live ticks win
     return {"connected": True, "prices": prices,
-            "ws": bool(ws) and feeds.manager.status(acc.id).get("connected", False),
+            "ws": bool(ws) and feeds.manager.status(acc.id).get("streaming", False),
             "error": md.last_error if not prices else ""}
 
 
@@ -1225,6 +1225,19 @@ def _build_summary(db, uid, broker="ALL", date=""):
             and uget(db, uid, "broker_balance_provider", "") == str(trade_acc.id):
         bal = uget(db, uid, "broker_balance", "")
         balance = float(bal) if bal else None
+    # Keep the price-feed banner honest: only call it "real-time (WebSocket)"
+    # if the data account's socket is actually delivering fresh ticks right now.
+    md_status = uget(db, uid, "md_status", "")
+    if md_status == "ok:ws":
+        streaming = False
+        if data_acc is not None:
+            try:
+                streaming = feeds.manager.status(data_acc.id).get("streaming", False)
+            except Exception:
+                streaming = False
+        if not streaming:
+            md_status = "ok:rest" if data_acc is not None else "ok:demo"
+
     broker_alert, alert_msg = False, ""
     if trade_acc is not None and active > 0:
         if not trade_connected:
@@ -1239,7 +1252,7 @@ def _build_summary(db, uid, broker="ALL", date=""):
         "open_pnl": pnl["open_pnl"], "closed_pnl": pnl["closed_pnl"], "total_pnl": pnl["net"],
         "pnl": pnl, "pnl_filter": flt, "pnl_breakdown": breakdown, "date": date,
         "kill_switch": uget(db, uid, "kill_switch", "off"),
-        "md_status": uget(db, uid, "md_status", ""),
+        "md_status": md_status,
         "instruments": instruments.status(),
         "angel_map": angel.mapper.status(),
         "zerodha_map": zerodha.mapper.status(),
@@ -1521,7 +1534,12 @@ def _basket_dict(db, b):
             "exchange_segment": l.exchange_segment, "instrument_type": l.instrument_type,
             "underlying": l.underlying, "lot_size": l.lot_size,
             "transaction_type": l.transaction_type, "order_type": l.order_type,
-            "quantity": l.quantity, "price": l.price, "trigger_price": l.trigger_price,
+            "entry_type": l.entry_type, "quantity": l.quantity, "price": l.price,
+            "trigger_price": l.trigger_price, "trigger_dir": l.trigger_dir,
+            "scheduled_time": l.scheduled_time, "sl_points": l.sl_points,
+            "target_points": l.target_points, "trail_sl": l.trail_sl, "trail_mode": l.trail_mode,
+            "targets_json": l.targets_json, "max_profit_amt": l.max_profit_amt,
+            "max_loss_amt": l.max_loss_amt, "lock_step": l.lock_step, "lock_amount": l.lock_amount,
             "status": l.status, "broker_order_id": l.broker_order_id,
             "fill_price": l.fill_price, "error": l.error,
             "ltp": (by_leg[l.id].last_price if l.id in by_leg else 0),
@@ -1530,21 +1548,44 @@ def _basket_dict(db, b):
     }
 
 
+def _leg_fields(d):
+    """Normalise a leg payload (from the New Trade form or CSV) into column values."""
+    et = str(d.get("entry_type", "") or "").upper()
+    if et not in ("MARKET", "LIMIT", "SCHEDULED", "TRIGGER"):
+        # CSV / legacy callers send order_type (MARKET/LIMIT/SL) instead.
+        et = {"LIMIT": "LIMIT", "SL": "TRIGGER"}.get(str(d.get("order_type", "MARKET")).upper(), "MARKET")
+    raw_targets = d.get("targets") or []
+    targets = [{"points": float(x.get("points", 0)), "qty": int(x.get("qty", 0)), "hit": False}
+               for x in raw_targets if float(x.get("points", 0) or 0) > 0 and int(x.get("qty", 0) or 0) > 0]
+    order_type = {"MARKET": "MARKET", "LIMIT": "LIMIT", "SCHEDULED": "TIME", "TRIGGER": "SL"}[et]
+    return {
+        "symbol": str(d.get("symbol", "")).strip(),
+        "security_id": str(d.get("security_id", "") or ""),
+        "exchange_segment": str(d.get("exchange_segment", "") or ""),
+        "instrument_type": str(d.get("instrument_type", "OPTION") or "OPTION"),
+        "underlying": str(d.get("underlying", "") or ""),
+        "lot_size": int(float(d.get("lot_size", 1) or 1)) or 1,
+        "transaction_type": "SELL" if str(d.get("transaction_type", "BUY")).upper() == "SELL" else "BUY",
+        "order_type": order_type, "entry_type": et,
+        "quantity": int(float(d.get("quantity", 1) or 1)) or 1,
+        "price": float(d.get("price", d.get("entry_price", 0)) or 0),
+        "trigger_price": float(d.get("trigger_price", 0) or 0),
+        "trigger_dir": str(d.get("trigger_dir", "") or "").upper(),
+        "scheduled_time": str(d.get("scheduled_time", "") or "").strip(),
+        "sl_points": float(d.get("sl_points", 0) or 0),
+        "target_points": float(d.get("target_points", 0) or 0),
+        "trail_sl": float(d.get("trail_sl", 0) or 0),
+        "trail_mode": "ENTRY" if str(d.get("trail_mode", "CONTINUE")).upper() == "ENTRY" else "CONTINUE",
+        "targets_json": json.dumps(targets) if targets else "",
+        "max_profit_amt": float(d.get("max_profit_amt", 0) or 0),
+        "max_loss_amt": float(d.get("max_loss_amt", 0) or 0),
+        "lock_step": float(d.get("lock_step", 0) or 0),
+        "lock_amount": float(d.get("lock_amount", 0) or 0),
+    }
+
+
 def _add_leg(db, b, d, seq):
-    leg = BasketLeg(
-        basket_id=b.id, user_id=b.user_id, seq=seq,
-        symbol=str(d.get("symbol", "")).strip(),
-        security_id=str(d.get("security_id", "") or ""),
-        exchange_segment=str(d.get("exchange_segment", "") or ""),
-        instrument_type=str(d.get("instrument_type", "OPTION") or "OPTION"),
-        underlying=str(d.get("underlying", "") or ""),
-        lot_size=int(float(d.get("lot_size", 1) or 1)) or 1,
-        transaction_type="SELL" if str(d.get("transaction_type", "BUY")).upper() == "SELL" else "BUY",
-        order_type={"LIMIT": "LIMIT", "SL": "SL"}.get(str(d.get("order_type", "MARKET")).upper(), "MARKET"),
-        quantity=int(float(d.get("quantity", 1) or 1)) or 1,
-        price=float(d.get("price", 0) or 0),
-        trigger_price=float(d.get("trigger_price", 0) or 0),
-    )
+    leg = BasketLeg(basket_id=b.id, user_id=b.user_id, seq=seq, **_leg_fields(d))
     db.add(leg)
     return leg
 
@@ -1617,6 +1658,23 @@ def basket_set_legs(basket_id: int, payload: dict, request: Request, db: Session
     for i, d in enumerate(payload.get("legs", []) or []):
         if str(d.get("symbol", "")).strip():
             _add_leg(db, b, d, base + i)
+    db.commit()
+    return _basket_dict(db, b)
+
+
+@app.post("/api/baskets/{basket_id}/legs/{leg_id}")
+def basket_update_leg(basket_id: int, leg_id: int, payload: dict, request: Request,
+                      db: Session = Depends(get_db)):
+    """Replace a single leg's full config (used when editing a leg in the form)."""
+    me = current_user(request)
+    b = _owned_basket(db, basket_id, me.id)
+    l = db.get(BasketLeg, leg_id)
+    if not l or l.basket_id != b.id:
+        raise HTTPException(404, "Leg not found.")
+    if l.status not in ("PENDING",):
+        raise HTTPException(400, "Only legs that haven't fired yet can be edited.")
+    for k, v in _leg_fields(payload).items():
+        setattr(l, k, v)
     db.commit()
     return _basket_dict(db, b)
 

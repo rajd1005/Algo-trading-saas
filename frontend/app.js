@@ -905,6 +905,8 @@ form.onsubmit = async (e) => {
     msg.textContent = "❌ Please search and select a symbol first.";
     msg.className = "msg neg"; return;
   }
+  // Basket mode: this form is configuring a basket leg, not a standalone trade.
+  if (bkMode.active) { await bkSubmitLeg(payload); return; }
   try {
     const t = await api.post("/api/trades", payload);
     msg.textContent = `✅ Created trade #${t.id} (${t.symbol}).`; msg.className = "msg pos";
@@ -1944,23 +1946,43 @@ function bkLegBadge(s) {
   return `<span class="lst ${m[s] || ""}">${t[s] || s}</span>`;
 }
 
+function bkLegType(l) {
+  const et = l.entry_type || l.order_type;
+  return { MARKET: "Market", LIMIT: "Limit", SCHEDULED: "⏱ " + (l.scheduled_time || "time"),
+           TRIGGER: "🎯 " + (l.trigger_price || ""), SL: "SL", TIME: "⏱ Time" }[et] || et;
+}
+function bkLegEntry(l) {
+  if (l.entry_type === "LIMIT") return "₹" + l.price;
+  if (l.entry_type === "TRIGGER") return "@" + l.trigger_price;
+  if (l.entry_type === "SCHEDULED") return l.scheduled_time || "—";
+  return "Mkt";
+}
+function bkLegSlTgt(l) {
+  let nT = 0;
+  try { nT = l.targets_json ? JSON.parse(l.targets_json).length : 0; } catch (e) {}
+  const sl = l.sl_points ? `SL ${l.sl_points}` + (l.trail_sl ? `↗${l.trail_sl}` : "") : "";
+  const tg = nT ? `T×${nT}` : (l.target_points ? `T ${l.target_points}` : "");
+  const risk = (l.max_profit_amt || l.max_loss_amt || l.lock_step) ? " 🔒" : "";
+  return (sl || tg || risk) ? ((sl && tg ? sl + " / " + tg : sl + tg) + risk) : "–";
+}
 function bkRenderLegs(b) {
   const body = document.getElementById("bkLegsBody");
   if (!b.legs.length) {
-    body.innerHTML = `<tr><td colspan="10" class="muted" style="text-align:center;padding:14px;">No legs yet — search a symbol above and add legs.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="11" class="muted" style="text-align:center;padding:14px;">No legs yet — tap <b>＋ Add leg</b> to configure one with the full trade form.</td></tr>`;
     return;
   }
   body.innerHTML = b.legs.map((l, i) => {
-    const px = l.order_type === "LIMIT" ? ("₹" + l.price)
-      : l.order_type === "SL" ? ("SL ₹" + l.trigger_price) : "Mkt";
+    const edit = l.status === "PENDING"
+      ? `<button class="ic-btn" title="Edit leg" onclick="bkEditLeg(${l.id})">✎</button><button class="ic-btn" title="Remove" onclick="bkDelLeg(${l.id})">✕</button>` : "";
     return `<tr class="${l.status === "FAILED" ? "leg-fail" : ""}" title="${esc(l.error || "")}">
       <td>${i + 1}</td><td>${esc(l.symbol)}</td>
       <td class="${l.transaction_type === "BUY" ? "pos" : "neg"}">${l.transaction_type}</td>
-      <td>${l.order_type}</td><td>${l.quantity}</td><td>${px}</td>
+      <td>${bkLegType(l)}</td><td>${l.quantity}</td><td>${bkLegEntry(l)}</td>
+      <td class="muted" style="font-size:11px;">${bkLegSlTgt(l)}</td>
       <td>${l.ltp ? "₹" + l.ltp : "–"}</td>
       <td class="${cls(l.pnl)}">${l.pnl ? money(l.pnl) : "–"}</td>
       <td>${bkLegBadge(l.status)}</td>
-      <td>${l.status === "PENDING" ? `<button class="ic-btn" title="Remove" onclick="bkDelLeg(${l.id})">✕</button>` : ""}</td>
+      <td style="white-space:nowrap;">${edit}</td>
     </tr>`;
   }).join("");
 }
@@ -1981,124 +2003,98 @@ async function bkDelLeg(id) {
   try { bkMerge(await api.del(`/api/baskets/${BK.cur}/legs/${id}`)); } catch (e) {}
 }
 
-// ---- add-leg picker (hooked to the Universal Symbol Mapper) ----
-let bkSearchTimer;
-function bkSearchInput() {
-  clearTimeout(bkSearchTimer);
-  const q = document.getElementById("bkSearch").value.trim();
-  const res = document.getElementById("bkSearchRes");
-  if (!q) { res.classList.remove("show"); return; }
-  bkSearchTimer = setTimeout(async () => {
-    let items = [];
-    try {
-      items = BK.seg === "EQUITY"
-        ? await api.get("/api/equities/search?q=" + encodeURIComponent(q))
-        : await api.get("/api/underlyings/search?q=" + encodeURIComponent(q) + "&kind=" + BK.seg);
-    } catch { items = []; }
-    if (BK.seg === "EQUITY") {
-      res.innerHTML = items.map((r, i) => `<div class="sr-item" data-i="${i}">${esc(r.symbol)} <span class="muted">${esc(r.exchange_segment)}</span></div>`).join("")
-        || `<div class="sr-item muted">No matches</div>`;
-      res.querySelectorAll(".sr-item[data-i]").forEach((el) => el.onclick = () => bkPickEquity(items[el.dataset.i]));
-    } else {
-      res.innerHTML = items.map((r, i) => `<div class="sr-item" data-i="${i}">${esc(r.underlying)} <span class="muted">${esc(r.exchange || "")}</span></div>`).join("")
-        || `<div class="sr-item muted">No matches</div>`;
-      res.querySelectorAll(".sr-item[data-i]").forEach((el) => el.onclick = () => bkPickUnderlying(items[el.dataset.i]));
-    }
-    res.classList.add("show");
-  }, 250);
-}
+// ---- add / edit a leg using the FULL New Trade form (basket mode) ----
+let bkMode = { active: false, basketId: null, legId: null };
+const switchTab = (name) => { const t = document.querySelector(`.tab[data-tab="${name}"]`); if (t) t.click(); };
 
-async function bkPickUnderlying(u) {
-  document.getElementById("bkSearchRes").classList.remove("show");
-  document.getElementById("bkSearch").value = u.underlying;
-  const wrap = document.getElementById("bkContractPick");
-  BK.picked = null; document.getElementById("bkLegForm").style.display = "none";
-  if (BK.seg === "FUTURES") {
-    let futs = [];
-    try { futs = await api.get("/api/futures?underlying=" + encodeURIComponent(u.underlying)); } catch {}
-    wrap.innerHTML = futs.length
-      ? futs.map((f, i) => `<button type="button" class="bk-cbtn" data-i="${i}">${esc(f.symbol)}<span class="muted"> · exp ${f.expiry}</span></button>`).join("")
-      : `<span class="muted">No futures contracts.</span>`;
-    wrap.querySelectorAll(".bk-cbtn").forEach((el) => el.onclick = () => {
-      wrap.querySelectorAll(".bk-cbtn").forEach((x) => x.classList.remove("sel")); el.classList.add("sel");
-      bkPickContract(futs[el.dataset.i]);
-    });
+function bkApplyMode(b) {
+  document.getElementById("bkModeBar").style.display = bkMode.active ? "" : "none";
+  document.getElementById("modeRow").style.display = bkMode.active ? "none" : "";   // basket controls TEST/LIVE
+  document.getElementById("bkModeName").textContent = b ? `${b.name} · ${b.mode}` : "";
+  document.getElementById("tradeSubmitBtn").textContent =
+    bkMode.active ? (bkMode.legId ? "✓ Update leg" : "➕ Add to basket") : "Create Trade";
+}
+function bkExitMode(goBack) {
+  bkMode = { active: false, basketId: null, legId: null };
+  bkApplyMode(null);
+  if (goBack) switchTab("baskets");
+}
+function bkStartAddLeg() {
+  if (!BK.cur) { toast("⚠️ Create or select a basket first.", "neg"); return; }
+  bkMode = { active: true, basketId: BK.cur, legId: null };
+  ulSearch.value = ""; resetOrderForm(); resetPicker();
+  document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
+  document.getElementById("formMsg").textContent = "";
+  bkApplyMode(bkCur());
+  switchTab("new");
+}
+function bkEditLeg(id) {
+  const b = bkCur(); if (!b) return;
+  const leg = b.legs.find((l) => l.id === id); if (!leg) return;
+  if (leg.status !== "PENDING") { toast("Only legs that haven't fired yet can be edited.", "neg"); return; }
+  bkMode = { active: true, basketId: BK.cur, legId: id };
+  ulSearch.value = ""; resetOrderForm(); resetPicker();
+  bkPrefillForm(leg);
+  bkApplyMode(b);
+  switchTab("new");
+}
+function bkSetSide(s) {
+  document.querySelectorAll("[data-side]").forEach((x) => x.classList.toggle("active", x.dataset.side === s));
+  form.side.value = s;
+}
+function bkPrefillForm(leg) {
+  // Select the contract directly (no preset side-effects to clobber the values).
+  form.symbol.value = leg.symbol; form.security_id.value = leg.security_id;
+  form.exchange_segment.value = leg.exchange_segment; form.instrument_type.value = leg.instrument_type;
+  currentLotSize = leg.lot_size || 1;
+  _selContract = { symbol: leg.symbol, security_id: leg.security_id,
+                   exchange_segment: leg.exchange_segment, instrument_type: leg.instrument_type };
+  showSelected(_selContract, null);
+  bkSetSide(leg.transaction_type);
+  lotsInput.value = Math.max(1, Math.round((leg.quantity || 1) / (leg.lot_size || 1)));
+  updateQty();
+  applyEntryType(leg.entry_type || "MARKET");
+  if (leg.entry_type === "LIMIT") entryPrice.value = leg.price || 0;
+  if (leg.entry_type === "SCHEDULED") setVal("schedTime", leg.scheduled_time || "09:15:00");
+  if (leg.entry_type === "TRIGGER") setVal("trigPrice", leg.trigger_price || 0);
+  form.sl_points.value = leg.sl_points || 0;
+  form.trail_sl.value = leg.trail_sl || 0;
+  form.trail_mode.value = leg.trail_mode || "CONTINUE";
+  let targets = [];
+  try { targets = leg.targets_json ? JSON.parse(leg.targets_json) : []; } catch (e) {}
+  if (targets.length) {
+    multiToggle.checked = true; multiWrap.style.display = "block"; targetField.style.display = "none";
+    document.getElementById("targetRows").innerHTML = "";
+    targets.forEach((t) => addTargetRow(t.points));
   } else {
-    let exps = [];
-    try { exps = await api.get("/api/expiries?underlying=" + encodeURIComponent(u.underlying) + "&kind=OPTION"); } catch {}
-    if (!exps.length) { wrap.innerHTML = `<span class="muted">No option expiries.</span>`; return; }
-    wrap.innerHTML = `<select id="bkExpiry" class="bk-exp">${exps.map((e) => `<option>${e}</option>`).join("")}</select><div id="bkStrikes" class="bk-strikes"></div>`;
-    const load = () => bkLoadStrikes(u.underlying, document.getElementById("bkExpiry").value);
-    document.getElementById("bkExpiry").onchange = load; load();
+    form.target_points.value = leg.target_points || 0;
   }
+  form.max_profit_amt.value = leg.max_profit_amt || 0;
+  form.max_loss_amt.value = leg.max_loss_amt || 0;
+  form.lock_step.value = leg.lock_step || 0;
+  form.lock_amount.value = leg.lock_amount || 0;
 }
 
-async function bkLoadStrikes(underlying, expiry) {
-  const box = document.getElementById("bkStrikes");
-  box.innerHTML = `<span class="muted">Loading chain…</span>`;
-  let data;
-  try { data = await api.get(`/api/optionchain?underlying=${encodeURIComponent(underlying)}&expiry=${encodeURIComponent(expiry)}`); }
-  catch { box.innerHTML = `<span class="muted">Failed to load chain.</span>`; return; }
-  box.innerHTML = data.strikes.map((row, i) => {
-    const ce = row.ce ? `<button type="button" class="bk-opt ce" data-i="${i}" data-t="ce">CE</button>` : `<span class="bk-opt dis">–</span>`;
-    const pe = row.pe ? `<button type="button" class="bk-opt pe" data-i="${i}" data-t="pe">PE</button>` : `<span class="bk-opt dis">–</span>`;
-    return `<div class="bk-srow">${ce}<span class="bk-strike">${row.strike}</span>${pe}</div>`;
-  }).join("");
-  box.querySelectorAll(".bk-opt[data-i]").forEach((el) => el.onclick = () => {
-    const row = data.strikes[el.dataset.i];
-    box.querySelectorAll(".bk-opt").forEach((x) => x.classList.remove("sel")); el.classList.add("sel");
-    bkPickContract(el.dataset.t === "ce" ? row.ce : row.pe);
+// Called by the trade-form submit handler when a basket leg is being saved.
+async function bkSubmitLeg(payload) {
+  const leg = Object.assign({}, payload, {
+    transaction_type: payload.side, price: payload.entry_price,
+    underlying: (currentSeg === "EQUITY" ? "" : currentUnderlying) || "",
   });
-}
-
-function bkPickContract(c) {
-  if (!c) return;
-  BK.picked = c;
-  BK.lot = (c.lot_size && parseInt(parseFloat(c.lot_size)) > 0) ? parseInt(parseFloat(c.lot_size)) : 1;
-  bkShowLegForm();
-}
-function bkPickEquity(r) {
-  document.getElementById("bkSearchRes").classList.remove("show");
-  document.getElementById("bkContractPick").innerHTML = "";
-  document.getElementById("bkSearch").value = r.symbol;
-  BK.picked = { symbol: r.symbol, security_id: r.security_id, exchange_segment: r.exchange_segment,
-                instrument_type: r.instrument_type || "EQUITY", lot_size: r.lot_size || 1, underlying: r.underlying || "" };
-  BK.lot = (r.lot_size && parseInt(parseFloat(r.lot_size)) > 0) ? parseInt(parseFloat(r.lot_size)) : 1;
-  bkShowLegForm();
-}
-function bkShowLegForm() {
-  document.getElementById("bkLegForm").style.display = "";
-  const c = BK.picked;
-  document.getElementById("bkLegPicked").innerHTML =
-    `✅ <b>${esc(c.symbol)}</b> · ${esc(c.instrument_type)} · ${esc(c.exchange_segment)} · lot ${BK.lot}`;
-  document.getElementById("bkLots").value = 1;
-  bkQtyHint();
-}
-function bkQtyHint() {
-  const lots = parseInt(document.getElementById("bkLots").value) || 1;
-  document.getElementById("bkQtyHint").textContent = `${lots} lot × ${BK.lot} = ${lots * BK.lot} qty`;
-}
-
-async function bkAddLeg() {
-  if (!BK.picked || !BK.cur) { toast("⚠️ Pick a symbol first.", "neg"); return; }
-  const lots = parseInt(document.getElementById("bkLots").value) || 1;
-  const ot = document.getElementById("bkOrderType").value;
-  const side = document.querySelector("#bkSide .active").dataset.side;
-  const price = parseFloat(document.getElementById("bkPrice").value) || 0;
-  const c = BK.picked;
-  const leg = {
-    symbol: c.symbol, security_id: c.security_id, exchange_segment: c.exchange_segment,
-    instrument_type: c.instrument_type, underlying: c.underlying || "", lot_size: BK.lot,
-    transaction_type: side, order_type: ot, quantity: lots * BK.lot,
-    price: ot === "LIMIT" ? price : 0, trigger_price: ot === "SL" ? price : 0,
-  };
   try {
-    bkMerge(await api.post(`/api/baskets/${BK.cur}/legs`, { replace: false, legs: [leg] }));
-    toast("✅ Leg added", "pos");
-    BK.picked = null;
-    document.getElementById("bkLegForm").style.display = "none";
-    document.getElementById("bkSearch").value = "";
-    document.getElementById("bkContractPick").innerHTML = "";
+    if (bkMode.legId) {
+      bkMerge(await api.post(`/api/baskets/${bkMode.basketId}/legs/${bkMode.legId}`, leg));
+      toast("✅ Leg updated", "pos");
+      bkExitMode(true);
+    } else {
+      const b = await api.post(`/api/baskets/${bkMode.basketId}/legs`, { replace: false, legs: [leg] });
+      bkMerge(b);
+      toast(`✅ Leg added (${b.legs.length} total) — add another, or tap Cancel to go back`, "pos");
+      document.getElementById("formMsg").textContent = `✅ Added — basket now has ${b.legs.length} leg(s).`;
+      document.getElementById("formMsg").className = "msg pos";
+      ulSearch.value = ""; resetOrderForm(); resetPicker();
+      document.getElementById("selectedSymbol").textContent = "No symbol selected yet.";
+    }
   } catch (e) {}
 }
 
@@ -2199,24 +2195,8 @@ function bkInit() {
   document.querySelectorAll("#bkMode button").forEach((btn) => btn.onclick = async () => {
     try { bkMerge(await api.post(`/api/baskets/${BK.cur}`, { mode: btn.dataset.m })); } catch (e) {}
   });
-  document.querySelectorAll("#bkSeg button").forEach((btn) => btn.onclick = () => {
-    document.querySelectorAll("#bkSeg button").forEach((x) => x.classList.remove("active"));
-    btn.classList.add("active"); BK.seg = btn.dataset.seg;
-    document.getElementById("bkSearch").value = ""; document.getElementById("bkSearchRes").classList.remove("show");
-    document.getElementById("bkContractPick").innerHTML = ""; document.getElementById("bkLegForm").style.display = "none";
-  });
-  document.querySelectorAll("#bkSide button").forEach((btn) => btn.onclick = () => {
-    document.querySelectorAll("#bkSide button").forEach((x) => x.classList.remove("active"));
-    btn.classList.add("active");
-  });
-  document.getElementById("bkOrderType").onchange = (e) => {
-    const p = document.getElementById("bkPrice");
-    if (e.target.value === "MARKET") { p.style.display = "none"; }
-    else { p.style.display = ""; p.placeholder = e.target.value === "SL" ? "Trigger price" : "Limit price"; }
-  };
-  document.getElementById("bkSearch").oninput = bkSearchInput;
-  document.getElementById("bkLots").oninput = bkQtyHint;
-  document.getElementById("bkAddLeg").onclick = bkAddLeg;
+  document.getElementById("bkAddLeg").onclick = bkStartAddLeg;
+  document.getElementById("bkModeCancel").onclick = () => bkExitMode(true);
   document.getElementById("bkInvert").onclick = async () => { try { bkMerge(await api.post(`/api/baskets/${BK.cur}/invert`)); toast("⇅ Sides inverted", "info"); } catch (e) {} };
   document.getElementById("bkClone").onclick = async () => { try { const b = await api.post(`/api/baskets/${BK.cur}/clone`); await bkLoad(b.id); toast("⧉ Basket cloned", "pos"); } catch (e) {} };
   document.getElementById("bkClear").onclick = async () => { if (!confirm("Remove all legs from this basket?")) return; try { bkMerge(await api.post(`/api/baskets/${BK.cur}/clear`)); } catch (e) {} };

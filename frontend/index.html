@@ -112,7 +112,11 @@
       </div>
     </details>
     <form id="tradeForm" class="form">
-      <div class="row">
+      <div id="bkModeBar" class="bk-mode-bar" style="display:none;">
+        <span>🧺 Adding a leg to basket <b id="bkModeName"></b></span>
+        <button type="button" id="bkModeCancel" class="btn btn-sm btn-ghost">Cancel</button>
+      </div>
+      <div class="row" id="modeRow">
         <div class="field" style="max-width:320px;">
           <div class="field-label">Mode</div>
           <div class="btn-group">
@@ -247,7 +251,7 @@
         </div>
       </details>
 
-      <button type="submit" class="btn btn-primary">Create Trade</button>
+      <button type="submit" id="tradeSubmitBtn" class="btn btn-primary">Create Trade</button>
       <p id="formMsg" class="msg"></p>
     </form>
   </section>
@@ -288,42 +292,16 @@
         <span id="bkMtm" class="bk-mtm"></span>
       </div>
 
-      <!-- Add-leg builder (search hooked to the Universal Symbol Mapper) -->
+      <!-- Add legs with the FULL trade form (proper option chain + SL/target/risk) -->
       <div class="bk-builder">
-        <div class="seg-toggle bk-seg" id="bkSeg">
-          <button type="button" data-seg="OPTION" class="active">Option</button>
-          <button type="button" data-seg="FUTURES">Futures</button>
-          <button type="button" data-seg="EQUITY">Stock</button>
-        </div>
-        <div class="bk-search-wrap">
-          <input id="bkSearch" class="bk-search" placeholder="Search symbol (NIFTY, RELIANCE…)" autocomplete="off">
-          <div id="bkSearchRes" class="search-results"></div>
-        </div>
-        <div id="bkContractPick" class="bk-contract"></div>
-        <div id="bkLegForm" class="bk-legform" style="display:none;">
-          <div id="bkLegPicked" class="bk-picked"></div>
-          <div class="bk-legrow">
-            <div class="seg-toggle bk-side" id="bkSide">
-              <button type="button" data-side="BUY" class="active buy">BUY</button>
-              <button type="button" data-side="SELL">SELL</button>
-            </div>
-            <select id="bkOrderType" class="bk-otype">
-              <option value="MARKET">Market</option>
-              <option value="LIMIT">Limit</option>
-              <option value="SL">SL</option>
-            </select>
-            <input id="bkLots" class="bk-lots" type="number" min="1" value="1" title="Lots">
-            <input id="bkPrice" class="bk-price" type="number" min="0" step="0.05" placeholder="Price" style="display:none;">
-            <button type="button" id="bkAddLeg" class="btn btn-sm">＋ Add leg</button>
-          </div>
-          <div id="bkQtyHint" class="muted bk-qhint"></div>
-        </div>
+        <button type="button" id="bkAddLeg" class="btn btn-primary bk-addleg">＋ Add leg</button>
+        <span class="muted bk-addleg-hint">Opens the normal trade form — option chain, Buy/Sell, lots, entry type, SL, target, trailing &amp; risk — then adds it to this basket as a leg.</span>
       </div>
 
       <!-- Live status grid of every leg -->
       <div class="bk-legs-wrap">
         <table class="data bk-legs">
-          <thead><tr><th>#</th><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th><th>Price</th><th>LTP</th><th>P&L</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th><th>Entry</th><th>SL / Target</th><th>LTP</th><th>P&L</th><th>Status</th><th></th></tr></thead>
           <tbody id="bkLegsBody"></tbody>
         </table>
       </div>

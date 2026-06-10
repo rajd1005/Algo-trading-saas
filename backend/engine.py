@@ -192,10 +192,12 @@ class TradingEngine:
         prices = dict(rest)
         prices.update(ws)        # fresh ticks win over the (older) REST snapshot
 
-        # 3) Show "real-time (WebSocket)" once the socket is connected & feeding.
+        # 3) Show "real-time (WebSocket)" ONLY while the socket is delivering fresh
+        #    ticks — a connected-but-silent socket falls back to the REST status,
+        #    so the dashboard never claims "real-time" while prices are stale.
         if active and ws:
             try:
-                if feeds.manager.status(acc.id).get("connected"):
+                if feeds.manager.status(acc.id).get("streaming"):
                     self._set_setting(db, uid, "md_status", "ok:ws")
             except Exception:
                 pass

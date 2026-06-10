@@ -263,10 +263,24 @@ class BasketLeg(Base):
     lot_size = Column(Integer, default=1)
 
     transaction_type = Column(String, default="BUY")     # BUY / SELL
-    order_type = Column(String, default="MARKET")        # MARKET / LIMIT / SL
+    order_type = Column(String, default="MARKET")        # legacy display: MARKET / LIMIT / SL
     quantity = Column(Integer, default=1)
-    price = Column(Float, default=0.0)                   # limit price
-    trigger_price = Column(Float, default=0.0)           # SL trigger price
+    price = Column(Float, default=0.0)                   # entry / limit price
+    trigger_price = Column(Float, default=0.0)           # algo trigger price
+
+    # --- full per-leg trade config (mirrors the New Trade form) ---
+    entry_type = Column(String, default="MARKET")        # MARKET / LIMIT / SCHEDULED / TRIGGER
+    scheduled_time = Column(String, default="")          # "HH:MM:SS" IST (entry_type SCHEDULED)
+    trigger_dir = Column(String, default="")             # ABOVE / BELOW (algo trigger)
+    sl_points = Column(Float, default=0.0)
+    target_points = Column(Float, default=0.0)
+    trail_sl = Column(Float, default=0.0)
+    trail_mode = Column(String, default="CONTINUE")
+    targets_json = Column(Text, default="")              # scale-out targets [{points,qty}]
+    max_profit_amt = Column(Float, default=0.0)
+    max_loss_amt = Column(Float, default=0.0)
+    lock_step = Column(Float, default=0.0)
+    lock_amount = Column(Float, default=0.0)
 
     # --- live state ---
     status = Column(String, default="PENDING")           # PENDING/EXECUTED/FAILED/CANCELLED/CLOSED

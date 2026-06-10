@@ -58,6 +58,7 @@ class BaseFeed:
         self.connected = False
         self.last_error = ""
         self.last_used = time.time()
+        self.last_tick = 0.0           # when we last stored a real tick (freshness)
 
     # ---- lifecycle ----
     def start(self):
@@ -140,6 +141,7 @@ class BaseFeed:
         if price and price > 0:
             with self._lock:
                 self._ltp[(seg, str(secid))] = round(float(price), 2)
+            self.last_tick = time.time()
 
     # ---- to be implemented per broker ----
     def _url(self):  raise NotImplementedError
@@ -436,11 +438,16 @@ class FeedManager:
         f = self._feeds.get(account_id)
         return f.snapshot(instruments) if f else {}
 
+    # Consider the socket "streaming" only if a real tick arrived recently — a
+    # connected-but-silent socket must NOT be shown as live real-time prices.
+    FRESH_SECS = 6
+
     def status(self, account_id):
         f = self._feeds.get(account_id)
         if not f:
-            return {"connected": False, "error": ""}
-        return {"connected": f.connected, "error": f.last_error}
+            return {"connected": False, "streaming": False, "error": ""}
+        streaming = bool(f.connected and (time.time() - f.last_tick) < self.FRESH_SECS)
+        return {"connected": f.connected, "streaming": streaming, "error": f.last_error}
 
     def stop(self, account_id):
         with self._lock:

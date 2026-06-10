@@ -94,9 +94,13 @@ def jit_validate(db, basket, legs):
 # Leg placement
 # ----------------------------------------------------------------------------
 def _place_leg(db, basket, leg, broker, account_id, ltp):
-    """Create the leg's Trade row and place its entry order. SL legs rest as algo
-    triggers (the engine fires them when the trigger price is hit)."""
-    entry_type = {"MARKET": "MARKET", "LIMIT": "LIMIT", "SL": "TRIGGER"}.get(leg.order_type, "MARKET")
+    """Create the leg's Trade row (with its full SL/target/risk config) and place
+    its entry order. SCHEDULED/TRIGGER legs rest PENDING — the engine fires them
+    when their time / trigger condition is met, just like a normal trade."""
+    import engine as _eng
+    entry_type = (leg.entry_type or "MARKET").upper()
+    if entry_type not in ("MARKET", "LIMIT", "SCHEDULED", "TRIGGER"):
+        entry_type = {"LIMIT": "LIMIT", "SL": "TRIGGER"}.get(leg.order_type, "MARKET")
     t = Trade(
         symbol=leg.symbol, name=f"{basket.name} · {leg.symbol}",
         security_id=leg.security_id, exchange_segment=leg.exchange_segment,
@@ -104,7 +108,14 @@ def _place_leg(db, basket, leg, broker, account_id, ltp):
         side=leg.transaction_type, quantity=int(leg.quantity or 1),
         lot_size=int(float(leg.lot_size or 1)) or 1,
         entry_type=entry_type, entry_price=float(leg.price or 0),
+        scheduled_time=leg.scheduled_time or "",
         trigger_price=float(leg.trigger_price or leg.price or 0) if entry_type == "TRIGGER" else 0,
+        trigger_dir=leg.trigger_dir or "",
+        sl_points=float(leg.sl_points or 0), target_points=float(leg.target_points or 0),
+        trail_sl=float(leg.trail_sl or 0), trail_mode=leg.trail_mode or "CONTINUE",
+        targets_json=leg.targets_json or "",
+        max_profit_amt=float(leg.max_profit_amt or 0), max_loss_amt=float(leg.max_loss_amt or 0),
+        lock_step=float(leg.lock_step or 0), lock_amount=float(leg.lock_amount or 0),
         mode=basket.mode, status="PENDING", source="BASKET",
         basket_id=basket.id, leg_id=leg.id, user_id=basket.user_id,
         account_id=account_id, last_price=float(ltp or 0),
@@ -115,8 +126,8 @@ def _place_leg(db, basket, leg, broker, account_id, ltp):
     leg.broker_order_id = ""
     leg.error = ""
 
-    # SL / trigger legs are left PENDING — the engine fires them on the trigger.
-    if entry_type == "TRIGGER":
+    # Conditional entries rest PENDING — the engine fires them on time/trigger.
+    if entry_type in ("SCHEDULED", "TRIGGER"):
         leg.status = "PENDING"
         return
 
@@ -129,6 +140,7 @@ def _place_leg(db, basket, leg, broker, account_id, ltp):
         t.status = "OPEN"
         t.entry_fill_price = res.fill_price or price
         t.broker = "PAPER"
+        _eng.engine._apply_levels(t)     # turn SL/target points into absolute prices
         leg.status = "EXECUTED"
         leg.fill_price = t.entry_fill_price
     elif res.ok:
