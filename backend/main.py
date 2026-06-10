@@ -399,6 +399,19 @@ def _account_for_provider(db, provider_value, uid=None):
     return a
 
 
+def _auto_select_provider(db, uid, account_id):
+    """When a broker is connected, point this user's Data + Trading providers at
+    it — unless they're already on another live (connected) account. This makes a
+    freshly-connected broker handle the data immediately (option chain, LTP),
+    so each broker works independently without Demo/Dhan."""
+    for key in ("data_provider", "trade_provider"):
+        cur = _account_for_provider(db, uget(db, uid, key, ""), uid)
+        if cur is None or not cur.connected:        # demo / empty / disconnected
+            uset(db, uid, key, str(account_id))
+    for k in ("broker_balance", "broker_balance_provider", "broker_health", "md_status"):
+        uset(db, uid, k, "")
+
+
 def _account_id_for_broker(db, broker, uid):
     """Pick this user's account id to attribute an external order to."""
     tp = _account_for_provider(db, uget(db, uid, "trade_provider", "DEMO"), uid)
@@ -976,7 +989,9 @@ def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
             by_seg.setdefault(seg, []).append(sid)
 
     acc = _account_for_provider(db, uget(db, me.id, "data_provider", "DEMO"), me.id)
-    if acc is None:     # DEMO
+    if acc is None:     # DEMO — admin only; normal users must connect a broker
+        if me.role != "SUPER_ADMIN":
+            return {"connected": False, "prices": {}, "need_broker": True}
         res = demo_market.get_ltp_batch(by_seg)
         return {"connected": True, "prices": {sid: px for (seg, sid), px in res.items()}}
     creds = _acc_creds(acc)
@@ -1463,6 +1478,7 @@ def zerodha_callback(request: Request, request_token: str = "", db: Session = De
         a.token_time = dt.datetime.utcnow()
         a.label = _label("ZERODHA", a.client_id)
         db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=a.user_id))
+        _auto_select_provider(db, a.user_id, a.id)
         db.commit()
         return RedirectResponse(url="/?login=ok")
     db.add(LogEntry(message=f"Zerodha login failed: {res}", level="ERROR", user_id=a.user_id))
@@ -1512,6 +1528,7 @@ def dhan_callback(request: Request, tokenId: str = "", db: Session = Depends(get
         a.token_time = dt.datetime.utcnow()
         a.label = _label("DHAN", a.client_id)
         db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=a.user_id))
+        _auto_select_provider(db, a.user_id, a.id)
         db.commit()
         return RedirectResponse(url="/?login=ok")
     except Exception as e:
@@ -1582,6 +1599,7 @@ def angel_login(payload: dict, request: Request, db: Session = Depends(get_db)):
         a.token_time = dt.datetime.utcnow()
         a.label = _label("ANGEL", a.client_id)
         db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
+        _auto_select_provider(db, me.id, a.id)
         db.commit()
         return {"connected": True}
     db.add(LogEntry(message=f"Angel One login failed: {data}", level="ERROR", user_id=me.id))
@@ -1607,6 +1625,7 @@ def aliceblue_login(payload: dict, request: Request, db: Session = Depends(get_d
         a.token_time = dt.datetime.utcnow()
         a.label = _label("ALICE", a.client_id)
         db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
+        _auto_select_provider(db, me.id, a.id)
         db.commit()
         return {"connected": True}
     db.add(LogEntry(message=f"Alice Blue login failed: {res}", level="ERROR", user_id=me.id))
@@ -1885,6 +1904,7 @@ def admin_account_login(uid: int, aid: int, request: Request, db: Session = Depe
     a.token_time = dt.datetime.utcnow()
     a.label = _label(a.broker, a.client_id)
     db.add(LogEntry(message=f"ADMIN logged in {a.label} on the user's behalf.", level="WARN", user_id=uid))
+    _auto_select_provider(db, uid, a.id)
     db.commit()
     return {"connected": True}
 

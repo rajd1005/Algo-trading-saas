@@ -701,6 +701,14 @@ async function refreshChainLtp() {
   const items = cells.map((el) => { const c = JSON.parse(el.dataset.c);
     return { security_id: c.security_id, exchange_segment: c.exchange_segment }; });
   let res; try { res = await api.post("/api/ltp", { items }); } catch { return; }
+  const legend = document.querySelector(".chain-legend");
+  if (res.need_broker) {
+    if (legend) legend.innerHTML = '⚠️ <b>Connect a broker</b> to see live prices — go to the <span class="link" onclick="document.querySelector(\'.tab[data-tab=&quot;broker&quot;]\').click()">Broker</span> tab.';
+    return;
+  }
+  if (res.error && !Object.keys(res.prices || {}).length && legend) {
+    legend.innerHTML = `⚠️ Price feed: ${esc(res.error).slice(0, 120)}`;
+  }
   const prices = res.prices || {};
   chainBody.querySelectorAll(".ltp[data-ltp]").forEach((sp) => {
     const p = prices[sp.dataset.ltp];
