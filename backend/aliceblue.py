@@ -38,6 +38,7 @@ class AliceMapper:
         self._by_eq = {}
         self.loaded_at = None
         self.loading = False
+        self.last_error = ""
 
     def ready(self):
         return bool(self._by_token)
@@ -45,24 +46,49 @@ class AliceMapper:
     def status(self):
         return {"count": len(self._by_token),
                 "loaded_at": self.loaded_at.isoformat() if self.loaded_at else None,
-                "loading": self.loading}
+                "loading": self.loading, "error": self.last_error}
 
     def load_async(self):
         threading.Thread(target=self._load, daemon=True).start()
+
+    @staticmethod
+    def _log(msg, level="WARN"):
+        try:
+            from database import SessionLocal
+            from models import LogEntry
+            db = SessionLocal()
+            db.add(LogEntry(message=msg, level=level))
+            db.commit(); db.close()
+        except Exception:
+            pass
+
+    def _fetch(self, exch):
+        """Download one exchange's contract master, with retries."""
+        for attempt in range(4):
+            try:
+                r = requests.get(MASTER_URL.format(exch=exch), timeout=60,
+                                 headers={"User-Agent": "algo"})
+                if r.status_code == 200:
+                    return r.text
+            except Exception as e:
+                self.last_error = f"Alice Blue {exch} download failed: {e}"
+            time.sleep(2 * (attempt + 1))
+        return None
 
     def _load(self):
         if self.loading:
             return
         self.loading = True
         by_token, by_opt, by_fut, by_eq = {}, {}, {}, {}
+        failed = []
         try:
             for exch in _EXCHANGES:
+                text = self._fetch(exch)
+                if text is None:
+                    failed.append(exch)
+                    continue
                 try:
-                    r = requests.get(MASTER_URL.format(exch=exch), timeout=60,
-                                     headers={"User-Agent": "algo"})
-                    if r.status_code != 200:
-                        continue
-                    for row in csv.DictReader(io.StringIO(r.text)):
+                    for row in csv.DictReader(io.StringIO(text)):
                         tok = str(row.get("Token", "")).strip()
                         if not tok:
                             continue
@@ -90,8 +116,13 @@ class AliceMapper:
                 self._by_token, self._by_opt = by_token, by_opt
                 self._by_fut, self._by_eq = by_fut, by_eq
             self.loaded_at = dt.datetime.utcnow()
+            if "NFO" in failed:     # NFO drives the option chain
+                self._log("Alice Blue NFO symbol list could not be downloaded — option "
+                          "prices unavailable until it loads.", "ERROR")
+            self.last_error = "" if not failed else f"Could not load: {', '.join(failed)}"
         except Exception as e:
-            print(f"[aliceblue] master load failed: {e}")
+            self.last_error = f"Alice Blue symbol list load failed: {e}"
+            self._log(self.last_error, "ERROR")
         finally:
             self.loading = False
 

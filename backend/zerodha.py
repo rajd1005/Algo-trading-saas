@@ -39,6 +39,7 @@ class ZerodhaMapper:
         self._by_eq = {}
         self.loaded_at = None
         self.loading = False
+        self.last_error = ""
 
     def ready(self):
         return bool(self._by_token)
@@ -46,20 +47,43 @@ class ZerodhaMapper:
     def status(self):
         return {"count": len(self._by_token),
                 "loaded_at": self.loaded_at.isoformat() if self.loaded_at else None,
-                "loading": self.loading}
+                "loading": self.loading, "error": self.last_error}
 
     def load_async(self):
         threading.Thread(target=self._load, daemon=True).start()
+
+    @staticmethod
+    def _log(msg, level="WARN"):
+        try:
+            from database import SessionLocal
+            from models import LogEntry
+            db = SessionLocal()
+            db.add(LogEntry(message=msg, level=level))
+            db.commit(); db.close()
+        except Exception:
+            pass
 
     def _load(self):
         if self.loading:
             return
         self.loading = True
         try:
-            r = requests.get(INSTRUMENTS_URL, timeout=90, headers={"User-Agent": "algo"})
-            r.raise_for_status()
+            text = None
+            for attempt in range(4):
+                try:
+                    r = requests.get(INSTRUMENTS_URL, timeout=90, headers={"User-Agent": "algo"})
+                    r.raise_for_status()
+                    text = r.text
+                    break
+                except Exception as e:
+                    self.last_error = f"Zerodha symbol list download failed (try {attempt + 1}): {e}"
+                    time.sleep(3 * (attempt + 1))
+            if text is None:
+                self._log(f"Zerodha symbol list could not be downloaded — prices unavailable "
+                          f"until it loads. {self.last_error}", "ERROR")
+                return
             by_token, by_opt, by_fut, by_eq = {}, {}, {}, {}
-            for row in csv.DictReader(io.StringIO(r.text)):
+            for row in csv.DictReader(io.StringIO(text)):
                 exch = row.get("exchange", "")
                 etok = str(row.get("exchange_token", ""))
                 name = (row.get("name") or "").upper()
@@ -83,8 +107,10 @@ class ZerodhaMapper:
                 self._by_token, self._by_opt = by_token, by_opt
                 self._by_fut, self._by_eq = by_fut, by_eq
             self.loaded_at = dt.datetime.utcnow()
+            self.last_error = ""
         except Exception as e:
-            print(f"[zerodha] master load failed: {e}")
+            self.last_error = f"Zerodha symbol list parse failed: {e}"
+            self._log(self.last_error, "ERROR")
         finally:
             self.loading = False
 
