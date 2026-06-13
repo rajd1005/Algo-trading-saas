@@ -1015,8 +1015,10 @@ document.querySelectorAll("[data-fxet]").forEach((b) => b.onclick = () => {
   b.classList.add("active"); FX.et = b.dataset.fxet;
   document.getElementById("fxEntryPrice").disabled = FX.et !== "LIMIT";
 });
-document.getElementById("fxQtyMinus").onclick = () => { const i = document.getElementById("fxQty"); i.value = Math.max(1, (parseInt(i.value) || 1) - 1); };
-document.getElementById("fxQtyPlus").onclick = () => { const i = document.getElementById("fxQty"); i.value = (parseInt(i.value) || 1) + 1; };
+document.getElementById("fxQtyMinus").onclick = () => { const i = document.getElementById("fxQty"); i.value = Math.max(1, (parseInt(i.value) || 1) - 1); fxUpdateExample(); };
+document.getElementById("fxQtyPlus").onclick = () => { const i = document.getElementById("fxQty"); i.value = (parseInt(i.value) || 1) + 1; fxUpdateExample(); };
+document.getElementById("fxQty").addEventListener("input", fxUpdateExample);
+document.getElementById("fxContractValue").addEventListener("change", fxUpdateExample);
 
 // symbol search
 let fxTimer = null;
@@ -1046,22 +1048,54 @@ document.addEventListener("click", (e) => {
 
 function fxSet(sel) {
   FX.sel = sel;
+  FX.lastPx = 0;
   document.getElementById("fxSearch").value = sel.symbol;
   document.getElementById("fxResults").classList.remove("show");
+  fxPopulateCV();
   fxShowSelected("LOADING");
+  fxUpdateExample();
   fxStartLtp();
 }
 function fxPick(r) {
   fxSet({ symbol: r.symbol, security_id: r.symbol, exchange_segment: FOREX_SEGMENT_FOR[FX.broker] || "DELTA",
           instrument_type: "FUTURES", product_id: r.product_id, contract_value: r.contract_value });
 }
+// Contract value = the instrument's real Delta contract size (e.g. 0.001 BTC).
+function fxPopulateCV() {
+  const sel = document.getElementById("fxContractValue");
+  if (!sel) return;
+  const cv = FX.sel && FX.sel.contract_value;
+  sel.innerHTML = cv ? `<option value="${cv}">${cv} per contract</option>`
+                     : `<option value="">— (size unknown)</option>`;
+}
+function fxContractVal() {
+  return parseFloat(document.getElementById("fxContractValue").value)
+      || (FX.sel && parseFloat(FX.sel.contract_value)) || 0;
+}
+// Live "how much money to buy" example: notional + margin note + P&L per point.
+function fxUpdateExample() {
+  const box = document.getElementById("fxExample");
+  if (!box) return;
+  if (!FX.sel) { box.style.display = "none"; return; }
+  box.style.display = "block"; box.className = "banner";
+  const cv = fxContractVal(), qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1), px = FX.lastPx || 0;
+  if (!cv || !px) {
+    box.innerHTML = `<span class="muted">💡 Pick a symbol and wait for the live price to see how much money is needed.</span>`;
+    return;
+  }
+  const perContract = cv * px, notional = qty * perContract, perPoint = qty * cv;
+  box.innerHTML = `<b>💡 Example</b> — buy <b>${qty}</b> ${FX.sel.symbol} @ $${px}:`
+    + `<br>• 1 contract = ${cv} (≈ $${perContract.toFixed(2)} notional)`
+    + `<br>• Position value (notional) ≈ <b>$${notional.toFixed(2)}</b> — money needed = notional ÷ your leverage (e.g. 10× ⇒ $${(notional / 10).toFixed(2)})`
+    + `<br>• P&L per point ≈ $${perPoint.toFixed(4)} (SL/Target points × this)`;
+}
 function fxShowSelected(px) {
   const el = document.getElementById("fxSelected");
   if (!FX.sel) { el.textContent = "No symbol selected yet."; return; }
   const pxTxt = px === "LOADING" ? '<span class="muted">fetching price…</span>'
     : (px > 0 ? `LTP <b>${px}</b>` : '<span class="muted">price unavailable — set this broker as your Data account</span>');
-  // Point math: 1 contract = $1 per point, so P&L = qty × points.
-  const cvTxt = ` · <span class="muted">1 contract = $1/point · P&L = qty × points</span>`;
+  const cv = FX.sel.contract_value;
+  const cvTxt = cv ? ` · <span class="muted">1 contract = ${cv}; P&L = qty × ${cv} × points</span>` : "";
   el.innerHTML = `✅ <b>${FX.sel.symbol}</b> — ${FX.broker}${FX.sel.product_id ? " · id " + FX.sel.product_id : ""} — ${pxTxt}${cvTxt}`;
 }
 function fxStartLtp() {
@@ -1070,7 +1104,7 @@ function fxStartLtp() {
     if (!FX.sel) return;
     let res; try { res = await api.post("/api/ltp", { items: [{ security_id: FX.sel.security_id, exchange_segment: FX.sel.exchange_segment }] }); } catch { return; }
     const p = (res.prices || {})[FX.sel.security_id];
-    if (p != null) fxShowSelected(p);
+    if (p != null) { FX.lastPx = p; fxShowSelected(p); fxUpdateExample(); }
   };
   run(); FX.ltpTimer = setInterval(run, 3000);
 }
