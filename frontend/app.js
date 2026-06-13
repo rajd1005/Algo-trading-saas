@@ -2055,11 +2055,13 @@ let _auAccts = [];
 // show the right credential fields for the chosen broker
 function auApplyBrokerFields() {
   const b = document.getElementById("auBroker").value;
-  const toggle = (sel, on) => document.querySelectorAll(sel).forEach((e) => e.classList.toggle("show", on));
-  toggle(".au-dhan", b === "DHAN");
-  toggle(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE" || b === "DELTA");
-  toggle(".au-secret", b === "ZERODHA" || b === "DELTA");
-  toggle(".au-ang", b === "ANGEL");
+  // Use INLINE display: the `.modal .row label` rule (specificity 0,0,2,1) overrides
+  // the `.au-f` / `.au-f.show` classes, so class-toggling can't hide these fields.
+  const show = (sel, on) => document.querySelectorAll(sel).forEach((e) => e.style.display = on ? "" : "none");
+  show(".au-dhan", b === "DHAN");
+  show(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE" || b === "DELTA");
+  show(".au-secret", b === "ZERODHA" || b === "DELTA");
+  show(".au-ang", b === "ANGEL");
   // Delta is key-only (API key + secret) — it has no client/user id.
   const cid = document.getElementById("auClient").closest("label");
   if (cid) cid.style.display = b === "DELTA" ? "none" : "";
