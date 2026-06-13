@@ -35,6 +35,7 @@ import emailer
 import angel
 import zerodha
 import aliceblue
+import delta
 import feeds
 import baskets
 import margins
@@ -258,7 +259,7 @@ def _broker_connected(db, uid) -> bool:
     return db.query(Account).filter(Account.user_id == uid, Account.connected == 1).count() > 0
 
 
-ALL_BROKERS = ["DHAN", "ANGEL", "ZERODHA", "ALICE"]
+ALL_BROKERS = ["DHAN", "ANGEL", "ZERODHA", "ALICE", "DELTA"]
 
 
 def _enabled_brokers(db):
@@ -357,7 +358,7 @@ def get_data_creds(db):
 # ---------- multi-account broker logins ----------
 def _label(broker, client_id):
     name = {"DHAN": "Dhan", "ANGEL": "Angel One", "ZERODHA": "Zerodha",
-            "ALICE": "Alice Blue"}.get(broker, broker)
+            "ALICE": "Alice Blue", "DELTA": "Delta Exchange"}.get(broker, broker)
     return f"{name} · {client_id or '—'}"
 
 
@@ -441,6 +442,8 @@ def _broker_from_account(a):
         return zerodha.ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
     if a.broker == "ALICE" and creds.get("session_id"):
         return aliceblue.AliceBroker(a.client_id, creds["session_id"])
+    if a.broker == "DELTA" and creds.get("api_key") and creds.get("api_secret"):
+        return delta.DeltaBroker(creds["api_key"], creds["api_secret"])
     return None
 
 
@@ -549,6 +552,7 @@ def _startup():
     angel.mapper.load_async()  # download Angel One master + build the symbol map
     zerodha.mapper.load_async()  # download Zerodha (Kite) master + symbol map
     aliceblue.mapper.load_async()  # download Alice Blue contract masters + symbol map
+    delta.mapper.load_async()      # download Delta Exchange product list (symbol <-> id)
     engine.start()
     baskets.start()            # basket scheduler + leg/MTM monitor threads
     replication.start()        # copy-trading: master-fill monitor + group scheduler
@@ -573,7 +577,7 @@ def _master_refresh_loop():
             pass
         if time.time() - last_mappers >= 20 * 3600:
             last_mappers = time.time()
-            for m in (angel, zerodha, aliceblue):
+            for m in (angel, zerodha, aliceblue, delta):
                 try:
                     m.mapper.load_async()
                 except Exception:
@@ -798,6 +802,13 @@ def _auto_renew_loop():
                         db.add(LogEntry(message=f"{a.label} session auto-renewed.", level="INFO"))
                     else:
                         db.add(LogEntry(message=f"{a.label} renew failed — log in again.", level="WARN"))
+                elif a.broker == "DELTA" and creds.get("api_key") and creds.get("api_secret"):
+                    # Delta keys don't expire: just re-verify and refresh the timer.
+                    ok, _res = delta.verify(creds["api_key"], creds["api_secret"])
+                    if ok:
+                        a.token_time = dt.datetime.utcnow()
+                    else:
+                        db.add(LogEntry(message=f"{a.label} connection check failed — verify keys/IP.", level="WARN"))
             db.commit()
             db.close()
         except Exception:
@@ -1076,6 +1087,8 @@ def _provider_lot_size(db, uid, security_id, exchange_segment, fallback=0):
         if acc.broker == "ALICE":
             al = aliceblue.mapper.translate(security_id, exchange_segment, meta)
             return _to_int(al and al.get("lot_size")) or dhan_lot
+        if acc.broker == "DELTA":
+            return 1        # Delta sizes orders in whole contracts (no lot multiplier)
     except Exception:
         pass
     return dhan_lot
@@ -1137,6 +1150,11 @@ def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
         if not (cid and sid) or not by_seg:
             return {"connected": bool(cid and sid), "prices": {}}
         md = aliceblue.AliceMarketData(cid, sid)
+    elif acc.broker == "DELTA":
+        key, sec = creds.get("api_key", ""), creds.get("api_secret", "")
+        if not (key and sec) or not by_seg:
+            return {"connected": bool(key and sec), "prices": {}}
+        md = delta.DeltaMarketData(key, sec)
     else:               # DHAN
         cid, tok = acc.client_id, creds.get("access_token", "")
         if not cid or not tok or not by_seg:
@@ -1260,6 +1278,7 @@ def instruments_refresh():
     angel.mapper.load_async()    # Angel master (for translation)
     zerodha.mapper.load_async()  # Zerodha master (for translation)
     aliceblue.mapper.load_async()  # Alice Blue masters (for translation)
+    delta.mapper.load_async()      # Delta Exchange product list
     return {"ok": True, "message": "Refreshing symbol lists in the background…"}
 
 
@@ -1369,6 +1388,7 @@ def _build_summary(db, uid, broker="ALL", date=""):
         "angel_map": angel.mapper.status(),
         "zerodha_map": zerodha.mapper.status(),
         "alice_map": aliceblue.mapper.status(),
+        "delta_map": delta.mapper.status(),
         "demo_direction": demo_market.direction,
         "data_provider": data_provider, "trade_provider": trade_provider,
         "data_name": data_name, "broker_name": broker_name, "balance": balance,
@@ -2269,7 +2289,8 @@ async def user_webhook(user_uuid: str, broker: str, request: Request, db: Sessio
     if not u:
         return {"ok": False}
     broker = broker.upper()
-    bmap = {"DHAN": "DHAN", "ANGEL": "ANGEL", "ZERODHA": "ZERODHA", "ALICEBLUE": "ALICE", "ALICE": "ALICE"}
+    bmap = {"DHAN": "DHAN", "ANGEL": "ANGEL", "ZERODHA": "ZERODHA", "ALICEBLUE": "ALICE",
+            "ALICE": "ALICE", "DELTA": "DELTA"}
     bk = bmap.get(broker)
     if not bk:
         return {"ok": False}
@@ -2277,7 +2298,7 @@ async def user_webhook(user_uuid: str, broker: str, request: Request, db: Sessio
         payload = await request.json()
         orders = payload if isinstance(payload, list) else [payload]
         norm = {"ANGEL": angel.normalize_order, "ZERODHA": zerodha.normalize_order,
-                "ALICE": aliceblue.normalize_order}.get(bk)
+                "ALICE": aliceblue.normalize_order, "DELTA": delta.normalize_order}.get(bk)
         rows = [norm(o) for o in orders] if norm else orders
         _sync_external_orders(db, rows, bk, _account_id_for_broker(db, bk, u.id), u.id)
         db.commit()
@@ -2491,6 +2512,31 @@ def aliceblue_login(payload: dict, request: Request, db: Session = Depends(get_d
     raise HTTPException(400, f"Alice Blue login failed: {res}")
 
 
+# ---------- Delta Exchange (key-based, per account) ----------
+@app.post("/api/delta/login")
+def delta_login(payload: dict, request: Request, db: Session = Depends(get_db)):
+    me = current_user(request)
+    a = _my_account(db, payload.get("account_id", 0), me.id, "DELTA")
+    creds = _acc_creds(a)
+    key, sec = creds.get("api_key", ""), creds.get("api_secret", "")
+    if not key or not sec:
+        raise HTTPException(400, "Enter the Delta API Key and API Secret first.")
+    if _broker_in_use_elsewhere(db, "DELTA", a.client_id, me.id):
+        raise HTTPException(400, "This Delta account is already linked to another user.")
+    ok, res = delta.verify(key, sec)
+    if ok:
+        a.connected = 1
+        a.token_time = dt.datetime.utcnow()
+        a.label = _label("DELTA", a.client_id)
+        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
+        _auto_select_provider(db, me.id, a.id)
+        db.commit()
+        return {"connected": True}
+    db.add(LogEntry(message=f"Delta login failed: {res}", level="ERROR", user_id=me.id))
+    db.commit()
+    raise HTTPException(400, f"Delta login failed: {res}")
+
+
 # ---------- how-to doc (admin-editable rich HTML, shown to all users) ----------
 DEFAULT_HOWTO = (
     "<h3>Dhan</h3><p>Create an app at <b>web.dhan.co</b>, set the Redirect &amp; Postback "
@@ -2502,6 +2548,11 @@ DEFAULT_HOWTO = (
     "account (Client ID, API Key, API Secret), then click <b>Login</b>.</p>"
     "<h3>Alice Blue</h3><p>Enable the <b>ANT API</b>, add the account (User ID, API Key), "
     "then click <b>Login</b> — connects instantly, no redirect.</p>"
+    "<h3>Delta Exchange</h3><p>Create an <b>API key</b> at <b>India Delta Exchange</b> "
+    "(with trading permission, and whitelist this server's IP shown on the Broker tab), "
+    "add the account (API Key, API Secret), then click <b>Login</b> — connects instantly, "
+    "no redirect. Enter the Delta <b>symbol</b> (e.g. <code>BTCUSD</code>) or numeric "
+    "product id as the trade's Security ID.</p>"
 )
 
 
@@ -2689,7 +2740,7 @@ def admin_add_account(uid: int, payload: dict, request: Request, db: Session = D
     if not u:
         raise HTTPException(404, "User not found")
     broker = str(payload.get("broker", "DHAN")).upper()
-    if broker not in ("DHAN", "ANGEL", "ZERODHA", "ALICE"):
+    if broker not in ALL_BROKERS:
         broker = "DHAN"
     client_id = str(payload.get("client_id", "")).strip()
     if client_id and _broker_in_use_elsewhere(db, broker, client_id, uid):
@@ -2740,6 +2791,12 @@ def admin_account_login(uid: int, aid: int, request: Request, db: Session = Depe
         if not ok:
             raise HTTPException(400, f"Alice Blue login failed: {res}")
         _set_acc_creds(a, session_id=res)
+    elif a.broker == "DELTA":
+        if not creds.get("api_key") or not creds.get("api_secret"):
+            raise HTTPException(400, "Fill the Delta API Key and API Secret first.")
+        ok, res = delta.verify(creds["api_key"], creds["api_secret"])
+        if not ok:
+            raise HTTPException(400, f"Delta login failed: {res}")
     elif a.broker == "ZERODHA":
         if not creds.get("api_key"):
             raise HTTPException(400, "Enter the Zerodha API Key & Secret first.")

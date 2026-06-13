@@ -46,6 +46,7 @@ from brokers import PaperBroker, DhanBroker
 from angel import AngelBroker, AngelMarketData
 from zerodha import ZerodhaBroker, ZerodhaMarketData
 from aliceblue import AliceBroker, AliceMarketData
+from delta import DeltaBroker, DeltaMarketData
 import config
 
 
@@ -162,6 +163,8 @@ class TradingEngine:
             return ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
         if acc.broker == "ALICE" and creds.get("session_id"):
             return AliceBroker(acc.client_id, creds["session_id"])
+        if acc.broker == "DELTA" and creds.get("api_key") and creds.get("api_secret"):
+            return DeltaBroker(creds["api_key"], creds["api_secret"])
         return None
 
     def _fetch_prices(self, db, uid, value, instruments, active):
@@ -258,6 +261,20 @@ class TradingEngine:
                     self._set_setting(db, uid, "md_status", "ok:alice")
                 elif md.last_error:
                     self._set_setting(db, uid, "md_status", f"Alice Blue data error: {md.last_error[:160]}")
+            return prices
+        if acc.broker == "DELTA":
+            key, sec = creds.get("api_key", ""), creds.get("api_secret", "")
+            if not key or not sec:
+                if active:
+                    self._set_setting(db, uid, "md_status", "Data (Delta) not connected — connect on the Broker tab.")
+                return {}
+            md = DeltaMarketData(key, sec)
+            prices = md.get_ltp_batch(by_seg)
+            if active:
+                if prices:
+                    self._set_setting(db, uid, "md_status", "ok:delta")
+                elif md.last_error:
+                    self._set_setting(db, uid, "md_status", f"Delta data error: {md.last_error[:160]}")
             return prices
         return {}
 

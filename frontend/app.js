@@ -230,11 +230,11 @@ async function refreshSummary() {
   const ss = document.getElementById("symbolsState");
   const ssLabel = document.getElementById("symbolsLabel");
   // Maps for non-Dhan brokers carry a {count, loading}; Dhan uses the instruments store.
-  const brokerMap = { ANGEL: s.angel_map, ZERODHA: s.zerodha_map, ALICE: s.alice_map };
+  const brokerMap = { ANGEL: s.angel_map, ZERODHA: s.zerodha_map, ALICE: s.alice_map, DELTA: s.delta_map };
   const map = brokerMap[dataBroker];
   if (ssLabel) {
     const src = { DEMO: "Demo", DHAN: "Dhan", ANGEL: "Angel One",
-                  ZERODHA: "Zerodha", ALICE: "Alice Blue" }[dataBroker] || "Dhan";
+                  ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" }[dataBroker] || "Dhan";
     ssLabel.textContent = `Symbol list (auto-downloaded from ${src}, refreshes daily):`;
   }
   if (ss) {
@@ -962,8 +962,8 @@ document.getElementById("killBtn").onclick = async () => {
 
 // ---- broker / providers / accounts ----
 let _accounts = [];
-let _enabledBrokers = ["DHAN", "ANGEL", "ZERODHA", "ALICE"];
-const _BROKER_LABEL = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
+let _enabledBrokers = ["DHAN", "ANGEL", "ZERODHA", "ALICE", "DELTA"];
+const _BROKER_LABEL = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" };
 function buildAcctBrokerOptions() {
   const sel = document.getElementById("newAcctBroker");
   if (!sel) return;
@@ -1024,6 +1024,10 @@ async function loginAccount(id, broker) {
       await api.post("/api/aliceblue/login", { account_id: Number(id) });
       msg.textContent = "✅ Logged in to Alice Blue."; msg.className = "msg pos";
       await refreshBroker();
+    } else if (broker === "DELTA") {
+      await api.post("/api/delta/login", { account_id: Number(id) });
+      msg.textContent = "✅ Connected to Delta Exchange."; msg.className = "msg pos";
+      await refreshBroker();
     } else {
       await api.post("/api/angel/login", { account_id: Number(id) });
       msg.textContent = "✅ Logged in to Angel One."; msg.className = "msg pos";
@@ -1045,7 +1049,7 @@ function buildPnlFilter() {
 async function refreshBroker() {
   const b = await api.get("/api/broker");
   _accounts = b.accounts || [];
-  _enabledBrokers = b.enabled_brokers || ["DHAN", "ANGEL", "ZERODHA", "ALICE"];
+  _enabledBrokers = b.enabled_brokers || ["DHAN", "ANGEL", "ZERODHA", "ALICE", "DELTA"];
   buildAcctBrokerOptions();
   fillProviderSelect("dataProvider", b.data_provider || "");
   fillProviderSelect("tradeProvider", b.trade_provider || "");
@@ -1088,16 +1092,16 @@ async function refreshBroker() {
 });
 
 // add / edit account form
-const BROKER_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
+const BROKER_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" };
 function showAcctForm(broker, acc) {
   document.getElementById("acctForm").style.display = "block";
   document.getElementById("acctBroker").value = broker;
   document.getElementById("acctId").value = acc ? acc.id : "";
   document.getElementById("acctFormTitle").textContent = (acc ? "Edit " : "New ") + (BROKER_NAME[broker] || broker) + " account";
   document.querySelectorAll(".dhan-f").forEach((e) => e.style.display = broker === "DHAN" ? "" : "none");
-  document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA" || broker === "ALICE") ? "" : "none");
+  document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA" || broker === "ALICE" || broker === "DELTA") ? "" : "none");
   document.querySelectorAll(".angel-f").forEach((e) => e.style.display = broker === "ANGEL" ? "" : "none");
-  document.querySelectorAll(".zerodha-f").forEach((e) => e.style.display = broker === "ZERODHA" ? "" : "none");
+  document.querySelectorAll(".secret-f").forEach((e) => e.style.display = (broker === "ZERODHA" || broker === "DELTA") ? "" : "none");
   ["acctClientId", "acctAppId", "acctAppSecret", "acctApiKey", "acctPin", "acctTotp", "acctZSecret"].forEach((i) => document.getElementById(i).value = "");
   document.getElementById("acctClientId").value = acc ? acc.client_id : "";
   if (acc && acc.has_secret) {
@@ -1115,7 +1119,7 @@ document.getElementById("acctSaveBtn").onclick = async () => {
   if (broker === "DHAN") {
     payload.app_id = document.getElementById("acctAppId").value;
     payload.app_secret = document.getElementById("acctAppSecret").value;
-  } else if (broker === "ZERODHA") {
+  } else if (broker === "ZERODHA" || broker === "DELTA") {
     payload.api_key = document.getElementById("acctApiKey").value;
     payload.api_secret = document.getElementById("acctZSecret").value;
   } else if (broker === "ALICE") {
@@ -1541,6 +1545,25 @@ document.getElementById("addSymbolBtn").onclick = async () => {
     await loadWatchlist();
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
+// Manual entry — fill the same hidden inputs the picker uses (for Delta crypto etc.)
+document.getElementById("manApplyBtn").onclick = () => {
+  const msg = document.getElementById("formMsg");
+  const sym = document.getElementById("manSymbol").value.trim();
+  const sid = document.getElementById("manSecId").value.trim() || sym;
+  const seg = document.getElementById("manSeg").value.trim() || "DELTA";
+  if (!sym || !sid) { msg.textContent = "❌ Enter a symbol and security id."; msg.className = "msg neg"; return; }
+  form.symbol.value = sym;
+  form.security_id.value = sid;
+  form.exchange_segment.value = seg;
+  form.instrument_type.value = "FUTURES";
+  currentSeg = "FUTURES"; currentUnderlying = sym; currentLotSize = 1;
+  updateQty();
+  document.getElementById("selectedSymbol").innerHTML =
+    `✅ <b>${sym}</b> — manual · ${seg} · ID ${sid} · lot 1`;
+  msg.textContent = "";
+  _selContract = { symbol: sym, security_id: sid, exchange_segment: seg, instrument_type: "FUTURES" };
+  pushWatch();                 // stream live ticks for the manually-entered contract
+};
 document.getElementById("addWatchBtn").onclick = async () => {
   const msg = document.getElementById("formMsg");
   if (!form.security_id.value) { msg.textContent = "❌ Pick a strike / contract first, then add it."; msg.className = "msg neg"; return; }
@@ -1709,7 +1732,7 @@ document.getElementById("adCreateUser").onclick = async () => {
 
 // ---- remote inspector (full broker control on behalf of a user) ----
 let _auId = null, _auUuid = "", _auTimer = null;
-const AU_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
+const AU_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" };
 async function adminInspect(uid, email, uuid) {
   _auId = uid; _auUuid = uuid || "";
   document.getElementById("auTitle").textContent = "🛠️ " + email;
@@ -1761,8 +1784,8 @@ function auApplyBrokerFields() {
   const b = document.getElementById("auBroker").value;
   const toggle = (sel, on) => document.querySelectorAll(sel).forEach((e) => e.classList.toggle("show", on));
   toggle(".au-dhan", b === "DHAN");
-  toggle(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE");
-  toggle(".au-zer", b === "ZERODHA");
+  toggle(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE" || b === "DELTA");
+  toggle(".au-secret", b === "ZERODHA" || b === "DELTA");
   toggle(".au-ang", b === "ANGEL");
 }
 document.getElementById("auBroker").onchange = auApplyBrokerFields;

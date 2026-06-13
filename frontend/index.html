@@ -168,6 +168,19 @@
         <button type="button" class="btn btn-sm" id="addSymbolBtn">★ Add symbol</button>
         <button type="button" class="btn btn-sm" id="addWatchBtn">★ Add this contract</button>
       </div>
+      <!-- Manual entry — e.g. Delta Exchange crypto: the symbol picker is driven by
+           the Indian (Dhan) instrument list, so type the Delta symbol/product id here. -->
+      <details id="manualEntry" style="margin-top:8px;">
+        <summary class="muted" style="cursor:pointer; font-size:12px;">⚙️ Manual entry (crypto / Delta — type the symbol directly)</summary>
+        <div class="row" style="margin-top:6px; align-items:flex-end;">
+          <label>Symbol <input id="manSymbol" placeholder="e.g. BTCUSD" /></label>
+          <label>Security ID / Product <input id="manSecId" placeholder="Delta symbol or product id" /></label>
+          <label style="max-width:140px;">Segment <input id="manSeg" value="DELTA" /></label>
+          <button type="button" class="btn btn-sm" id="manApplyBtn">Use this</button>
+        </div>
+        <div class="muted" style="font-size:11px; margin-top:4px;">For Delta Exchange, type the symbol (e.g. <code>BTCUSD</code>) or numeric product id. Orders route to your selected Delta trading account.</div>
+      </details>
+
       <!-- these get filled automatically when you pick a contract -->
       <input type="hidden" name="symbol" /><input type="hidden" name="security_id" />
       <input type="hidden" name="exchange_segment" /><input type="hidden" name="instrument_type" />
@@ -549,7 +562,7 @@
       <div class="acct-title">Broker accounts</div>
       <div id="accountsList"></div>
       <div class="row" style="align-items:center; gap:8px;">
-        <select id="newAcctBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option><option value="ZERODHA">Zerodha</option><option value="ALICE">Alice Blue</option></select>
+        <select id="newAcctBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option><option value="ZERODHA">Zerodha</option><option value="ALICE">Alice Blue</option><option value="DELTA">Delta Exchange</option></select>
         <button type="button" class="btn" id="addAcctBtn">+ Add account</button>
       </div>
 
@@ -565,7 +578,7 @@
           <label class="api-f">API Key <input id="acctApiKey" placeholder="API key" /></label>
           <label class="angel-f">PIN <input id="acctPin" type="password" placeholder="login PIN" /></label>
           <label class="angel-f">TOTP Secret <input id="acctTotp" type="password" placeholder="TOTP secret" /></label>
-          <label class="zerodha-f">API Secret <input id="acctZSecret" type="password" placeholder="Zerodha API secret" /></label>
+          <label class="secret-f">API Secret <input id="acctZSecret" type="password" placeholder="API secret" /></label>
         </div>
         <div class="row">
           <button type="button" class="btn btn-primary" id="acctSaveBtn">Save account</button>
@@ -783,7 +796,7 @@
             <input type="hidden" id="auAcctId" />
             <div class="row">
               <label style="max-width:150px;">Broker
-                <select id="auBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option><option value="ZERODHA">Zerodha</option><option value="ALICE">Alice Blue</option></select>
+                <select id="auBroker"><option value="DHAN">Dhan</option><option value="ANGEL">Angel One</option><option value="ZERODHA">Zerodha</option><option value="ALICE">Alice Blue</option><option value="DELTA">Delta Exchange</option></select>
               </label>
               <label>Client / User ID <input id="auClient" placeholder="client / user id" /></label>
             </div>
@@ -791,7 +804,7 @@
               <label class="au-f au-dhan">App ID <input id="auAppId" /></label>
               <label class="au-f au-dhan">App Secret <input id="auAppSecret" type="password" placeholder="•••• (blank = keep)" /></label>
               <label class="au-f au-api">API Key <input id="auApiKey" placeholder="•••• (blank = keep)" /></label>
-              <label class="au-f au-zer">API Secret <input id="auApiSecret" type="password" placeholder="•••• (blank = keep)" /></label>
+              <label class="au-f au-secret">API Secret <input id="auApiSecret" type="password" placeholder="•••• (blank = keep)" /></label>
               <label class="au-f au-ang">PIN <input id="auPin" type="password" /></label>
               <label class="au-f au-ang">TOTP Secret <input id="auTotp" type="password" /></label>
             </div>

@@ -117,6 +117,8 @@ def _lot_for_account(db, account_id, security_id, exchange_segment, dhan_lot):
     acc = db.get(Account, account_id)
     if acc is None or acc.broker == "DHAN":
         return dhan_lot
+    if acc.broker == "DELTA":
+        return 1        # Delta sizes orders in whole contracts (no lot multiplier)
     from instruments import store
     meta = store.get_meta(security_id) or {}
     try:
