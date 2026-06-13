@@ -416,8 +416,10 @@ class DeltaBroker:
     def place_entry(self, trade, current_price, qty=None):
         # Apply the chosen leverage on the product before entering (Delta sets it
         # per-product, not per-order). Best-effort: a failure won't block the order.
+        # Skip for options — buying an option is paid in full (premium); leverage
+        # doesn't apply, and setting it on an option product can error.
         lev = getattr(trade, "leverage", 0) or 0
-        if lev and lev > 0:
+        if lev and lev > 0 and getattr(trade, "instrument_type", "") != "OPTION":
             row = mapper.resolve(trade.security_id)
             if row:
                 self.set_leverage(row["product_id"], lev)
