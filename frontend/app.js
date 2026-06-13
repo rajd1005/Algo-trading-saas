@@ -1032,7 +1032,7 @@ document.querySelectorAll("[data-fxmode]").forEach((b) => b.onclick = () => {
 });
 document.querySelectorAll("[data-fxside]").forEach((b) => b.onclick = () => {
   document.querySelectorAll("[data-fxside]").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active"); FX.side = b.dataset.fxside;
+  b.classList.add("active"); FX.side = b.dataset.fxside; fxUpdateExample();   // buy vs sell changes option cost
 });
 document.querySelectorAll("[data-fxet]").forEach((b) => b.onclick = () => {
   document.querySelectorAll("[data-fxet]").forEach((x) => x.classList.remove("active"));
@@ -1097,24 +1097,43 @@ function fxContractVal() {
   return parseFloat(document.getElementById("fxContractValue").value)
       || (FX.sel && parseFloat(FX.sel.contract_value)) || 0;
 }
-// Live "how much money to buy" example: notional + margin note + P&L per point.
+// Estimate the money needed to enter, accounting for the instrument:
+//  - BUYING an option = pay the FULL premium (no leverage) + fees (~15% buffer for
+//    Delta's fee + GST, which is why cheap options can fail on commission).
+//  - Futures/perp (or selling) = margin = notional ÷ leverage.
+const FX_FEE_BUFFER = 1.15;
+function fxEstMoney() {
+  const cv = fxContractVal(), qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1), px = FX.lastPx || 0;
+  const lev = Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1);
+  if (!cv || !px) return { ok: false };
+  const notional = qty * cv * px, perPoint = qty * cv;
+  const isOptionBuy = FX.sel && FX.sel.instrument_type === "OPTION" && FX.side === "BUY";
+  const money = isOptionBuy ? notional * FX_FEE_BUFFER : notional / lev;
+  return { ok: true, notional, perPoint, money, lev, isOptionBuy, premium: notional };
+}
+// Live "how much money to buy" example.
 function fxUpdateExample() {
   const box = document.getElementById("fxExample");
   if (!box) return;
   if (!FX.sel) { box.style.display = "none"; return; }
   box.style.display = "block"; box.className = "banner";
-  const cv = fxContractVal(), qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1), px = FX.lastPx || 0;
-  if (!cv || !px) {
+  const e = fxEstMoney();
+  if (!e.ok) {
     box.innerHTML = `<span class="muted">💡 Pick a symbol and wait for the live price to see how much money is needed.</span>`;
     return;
   }
-  const lev = Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1);
-  const perContract = cv * px, notional = qty * perContract, perPoint = qty * cv, margin = notional / lev;
-  box.innerHTML = `<b>💡 Example</b> — buy <b>${qty}</b> ${FX.sel.symbol} @ $${px} at <b>${lev}×</b>:`
-    + `<br>• 1 contract = ${cv} (≈ $${perContract.toFixed(2)} notional)`
-    + `<br>• Position value (notional) ≈ $${notional.toFixed(2)}`
-    + `<br>• <b>Money needed ≈ $${margin.toFixed(2)}</b> (notional ÷ ${lev}× leverage)`
-    + `<br>• P&L per point ≈ $${perPoint.toFixed(4)} (SL/Target points × this)`;
+  const qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1);
+  if (e.isOptionBuy) {
+    box.innerHTML = `<b>💡 Example</b> — buy <b>${qty}</b> ${FX.sel.symbol} @ premium $${FX.lastPx}:`
+      + `<br>• Premium (paid in FULL) ≈ $${e.premium.toFixed(2)} — buying options has no leverage`
+      + `<br>• <b>Money needed ≈ $${e.money.toFixed(2)}</b> (premium + ~15% for fees & GST)`
+      + `<br>• P&L per point ≈ $${e.perPoint.toFixed(4)} (SL/Target points × this)`;
+  } else {
+    box.innerHTML = `<b>💡 Example</b> — ${qty} ${FX.sel.symbol} @ $${FX.lastPx} at <b>${e.lev}×</b>:`
+      + `<br>• Position value (notional) ≈ $${e.notional.toFixed(2)}`
+      + `<br>• <b>Money needed ≈ $${e.money.toFixed(2)}</b> (notional ÷ ${e.lev}× leverage, + fees)`
+      + `<br>• P&L per point ≈ $${e.perPoint.toFixed(4)} (SL/Target points × this)`;
+  }
 }
 function fxShowSelected(px) {
   const el = document.getElementById("fxSelected");
@@ -1242,15 +1261,15 @@ document.getElementById("fxSubmit").onclick = async () => {
     msg.textContent = `❌ Set ${FX.account ? FX.account.label : "your crypto broker"} as the Data + Trading account first (use the banner above), or a LIVE order would route to the wrong broker.`;
     msg.className = "msg neg"; return;
   }
-  // Pre-flight margin check (LIVE): warn if the API-visible USD balance can't cover the margin.
+  // Pre-flight check (LIVE): warn if the API-visible USD balance can't cover the
+  // money needed (full premium+fees for option buys, margin for futures).
   if (FX.mode === "LIVE") {
-    const cv = fxContractVal(), qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1);
-    const lev = Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1);
-    const margin = (cv && FX.lastPx) ? (qty * cv * FX.lastPx) / lev : 0;
+    const e = fxEstMoney();
     const avail = fxAvailUsd();
-    if (margin > 0 && avail >= 0 && avail < margin) {
-      if (!confirm(`Estimated margin ≈ $${margin.toFixed(2)} but the API sees only ~$${avail.toFixed(2)} available (USD/USDT). `
-        + `Delta will likely reject this for insufficient margin. Place anyway?`)) { return; }
+    if (e.ok && e.money > 0 && avail < e.money) {
+      const what = e.isOptionBuy ? "premium + fees" : "margin";
+      if (!confirm(`Estimated ${what} ≈ $${e.money.toFixed(2)} but the API sees only ~$${avail.toFixed(2)} available (USD/USDT). `
+        + `Delta will likely reject this (insufficient ${e.isOptionBuy ? "commission/premium" : "margin"}). Place anyway?`)) { return; }
     }
   }
   const payload = {
