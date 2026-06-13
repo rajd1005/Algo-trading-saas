@@ -261,6 +261,16 @@ def _broker_connected(db, uid) -> bool:
 
 ALL_BROKERS = ["DHAN", "ANGEL", "ZERODHA", "ALICE", "DELTA"]
 
+# Broker category drives which trading UI a broker uses:
+#   EQUITY -> the India options/futures/equity picker (Dhan-symbol space)
+#   FOREX  -> the Forex Trade tab (crypto/forex symbols, e.g. Delta)
+# A future forex/crypto broker just needs an entry here to inherit the Forex tab.
+BROKER_CATEGORY = {"DHAN": "EQUITY", "ANGEL": "EQUITY", "ZERODHA": "EQUITY",
+                   "ALICE": "EQUITY", "DELTA": "FOREX"}
+FOREX_BROKERS = [b for b in ALL_BROKERS if BROKER_CATEGORY.get(b) == "FOREX"]
+# exchange_segment values used by forex brokers (so the UI can split watchlists etc.)
+FOREX_SEGMENTS = ["DELTA"]
+
 
 def _enabled_brokers(db):
     """Brokers the admin has made available to users (default: all)."""
@@ -1042,10 +1052,41 @@ def equities_search(q: str = "", limit: int = 25):
     return instruments.search_equities(q, limit=limit)
 
 
-@app.get("/api/delta/search")
-def delta_search(q: str = "", limit: int = 25):
-    """Search Delta Exchange crypto products by symbol (perps / futures / options)."""
-    return delta.mapper.search(q, limit=limit)
+@app.get("/api/forex/search")
+def forex_search(q: str = "", limit: int = 25, broker: str = "DELTA"):
+    """Search a Forex/crypto broker's products by symbol. Dispatches by broker so
+    any future forex broker can plug in here (Phase: Delta Exchange)."""
+    if broker.upper() == "DELTA":
+        return delta.mapper.search(q, limit=limit)
+    return []
+
+
+@app.get("/api/forex/underlyings")
+def forex_underlyings(broker: str = "DELTA"):
+    """Underlyings that have an options chain on the forex broker (e.g. BTC, ETH)."""
+    if broker.upper() == "DELTA":
+        return delta.mapper.option_underlyings()
+    return []
+
+
+@app.get("/api/forex/expiries")
+def forex_expiries(underlying: str, broker: str = "DELTA"):
+    if broker.upper() == "DELTA":
+        return delta.mapper.option_expiries(underlying)
+    return []
+
+
+@app.get("/api/forex/optionchain")
+def forex_option_chain(underlying: str, expiry: str = "", broker: str = "DELTA"):
+    """Strikes (CALL/PUT contracts) for a forex underlying + expiry — same shape as
+    the India option chain so the front-end can render it the same way."""
+    if broker.upper() != "DELTA":
+        return {"underlying": underlying, "expiry": expiry, "expiries": [], "strikes": []}
+    exps = delta.mapper.option_expiries(underlying)
+    if not expiry and exps:
+        expiry = exps[0]
+    return {"underlying": underlying, "expiry": expiry, "expiries": exps,
+            "strikes": delta.mapper.option_chain(underlying, expiry)}
 
 
 @app.get("/api/expiries")
@@ -2277,6 +2318,7 @@ def get_broker(request: Request, db: Session = Depends(get_db)):
         "connected": data_conn and trade_conn,
         "demo_allowed": is_admin,
         "enabled_brokers": ALL_BROKERS if is_admin else _enabled_brokers(db),
+        "forex_brokers": FOREX_BROKERS,
         "redirect_url": base + "/api/dhan/callback",
         "postback_url": f"{hook}/dhan",
         "angel_redirect_url": base + "/api/angel/callback",

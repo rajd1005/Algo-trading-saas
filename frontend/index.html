@@ -56,6 +56,9 @@
     <button class="tab" data-tab="new">
       <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
       <span class="tab-lbl">Trade</span></button>
+    <button class="tab forex-only" data-tab="forex" style="display:none;">
+      <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5"/><path d="M14.5 4.2A5 5 0 1 1 16 16M6.5 8h3M8 6.5v3"/></svg>
+      <span class="tab-lbl">Forex</span></button>
     <button class="tab" data-tab="baskets">
       <svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11h14l-1.5 7.5a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5z"/><path d="M9 11 12 4l3 7"/></svg>
       <span class="tab-lbl">Basket</span></button>
@@ -168,22 +171,6 @@
         <button type="button" class="btn btn-sm" id="addSymbolBtn">★ Add symbol</button>
         <button type="button" class="btn btn-sm" id="addWatchBtn">★ Add this contract</button>
       </div>
-      <!-- Manual entry — e.g. Delta Exchange crypto: the symbol picker is driven by
-           the Indian (Dhan) instrument list, so type the Delta symbol/product id here. -->
-      <details id="manualEntry" style="margin-top:8px;">
-        <summary class="muted" style="cursor:pointer; font-size:12px;">⚙️ Delta / crypto symbol search (or manual entry)</summary>
-        <div class="row" style="margin-top:6px; align-items:flex-end;">
-          <label style="position:relative;">Symbol
-            <input id="manSymbol" placeholder="type to search, e.g. BTC" autocomplete="off" />
-            <div id="manResults" style="display:none; position:absolute; top:100%; left:0; right:0; z-index:30; background:var(--panel,#fff); border:1px solid var(--border,#ccc); border-radius:6px; max-height:200px; overflow:auto;"></div>
-          </label>
-          <label>Security ID / Product <input id="manSecId" placeholder="Delta symbol or product id" /></label>
-          <label style="max-width:140px;">Segment <input id="manSeg" value="DELTA" /></label>
-          <button type="button" class="btn btn-sm" id="manApplyBtn">Use this</button>
-        </div>
-        <div class="muted" style="font-size:11px; margin-top:4px;">Start typing to search Delta Exchange products (e.g. <code>BTC</code> → <code>BTCUSD</code>), or type a symbol / numeric product id and click <b>Use this</b>. Orders route to your selected Delta trading account.</div>
-      </details>
-
       <!-- these get filled automatically when you pick a contract -->
       <input type="hidden" name="symbol" /><input type="hidden" name="security_id" />
       <input type="hidden" name="exchange_segment" /><input type="hidden" name="instrument_type" />
@@ -278,6 +265,99 @@
 
       <button type="submit" id="tradeSubmitBtn" class="btn btn-primary">Create Trade</button>
       <p id="formMsg" class="msg"></p>
+    </form>
+  </section>
+
+  <!-- FOREX / CRYPTO TRADE (Delta etc.) — tab shown only when a Forex broker is connected -->
+  <section id="tab-forex" class="tab-panel">
+    <details class="watchlist-acc">
+      <summary><span>⭐ Forex Watchlist</span><span class="acc-caret">▾</span></summary>
+      <div class="wl-body">
+        <span id="fxWatchChips" class="wl-chips"></span>
+        <span id="fxWlEmpty" class="muted" style="font-size:12px;">— search a symbol below, then “★ Add to watchlist”. Tap a chip to load it.</span>
+      </div>
+    </details>
+
+    <div id="fxProviderBanner" class="banner" style="display:none;"></div>
+
+    <form id="fxForm" class="form" onsubmit="return false;">
+      <div class="row" id="fxModeRow">
+        <div class="field" style="max-width:320px;">
+          <div class="field-label">Mode</div>
+          <div class="btn-group">
+            <button type="button" class="opt active" data-fxmode="TEST">TEST (paper)</button>
+            <button type="button" class="opt sell" data-fxmode="LIVE">LIVE (real money)</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="seg-tabs" id="fxSegTabs">
+        <button type="button" class="seg active" data-fxseg="PERP">Perpetual / Futures</button>
+        <button type="button" class="seg" data-fxseg="OPTION">Options</button>
+      </div>
+
+      <div id="fxPerpPicker">
+        <div class="row">
+          <label style="position:relative; flex:2;">Symbol <span class="muted" style="font-size:11px;">crypto — type BTC, ETH…</span>
+            <input id="fxSearch" autocomplete="off" placeholder="Search Delta symbols…" />
+            <div id="fxResults" class="dropdown"></div>
+          </label>
+        </div>
+      </div>
+
+      <div id="fxOptionPicker" style="display:none;">
+        <div id="fxUlButtons" class="seg-tabs" style="flex-wrap:wrap;"></div>
+        <div class="row">
+          <label style="max-width:240px;">Expiry <select id="fxExpiry"></select></label>
+        </div>
+        <div id="fxChainWrap" class="chain-wrap" style="display:none;">
+          <div class="chain-head"><span>CALL — CE (LTP)</span><span>Strike</span><span>PUT — PE (LTP)</span></div>
+          <div id="fxChainBody" class="chain-body"></div>
+          <div class="chain-legend">Tap any CALL or PUT to select it for your order. Live prices flow once Delta is your Data account.</div>
+        </div>
+      </div>
+
+      <div id="fxSelected" class="selected-symbol">No symbol selected yet.</div>
+      <div style="margin-top:6px;">
+        <button type="button" class="btn btn-sm" id="fxAddWatch">★ Add to watchlist</button>
+      </div>
+
+      <div class="field">
+        <div class="field-label">Side</div>
+        <div class="btn-group">
+          <button type="button" class="opt buy active" data-fxside="BUY">BUY / LONG</button>
+          <button type="button" class="opt sell" data-fxside="SELL">SELL / SHORT</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <div class="field-label">Contracts (qty)</div>
+          <div class="stepper">
+            <button type="button" class="step" id="fxQtyMinus">−</button>
+            <input id="fxQty" type="number" value="1" min="1" />
+            <button type="button" class="step" id="fxQtyPlus">+</button>
+          </div>
+        </div>
+        <div class="field">
+          <div class="field-label">Entry type</div>
+          <div class="btn-group">
+            <button type="button" class="opt active" data-fxet="MARKET">MARKET</button>
+            <button type="button" class="opt" data-fxet="LIMIT">LIMIT</button>
+          </div>
+        </div>
+        <label id="fxEntryPriceWrap">Entry price
+          <input id="fxEntryPrice" type="number" step="0.0001" value="0" disabled />
+        </label>
+      </div>
+
+      <div class="row">
+        <label>Stop-loss (points) <input id="fxSl" type="number" step="0.0001" value="0" /></label>
+        <label>Target (points) <input id="fxTarget" type="number" step="0.0001" value="0" /></label>
+      </div>
+
+      <button type="button" id="fxSubmit" class="btn btn-primary">Create Forex Trade</button>
+      <p id="fxMsg" class="msg"></p>
     </form>
   </section>
 
