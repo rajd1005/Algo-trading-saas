@@ -485,16 +485,24 @@ class DeltaBroker:
             return []
 
     def fund_limit(self):
-        """(ok, available_balance). Prefers the INR/USDT settling wallet."""
+        """(ok, available_balance). The margin pool = USD-like settling assets
+        (USD/USDT/USDC), summed. Falls back to the largest available balance across
+        all assets. (Must NOT just pick a 'preferred' asset that's empty — funds may
+        be in USD while INR is zero.)"""
         try:
             r = self._request("GET", "/v2/wallet/balances", timeout=6)
             rows = r.json().get("result", []) if r.status_code == 200 else []
             if not rows:
                 return (r.status_code == 200), 0.0
-            pref = {"INR": 0, "USDT": 1, "USDC": 2, "USD": 3}
-            rows.sort(key=lambda w: pref.get(str(w.get("asset_symbol", "")).upper(), 9))
-            bal = rows[0].get("available_balance") or rows[0].get("balance") or 0
-            return True, float(bal)
+
+            def av(w):
+                try:
+                    return float(w.get("available_balance") or w.get("balance") or 0)
+                except Exception:
+                    return 0.0
+            usd = sum(av(w) for w in rows
+                      if str(w.get("asset_symbol", "")).upper() in ("USD", "USDT", "USDC"))
+            return True, usd if usd > 0 else max((av(w) for w in rows), default=0.0)
         except Exception:
             return False, 0.0
 
