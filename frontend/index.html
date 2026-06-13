@@ -291,11 +291,30 @@
         </div>
       </div>
 
-      <div class="row">
-        <label style="position:relative; flex:2;">Symbol <span class="muted" style="font-size:11px;">crypto — type BTC, ETH…</span>
-          <input id="fxSearch" autocomplete="off" placeholder="Search Delta symbols…" />
-          <div id="fxResults" class="dropdown"></div>
-        </label>
+      <div class="seg-tabs" id="fxSegTabs">
+        <button type="button" class="seg active" data-fxseg="PERP">Perpetual / Futures</button>
+        <button type="button" class="seg" data-fxseg="OPTION">Options</button>
+      </div>
+
+      <div id="fxPerpPicker">
+        <div class="row">
+          <label style="position:relative; flex:2;">Symbol <span class="muted" style="font-size:11px;">crypto — type BTC, ETH…</span>
+            <input id="fxSearch" autocomplete="off" placeholder="Search Delta symbols…" />
+            <div id="fxResults" class="dropdown"></div>
+          </label>
+        </div>
+      </div>
+
+      <div id="fxOptionPicker" style="display:none;">
+        <div id="fxUlButtons" class="seg-tabs" style="flex-wrap:wrap;"></div>
+        <div class="row">
+          <label style="max-width:240px;">Expiry <select id="fxExpiry"></select></label>
+        </div>
+        <div id="fxChainWrap" class="chain-wrap" style="display:none;">
+          <div class="chain-head"><span>CALL — CE (LTP)</span><span>Strike</span><span>PUT — PE (LTP)</span></div>
+          <div id="fxChainBody" class="chain-body"></div>
+          <div class="chain-legend">Tap any CALL or PUT to select it for your order. Live prices flow once Delta is your Data account.</div>
+        </div>
       </div>
 
       <div id="fxSelected" class="selected-symbol">No symbol selected yet.</div>

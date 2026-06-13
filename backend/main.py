@@ -1061,6 +1061,34 @@ def forex_search(q: str = "", limit: int = 25, broker: str = "DELTA"):
     return []
 
 
+@app.get("/api/forex/underlyings")
+def forex_underlyings(broker: str = "DELTA"):
+    """Underlyings that have an options chain on the forex broker (e.g. BTC, ETH)."""
+    if broker.upper() == "DELTA":
+        return delta.mapper.option_underlyings()
+    return []
+
+
+@app.get("/api/forex/expiries")
+def forex_expiries(underlying: str, broker: str = "DELTA"):
+    if broker.upper() == "DELTA":
+        return delta.mapper.option_expiries(underlying)
+    return []
+
+
+@app.get("/api/forex/optionchain")
+def forex_option_chain(underlying: str, expiry: str = "", broker: str = "DELTA"):
+    """Strikes (CALL/PUT contracts) for a forex underlying + expiry — same shape as
+    the India option chain so the front-end can render it the same way."""
+    if broker.upper() != "DELTA":
+        return {"underlying": underlying, "expiry": expiry, "expiries": [], "strikes": []}
+    exps = delta.mapper.option_expiries(underlying)
+    if not expiry and exps:
+        expiry = exps[0]
+    return {"underlying": underlying, "expiry": expiry, "expiries": exps,
+            "strikes": delta.mapper.option_chain(underlying, expiry)}
+
+
 @app.get("/api/expiries")
 def expiries(underlying: str, kind: str = "OPTION"):
     return instruments.expiries(underlying, kind.upper())

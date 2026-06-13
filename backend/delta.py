@@ -92,6 +92,7 @@ class DeltaMapper:
         self._lock = threading.Lock()
         self._by_symbol = {}     # "BTCUSD" -> row
         self._by_id = {}         # "27" -> row
+        self._opt = {}           # underlying -> expiry -> strike -> {"CE": o, "PE": o}
         self.loaded_at = None
         self.loading = False
         self.last_error = ""
@@ -122,7 +123,7 @@ class DeltaMapper:
         if self.loading:
             return
         self.loading = True
-        by_symbol, by_id = {}, {}
+        by_symbol, by_id, opt = {}, {}, {}
         try:
             after = None
             for _ in range(40):                 # safety cap on pagination
@@ -140,19 +141,22 @@ class DeltaMapper:
                     pid = p.get("id")
                     if not sym or pid is None:
                         continue
+                    ctype = str(p.get("contract_type", ""))
                     row = {"product_id": int(pid), "symbol": sym,
                            "contract_value": p.get("contract_value"),
                            "tick_size": p.get("tick_size"),
-                           "contract_type": p.get("contract_type"),
+                           "contract_type": ctype,
                            "lot_size": 1}
                     by_symbol[sym] = row
                     by_id[str(pid)] = row
+                    if ctype in ("call_options", "put_options"):
+                        self._index_option(opt, p, sym, int(pid), ctype)
                 after = (d.get("meta") or {}).get("after")
                 if not after:
                     break
             if by_id:
                 with self._lock:
-                    self._by_symbol, self._by_id = by_symbol, by_id
+                    self._by_symbol, self._by_id, self._opt = by_symbol, by_id, opt
                 self.loaded_at = dt.datetime.utcnow()
                 self.last_error = ""
             elif not self.last_error:
@@ -200,8 +204,58 @@ class DeltaMapper:
                 starts = 0 if sym.startswith(terms[0]) else 1
                 out.append((starts, len(sym), sym, r))
         out.sort(key=lambda x: (x[0], x[1], x[2]))
+        # Options are picked via the chain, not free-text search — keep them out.
         return [{"symbol": r["symbol"], "product_id": r["product_id"],
-                 "contract_type": r.get("contract_type", "")} for _, _, _, r in out[:limit]]
+                 "contract_type": r.get("contract_type", "")}
+                for _, _, _, r in out[:limit]
+                if not str(r.get("contract_type", "")).endswith("options")]
+
+    # ---------- options chain ----------
+    @staticmethod
+    def _index_option(opt, p, sym, pid, ctype):
+        """Add one Delta option product to the chain index (opt[under][exp][strike])."""
+        ua = p.get("underlying_asset")
+        under = (ua.get("symbol") if isinstance(ua, dict) else "") or ""
+        if not under:                          # fallback: 'C-BTC-95000-280625' -> BTC
+            parts = sym.split("-")
+            under = parts[1] if len(parts) >= 2 else ""
+        under = under.upper()
+        expiry = str(p.get("settlement_time") or "")[:10]
+        try:
+            strike = int(round(float(p.get("strike_price") or 0)))
+        except Exception:
+            strike = 0
+        if not under or not expiry or not strike:
+            return
+        otype = "CE" if ctype == "call_options" else "PE"
+        opt.setdefault(under, {}).setdefault(expiry, {}).setdefault(strike, {})[otype] = \
+            {"symbol": sym, "product_id": pid}
+
+    @staticmethod
+    def _opt_slim(o):
+        if not o:
+            return None
+        return {"symbol": o["symbol"], "security_id": o["symbol"],
+                "exchange_segment": SEGMENT, "instrument_type": "OPTION",
+                "lot_size": 1, "product_id": o["product_id"]}
+
+    def option_underlyings(self):
+        with self._lock:
+            return sorted(self._opt.keys())
+
+    def option_expiries(self, underlying):
+        with self._lock:
+            exps = sorted((self._opt.get((underlying or "").upper()) or {}).keys())
+        today = dt.datetime.utcnow().strftime("%Y-%m-%d")
+        return [e for e in exps if e and e >= today]
+
+    def option_chain(self, underlying, expiry):
+        with self._lock:
+            by_strike = (self._opt.get((underlying or "").upper()) or {}).get(expiry, {})
+            rows = [{"strike": s, "ce": self._opt_slim(by_strike[s].get("CE")),
+                     "pe": self._opt_slim(by_strike[s].get("PE"))}
+                    for s in sorted(by_strike.keys())]
+        return rows
 
 
 mapper = DeltaMapper()

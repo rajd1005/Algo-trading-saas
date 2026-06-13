@@ -1062,6 +1062,105 @@ function fxStartLtp() {
   run(); FX.ltpTimer = setInterval(run, 3000);
 }
 
+// ---- options chain (Delta) ----
+let fxChainData = [], fxChainTimer = null, fxUnderlying = null;
+document.querySelectorAll("[data-fxseg]").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("[data-fxseg]").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  const opt = b.dataset.fxseg === "OPTION";
+  document.getElementById("fxPerpPicker").style.display = opt ? "none" : "";
+  document.getElementById("fxOptionPicker").style.display = opt ? "" : "none";
+  if (opt) { if (!document.getElementById("fxUlButtons").children.length) fxLoadUnderlyings(); }
+  else if (fxChainTimer) { clearInterval(fxChainTimer); fxChainTimer = null; }
+});
+
+async function fxLoadUnderlyings() {
+  const box = document.getElementById("fxUlButtons");
+  let uls = [];
+  try { uls = await api.get(`/api/forex/underlyings?broker=${FX.broker}`); } catch {}
+  if (!uls.length) {
+    box.innerHTML = `<span class="muted" style="font-size:12px;">No options found yet (the product list may still be loading).</span>`;
+    return;
+  }
+  box.innerHTML = uls.map((u) => `<button type="button" class="seg" data-fxul="${u}">${u}</button>`).join("");
+  box.querySelectorAll("[data-fxul]").forEach((el) => el.onclick = () => fxSelectUnderlying(el.dataset.fxul));
+}
+
+async function fxSelectUnderlying(u) {
+  fxUnderlying = u;
+  document.querySelectorAll("[data-fxul]").forEach((x) => x.classList.toggle("active", x.dataset.fxul === u));
+  let exps = [];
+  try { exps = await api.get(`/api/forex/expiries?broker=${FX.broker}&underlying=` + encodeURIComponent(u)); } catch {}
+  const sel = document.getElementById("fxExpiry");
+  sel.innerHTML = exps.map((e) => `<option>${e}</option>`).join("");
+  if (exps.length) fxLoadChain(u, exps[0]);
+  else { document.getElementById("fxChainWrap").style.display = "none"; }
+}
+document.getElementById("fxExpiry").onchange = () => { if (fxUnderlying) fxLoadChain(fxUnderlying, document.getElementById("fxExpiry").value); };
+
+async function fxLoadChain(underlying, expiry) {
+  let data; try { data = await api.get(`/api/forex/optionchain?broker=${FX.broker}&underlying=${encodeURIComponent(underlying)}&expiry=${encodeURIComponent(expiry)}`); } catch { return; }
+  fxChainData = data.strikes || [];
+  const body = document.getElementById("fxChainBody");
+  body.innerHTML = fxChainData.map((row, i) => {
+    const cell = (c, cls) => c
+      ? `<div class="chain-cell ${cls}" data-c='${JSON.stringify(c)}'><span class="ltp dim" data-ltp="${c.security_id}">tap to pick</span></div>`
+      : `<div class="chain-cell ${cls}"><span class="ltp dim">-</span></div>`;
+    return `<div class="chain-row" data-row="${i}">${cell(row.ce, "ce")}
+      <div class="chain-strike">${row.strike}</div>${cell(row.pe, "pe")}</div>`;
+  }).join("");
+  document.getElementById("fxChainWrap").style.display = fxChainData.length ? "block" : "none";
+  body.querySelectorAll(".chain-cell[data-c]").forEach((el) => {
+    el.onclick = () => {
+      body.querySelectorAll(".chain-cell.sel").forEach((x) => x.classList.remove("sel"));
+      el.classList.add("sel");
+      fxSet(JSON.parse(el.dataset.c));
+    };
+  });
+  fxChainLtp();
+  if (fxChainTimer) clearInterval(fxChainTimer);
+  fxChainTimer = setInterval(fxChainLtp, 5000);
+}
+
+async function fxChainLtp() {
+  if (document.body.getAttribute("data-tab") !== "forex") return;
+  const body = document.getElementById("fxChainBody");
+  const cells = [...body.querySelectorAll(".chain-cell[data-c]")].slice(0, 500);
+  if (!cells.length) return;
+  const items = cells.map((el) => { const c = JSON.parse(el.dataset.c);
+    return { security_id: c.security_id, exchange_segment: c.exchange_segment }; });
+  let res; try { res = await api.post("/api/ltp", { items }); } catch { return; }
+  const prices = res.prices || {};
+  body.querySelectorAll(".ltp[data-ltp]").forEach((sp) => {
+    const p = prices[sp.dataset.ltp]; if (p != null) { sp.textContent = p; sp.classList.remove("dim"); }
+  });
+  fxClassifyChain(prices);
+}
+
+// Mark ATM (closest CALL/PUT premium) + ITM/OTM shading, like the India chain.
+function fxClassifyChain(prices) {
+  let atm = -1, best = Infinity;
+  fxChainData.forEach((row, i) => {
+    if (!row.ce || !row.pe) return;
+    const ce = prices[row.ce.security_id], pe = prices[row.pe.security_id];
+    if (ce == null || pe == null || ce <= 0 || pe <= 0) return;
+    const diff = Math.abs(ce - pe);
+    if (diff < best) { best = diff; atm = i; }
+  });
+  if (atm < 0) return;
+  const atmStrike = fxChainData[atm].strike;
+  const body = document.getElementById("fxChainBody");
+  fxChainData.forEach((row, i) => {
+    const el = body.querySelector(`.chain-row[data-row="${i}"]`); if (!el) return;
+    const ceCell = el.querySelector(".chain-cell.ce"), peCell = el.querySelector(".chain-cell.pe");
+    el.classList.toggle("atm", i === atm);
+    if (ceCell) { ceCell.classList.toggle("itm", row.strike < atmStrike); ceCell.classList.toggle("otm", row.strike > atmStrike); }
+    if (peCell) { peCell.classList.toggle("itm", row.strike > atmStrike); peCell.classList.toggle("otm", row.strike < atmStrike); }
+    const sCell = el.querySelector(".chain-strike");
+    if (sCell) sCell.innerHTML = row.strike + (i === atm ? ' <span class="atm-badge">ATM</span>' : "");
+  });
+}
+
 document.getElementById("fxSubmit").onclick = async () => {
   const msg = document.getElementById("fxMsg");
   if (!FX.sel) { msg.textContent = "❌ Search and select a symbol first."; msg.className = "msg neg"; return; }
