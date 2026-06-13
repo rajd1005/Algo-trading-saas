@@ -1015,7 +1015,8 @@ def close_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
     price = t.last_price or t.entry_fill_price
     direction = 1 if t.side == "BUY" else -1
     remaining = t.quantity - (t.exited_qty or 0)
-    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+    pv = delta.point_value(t.exchange_segment, t.security_id)   # contract value (1.0 for equity)
+    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
     t.exited_qty = t.quantity
     t.exit_fill_price = price
     t.status = "CLOSED"

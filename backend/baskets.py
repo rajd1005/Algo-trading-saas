@@ -261,7 +261,9 @@ def _exit_trade(db, t, broker, price, reason):
     if not res.ok:
         _log(db, t.user_id, f"Basket square-off failed for {t.symbol}: {res.error}", "ERROR", t.id)
         return False
-    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+    import delta
+    pv = delta.point_value(t.exchange_segment, t.security_id)   # contract value (1.0 for equity)
+    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
     t.exited_qty = t.quantity
     t.exit_fill_price = res.fill_price
     t.status = "CLOSED"

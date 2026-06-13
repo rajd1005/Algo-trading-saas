@@ -1053,14 +1053,17 @@ function fxSet(sel) {
 }
 function fxPick(r) {
   fxSet({ symbol: r.symbol, security_id: r.symbol, exchange_segment: FOREX_SEGMENT_FOR[FX.broker] || "DELTA",
-          instrument_type: "FUTURES", product_id: r.product_id });
+          instrument_type: "FUTURES", product_id: r.product_id, contract_value: r.contract_value });
 }
 function fxShowSelected(px) {
   const el = document.getElementById("fxSelected");
   if (!FX.sel) { el.textContent = "No symbol selected yet."; return; }
   const pxTxt = px === "LOADING" ? '<span class="muted">fetching price…</span>'
     : (px > 0 ? `LTP <b>${px}</b>` : '<span class="muted">price unavailable — set this broker as your Data account</span>');
-  el.innerHTML = `✅ <b>${FX.sel.symbol}</b> — ${FX.broker}${FX.sel.product_id ? " · id " + FX.sel.product_id : ""} — ${pxTxt}`;
+  // Show the contract value so the point math is clear: P&L = qty × contract_value × move.
+  const cv = parseFloat(FX.sel.contract_value);
+  const cvTxt = cv > 0 ? ` · <span class="muted">1 contract = ${FX.sel.contract_value}; P&L = qty × ${FX.sel.contract_value} × points</span>` : "";
+  el.innerHTML = `✅ <b>${FX.sel.symbol}</b> — ${FX.broker}${FX.sel.product_id ? " · id " + FX.sel.product_id : ""} — ${pxTxt}${cvTxt}`;
 }
 function fxStartLtp() {
   if (FX.ltpTimer) { clearInterval(FX.ltpTimer); FX.ltpTimer = null; }
