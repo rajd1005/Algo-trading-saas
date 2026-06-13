@@ -106,6 +106,7 @@ class Trade(Base):
     side = Column(String, default="BUY")           # BUY (long) or SELL (short)
     quantity = Column(Integer, default=1)
     lot_size = Column(Integer, default=1)           # contract lot size (for lots math)
+    leverage = Column(Float, default=0.0)           # forex/crypto leverage (0 = broker default)
 
     # --- Entry / Exit rules ---
     entry_type = Column(String, default="MARKET")  # MARKET / LIMIT / SCHEDULED / TRIGGER

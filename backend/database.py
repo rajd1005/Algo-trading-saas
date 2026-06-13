@@ -44,6 +44,7 @@ _MIGRATIONS = {
         "exited_qty": "INTEGER DEFAULT 0",
         "realized_pnl": "REAL DEFAULT 0",
         "lot_size": "INTEGER DEFAULT 1",
+        "leverage": "REAL DEFAULT 0",
         "trail_sl": "REAL DEFAULT 0",
         "trail_mode": "TEXT DEFAULT 'CONTINUE'",
         "hwm": "REAL DEFAULT 0",
