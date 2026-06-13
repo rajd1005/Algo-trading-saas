@@ -521,6 +521,29 @@ class DeltaBroker:
         except Exception:
             return []
 
+    def open_positions(self):
+        """(ok, {product_id: net_size}) for products with a non-zero open position.
+        ok=False if the fetch failed, so callers never treat an error as 'flat' and
+        wrongly close trades."""
+        try:
+            r = self._request("GET", "/v2/positions/margined", timeout=6)
+            if r.status_code != 200:
+                return False, {}
+            d = r.json()
+            rows = d.get("result", []) if isinstance(d, dict) else []
+            out = {}
+            for p in rows or []:
+                try:
+                    size = int(p.get("size") or 0)
+                except Exception:
+                    size = 0
+                pid = p.get("product_id")
+                if pid is not None and size != 0:
+                    out[int(pid)] = size
+            return True, out
+        except Exception:
+            return False, {}
+
     def get_orders(self):
         """Recent order book (live + history), normalized to the Dhan-like shape."""
         out = []

@@ -693,10 +693,48 @@ def _broker_monitor_loop():
                     _sync_external_orders(db, b.get_orders(), acc.broker, acc.id, u.id)
                 except Exception:
                     pass
+                # Delta tracks net POSITIONS, not per-order; reconcile so trades that
+                # were closed in the broker app stop showing OPEN here.
+                if acc.broker == "DELTA":
+                    try:
+                        _reconcile_delta_positions(db, b, acc.id, u.id)
+                    except Exception:
+                        pass
             db.commit()
             db.close()
         except Exception:
             pass
+
+
+def _reconcile_delta_positions(db, broker, account_id, user_id):
+    """Close OPEN Delta trades whose product no longer has an open position on the
+    broker (the user closed/squared-off in the Delta app). Delta nets positions per
+    product, so once a product is flat we close every OPEN trade we hold on it."""
+    ok, open_pos = broker.open_positions()
+    if not ok:
+        return            # couldn't read positions — never assume 'flat'
+    open_trades = (db.query(Trade)
+                   .filter(Trade.account_id == account_id, Trade.status == "OPEN").all())
+    for t in open_trades:
+        if t.exchange_segment != delta.SEGMENT:
+            continue
+        row = delta.mapper.resolve(t.security_id)
+        pid = row.get("product_id") if row else None
+        if pid is None or int(pid) in open_pos:
+            continue      # still open on the broker
+        price = t.last_price or t.entry_fill_price
+        direction = 1 if t.side == "BUY" else -1
+        remaining = t.quantity - (t.exited_qty or 0)
+        pv = delta.point_value(t.exchange_segment, t.security_id)
+        t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
+        t.exited_qty = t.quantity
+        t.exit_fill_price = price
+        t.status = "CLOSED"
+        t.exit_reason = "BROKER CLOSE"
+        t.pnl = round(t.realized_pnl, 2)
+        db.add(LogEntry(message=f"Closed {t.symbol} — no open position on Delta "
+                                f"(squared off in the broker app). P&L={t.pnl}",
+                        level="INFO", trade_id=t.id, user_id=user_id))
 
 
 def _purge_loop():
