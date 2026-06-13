@@ -79,7 +79,10 @@ class BaseFeed:
         self.connected = False
 
     def _run_loop(self):
-        backoff = 3
+        # WebSocket is the default price source for every broker. If it drops we keep
+        # retrying for as long as the feed is alive, so the moment it reconnects the
+        # app auto-switches back from the REST ("1-second") fallback to real-time.
+        backoff = 2
         while self._running:
             try:
                 self._ws = websocket.WebSocketApp(
@@ -88,14 +91,14 @@ class BaseFeed:
                     on_error=self._on_error, on_close=self._on_close)
                 # A connection that opened resets the backoff; one that fails fast grows it.
                 started = time.time()
-                self._ws.run_forever(ping_interval=25, ping_timeout=10)
-                backoff = 3 if (time.time() - started) > 30 else min(backoff * 2, 30)
+                self._ws.run_forever(ping_interval=20, ping_timeout=10)
+                backoff = 2 if (time.time() - started) > 20 else min(backoff * 2, 10)
             except Exception as e:
                 self.last_error = str(e)
-                backoff = min(backoff * 2, 30)
+                backoff = min(backoff * 2, 10)
             self.connected = False
             if self._running:
-                time.sleep(backoff)    # exponential backoff so a bad socket can't hammer
+                time.sleep(backoff)    # short, capped backoff: persistent but no hammering
 
     # ---- reads / subscriptions (used by the manager) ----
     def subscribe(self, instruments):
@@ -514,9 +517,11 @@ class FeedManager:
         f = self._feeds.get(account_id)
         return f.snapshot(instruments) if f else {}
 
-    # Consider the socket "streaming" only if a real tick arrived recently — a
-    # connected-but-silent socket must NOT be shown as live real-time prices.
-    FRESH_SECS = 6
+    # A connected socket IS the real-time source, so treat it as "streaming" (WebSocket)
+    # while it's connected and has ticked within this window. The window is generous so
+    # brief gaps between ticks don't flap the banner back to the REST ("1-second") label;
+    # a genuinely dead socket is detected by the ping timeout (~30s) and drops `connected`.
+    FRESH_SECS = 25
 
     def status(self, account_id):
         f = self._feeds.get(account_id)

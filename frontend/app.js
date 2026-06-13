@@ -954,12 +954,15 @@ const isForexItem = (w) => FOREX_SEGMENTS.includes(w.exchange_segment);
 
 function fxApplyBrokerState(b) {
   const fb = (b && b.forex_brokers) || ["DELTA"];
-  const acc = (b && b.accounts || []).find((a) => a.connected && fb.includes(a.broker));
-  FX.account = acc || null;
+  // Show the Forex tab once a Forex broker has been SET UP (credentials saved),
+  // not only after it connects. Prefer a connected account for trading.
+  const forexAccts = (b && b.accounts || []).filter((a) => fb.includes(a.broker) && (a.connected || a.has_secret));
+  const acc = forexAccts.find((a) => a.connected) || forexAccts[0] || null;
+  FX.account = acc;
   FX.broker = acc ? acc.broker : "DELTA";
   const tab = document.querySelector('.tab[data-tab="forex"]');
   if (tab) tab.style.display = acc ? "" : "none";
-  // If the Forex broker disconnects while its tab is open, fall back to Orders.
+  // If the Forex broker is removed while its tab is open, fall back to Orders.
   if (!acc && document.body.getAttribute("data-tab") === "forex") {
     const ot = document.querySelector('.tab[data-tab="dashboard"]'); if (ot) ot.click();
   }
@@ -971,13 +974,21 @@ function fxRenderBanner(b) {
   if (!banner) return;
   if (!FX.account) { FX.onForex = false; banner.style.display = "none"; return; }
   const id = String(FX.account.id);
+  banner.style.display = "block";
+  if (!FX.account.connected) {                 // set up but not authenticated yet
+    FX.onForex = false;
+    banner.className = "banner";
+    banner.innerHTML = `⚠️ ${FX.account.label} is not connected yet. Open the ` +
+      `<span class="link" onclick="document.querySelector('.tab[data-tab=&quot;broker&quot;]').click()">Broker</span> tab and click <b>Login</b> to trade crypto.`;
+    return;
+  }
   const onForex = String(b.trade_provider || "") === id && String(b.data_provider || "") === id;
   FX.onForex = onForex;
   if (onForex) {
-    banner.className = "banner ok"; banner.style.display = "block";
+    banner.className = "banner ok";
     banner.textContent = `✅ Crypto prices & orders are routing to ${FX.account.label}.`;
   } else {
-    banner.className = "banner"; banner.style.display = "block";
+    banner.className = "banner";
     banner.innerHTML = `⚠️ Live prices & orders here need ${FX.account.label} set as your Data + Trading account. ` +
       `<button type="button" class="btn btn-sm" id="fxUseProvider">Use ${FX.account.label}</button>`;
     const btn = document.getElementById("fxUseProvider");

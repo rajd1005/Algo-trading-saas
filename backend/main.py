@@ -1403,18 +1403,23 @@ def _build_summary(db, uid, broker="ALL", date=""):
             and uget(db, uid, "broker_balance_provider", "") == str(trade_acc.id):
         bal = uget(db, uid, "broker_balance", "")
         balance = float(bal) if bal else None
-    # Keep the price-feed banner honest: only call it "real-time (WebSocket)"
-    # if the data account's socket is actually delivering fresh ticks right now.
+    # Keep the price-feed banner honest AND live: the WebSocket is the default source
+    # for every broker, so whenever the data account's socket is actually streaming we
+    # show "real-time (WebSocket)" — even if the last stored status was the REST
+    # ("1-second") fallback. This makes the banner auto-switch back to WS the moment the
+    # socket (which retries continuously) reconnects. If it's not streaming, a stale
+    # "ok:ws" is downgraded to the REST label.
     md_status = uget(db, uid, "md_status", "")
-    if md_status == "ok:ws":
+    if data_acc is not None:
         streaming = False
-        if data_acc is not None:
-            try:
-                streaming = feeds.manager.status(data_acc.id).get("streaming", False)
-            except Exception:
-                streaming = False
-        if not streaming:
-            md_status = "ok:rest" if data_acc is not None else "ok:demo"
+        try:
+            streaming = feeds.manager.status(data_acc.id).get("streaming", False)
+        except Exception:
+            streaming = False
+        if streaming:
+            md_status = "ok:ws"
+        elif md_status == "ok:ws":
+            md_status = "ok:rest"
 
     broker_alert, alert_msg = False, ""
     if trade_acc is not None and active > 0:
