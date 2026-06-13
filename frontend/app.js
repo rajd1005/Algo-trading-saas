@@ -944,6 +944,182 @@ form.onsubmit = async (e) => {
   } catch (err) { msg.textContent = "❌ " + err.message; msg.className = "msg neg"; }
 };
 
+// ====================== FOREX / CRYPTO TRADE (Delta etc.) ======================
+// Self-contained tab: its own symbol search, order form and watchlist. Shown only
+// when a Forex-category broker is connected. Orders use the same /api/trades engine.
+const FOREX_SEGMENTS = ["DELTA"];
+const FOREX_SEGMENT_FOR = { DELTA: "DELTA" };
+const FX = { mode: "TEST", side: "BUY", et: "MARKET", broker: "DELTA", account: null, sel: null, ltpTimer: null };
+const isForexItem = (w) => FOREX_SEGMENTS.includes(w.exchange_segment);
+
+function fxApplyBrokerState(b) {
+  const fb = (b && b.forex_brokers) || ["DELTA"];
+  const acc = (b && b.accounts || []).find((a) => a.connected && fb.includes(a.broker));
+  FX.account = acc || null;
+  FX.broker = acc ? acc.broker : "DELTA";
+  const tab = document.querySelector('.tab[data-tab="forex"]');
+  if (tab) tab.style.display = acc ? "" : "none";
+  // If the Forex broker disconnects while its tab is open, fall back to Orders.
+  if (!acc && document.body.getAttribute("data-tab") === "forex") {
+    const ot = document.querySelector('.tab[data-tab="dashboard"]'); if (ot) ot.click();
+  }
+  fxRenderBanner(b);
+}
+
+function fxRenderBanner(b) {
+  const banner = document.getElementById("fxProviderBanner");
+  if (!banner) return;
+  if (!FX.account) { FX.onForex = false; banner.style.display = "none"; return; }
+  const id = String(FX.account.id);
+  const onForex = String(b.trade_provider || "") === id && String(b.data_provider || "") === id;
+  FX.onForex = onForex;
+  if (onForex) {
+    banner.className = "banner ok"; banner.style.display = "block";
+    banner.textContent = `✅ Crypto prices & orders are routing to ${FX.account.label}.`;
+  } else {
+    banner.className = "banner"; banner.style.display = "block";
+    banner.innerHTML = `⚠️ Live prices & orders here need ${FX.account.label} set as your Data + Trading account. ` +
+      `<button type="button" class="btn btn-sm" id="fxUseProvider">Use ${FX.account.label}</button>`;
+    const btn = document.getElementById("fxUseProvider");
+    if (btn) btn.onclick = async () => {
+      try {
+        await api.post("/api/providers", { data_provider: id, trade_provider: id });
+        toast("✅ Switched to " + FX.account.label, "pos"); await refreshBroker();
+      } catch (e) { toast("❌ " + e.message, "neg"); }
+    };
+  }
+}
+
+// mode / side / entry-type toggles
+document.querySelectorAll("[data-fxmode]").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("[data-fxmode]").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active"); FX.mode = b.dataset.fxmode;
+});
+document.querySelectorAll("[data-fxside]").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("[data-fxside]").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active"); FX.side = b.dataset.fxside;
+});
+document.querySelectorAll("[data-fxet]").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("[data-fxet]").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active"); FX.et = b.dataset.fxet;
+  document.getElementById("fxEntryPrice").disabled = FX.et !== "LIMIT";
+});
+document.getElementById("fxQtyMinus").onclick = () => { const i = document.getElementById("fxQty"); i.value = Math.max(1, (parseInt(i.value) || 1) - 1); };
+document.getElementById("fxQtyPlus").onclick = () => { const i = document.getElementById("fxQty"); i.value = (parseInt(i.value) || 1) + 1; };
+
+// symbol search
+let fxTimer = null;
+document.getElementById("fxSearch").addEventListener("input", () => {
+  clearTimeout(fxTimer);
+  const box = document.getElementById("fxResults");
+  const q = document.getElementById("fxSearch").value.trim();
+  if (q.length < 2) { box.classList.remove("show"); box.innerHTML = ""; return; }
+  fxTimer = setTimeout(async () => {
+    let rows = [];
+    try { rows = await api.get(`/api/forex/search?broker=${FX.broker}&q=` + encodeURIComponent(q)); } catch {}
+    if (!rows.length) {
+      box.innerHTML = `<div class="item"><div class="meta">No matches (product list may still be loading).</div></div>`;
+    } else {
+      box.innerHTML = rows.map((r, i) => `<div class="item" data-i="${i}">
+        <div class="sym">${r.symbol}</div>
+        <div class="meta">${r.contract_type || "product"} · id ${r.product_id}</div></div>`).join("");
+      box.querySelectorAll(".item").forEach((el) => { const r = rows[el.dataset.i]; if (r) el.onclick = () => fxPick(r); });
+    }
+    box.classList.add("show");
+  }, 250);
+});
+document.addEventListener("click", (e) => {
+  const box = document.getElementById("fxResults"), inp = document.getElementById("fxSearch");
+  if (box && inp && !inp.contains(e.target) && !box.contains(e.target)) box.classList.remove("show");
+});
+
+function fxSet(sel) {
+  FX.sel = sel;
+  document.getElementById("fxSearch").value = sel.symbol;
+  document.getElementById("fxResults").classList.remove("show");
+  fxShowSelected("LOADING");
+  fxStartLtp();
+}
+function fxPick(r) {
+  fxSet({ symbol: r.symbol, security_id: r.symbol, exchange_segment: FOREX_SEGMENT_FOR[FX.broker] || "DELTA",
+          instrument_type: "FUTURES", product_id: r.product_id });
+}
+function fxShowSelected(px) {
+  const el = document.getElementById("fxSelected");
+  if (!FX.sel) { el.textContent = "No symbol selected yet."; return; }
+  const pxTxt = px === "LOADING" ? '<span class="muted">fetching price…</span>'
+    : (px > 0 ? `LTP <b>${px}</b>` : '<span class="muted">price unavailable — set this broker as your Data account</span>');
+  el.innerHTML = `✅ <b>${FX.sel.symbol}</b> — ${FX.broker}${FX.sel.product_id ? " · id " + FX.sel.product_id : ""} — ${pxTxt}`;
+}
+function fxStartLtp() {
+  if (FX.ltpTimer) { clearInterval(FX.ltpTimer); FX.ltpTimer = null; }
+  const run = async () => {
+    if (!FX.sel) return;
+    let res; try { res = await api.post("/api/ltp", { items: [{ security_id: FX.sel.security_id, exchange_segment: FX.sel.exchange_segment }] }); } catch { return; }
+    const p = (res.prices || {})[FX.sel.security_id];
+    if (p != null) fxShowSelected(p);
+  };
+  run(); FX.ltpTimer = setInterval(run, 3000);
+}
+
+document.getElementById("fxSubmit").onclick = async () => {
+  const msg = document.getElementById("fxMsg");
+  if (!FX.sel) { msg.textContent = "❌ Search and select a symbol first."; msg.className = "msg neg"; return; }
+  if (FX.mode === "LIVE" && !FX.onForex) {
+    msg.textContent = `❌ Set ${FX.account ? FX.account.label : "your crypto broker"} as the Data + Trading account first (use the banner above), or a LIVE order would route to the wrong broker.`;
+    msg.className = "msg neg"; return;
+  }
+  const payload = {
+    mode: FX.mode, symbol: FX.sel.symbol, security_id: FX.sel.security_id,
+    exchange_segment: FX.sel.exchange_segment, instrument_type: FX.sel.instrument_type,
+    side: FX.side, quantity: Math.max(1, parseInt(document.getElementById("fxQty").value) || 1),
+    lot_size: 1, entry_type: FX.et,
+    entry_price: parseFloat(document.getElementById("fxEntryPrice").value) || 0,
+    sl_points: parseFloat(document.getElementById("fxSl").value) || 0,
+    target_points: parseFloat(document.getElementById("fxTarget").value) || 0,
+  };
+  try {
+    const t = await api.post("/api/trades", payload);
+    msg.textContent = `✅ Created trade #${t.id} (${t.symbol}).`; msg.className = "msg pos";
+    toast(`✅ Forex trade #${t.id} — ${t.symbol}`, "pos");
+    await refreshAll();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+
+document.getElementById("fxAddWatch").onclick = async () => {
+  const msg = document.getElementById("fxMsg");
+  if (!FX.sel) { msg.textContent = "❌ Select a symbol first."; msg.className = "msg neg"; return; }
+  try {
+    await api.post("/api/watchlist", { symbol: FX.sel.symbol, security_id: FX.sel.security_id,
+      exchange_segment: FX.sel.exchange_segment, instrument_type: FX.sel.instrument_type,
+      underlying: FX.sel.symbol, lot_size: 1 });
+    toast(`⭐ ${FX.sel.symbol} added to watchlist`, "pos");
+    await loadWatchlist();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
+};
+
+function fxRenderWatch(items) {
+  const box = document.getElementById("fxWatchChips"), empty = document.getElementById("fxWlEmpty");
+  if (!box || !empty) return;
+  if (!items.length) { box.innerHTML = ""; empty.style.display = ""; return; }
+  empty.style.display = "none";
+  box.innerHTML = items.map((w) =>
+    `<span class="wl-chip" data-fxwl="${w.id}" title="${w.exchange_segment} · ${w.security_id}">${w.symbol}<span class="wl-x" data-fxwlx="${w.id}">×</span></span>`).join("");
+  box.querySelectorAll(".wl-chip").forEach((el) => {
+    el.onclick = (e) => { if (e.target.classList.contains("wl-x")) return;
+      const w = items.find((x) => String(x.id) === el.dataset.fxwl); if (w) fxWlLoad(w); };
+  });
+  box.querySelectorAll(".wl-x").forEach((x) => {
+    x.onclick = async (e) => { e.stopPropagation(); await api.del("/api/watchlist/" + x.dataset.fxwlx); await loadWatchlist(); };
+  });
+}
+function fxWlLoad(w) {
+  document.querySelector('.tab[data-tab="forex"]').click();
+  const acc = document.querySelector("#tab-forex .watchlist-acc"); if (acc) acc.open = false;
+  fxSet({ symbol: w.symbol, security_id: w.security_id || w.symbol,
+          exchange_segment: w.exchange_segment || "DELTA", instrument_type: w.instrument_type || "FUTURES", product_id: "" });
+}
+
 // ---- logout ----
 document.getElementById("logoutBtn").onclick = async () => {
   await fetch("/api/auth/logout", { method: "POST" });
@@ -1074,6 +1250,7 @@ async function refreshBroker() {
   const dot = (ok) => (ok ? "🟢" : "🔴");
   st.innerHTML = `${dot(b.data_connected)} Data: ${provLabel(b.data_provider)} &nbsp;|&nbsp; ${dot(b.trade_connected)} Trading: ${provLabel(b.trade_provider)}`;
   st.className = "pill " + (b.data_connected && b.trade_connected ? "pill-ok" : "pill-off");
+  fxApplyBrokerState(b);     // show/hide the Forex tab + its provider banner
 }
 
 // provider dropdowns (Demo is all-or-nothing)
@@ -1488,18 +1665,21 @@ let _watchlist = [];
 async function loadWatchlist() {
   try { renderWatchlist(await api.get("/api/watchlist")); } catch (e) { /* ignore */ }
 }
-function renderWatchlist(items) {
-  _watchlist = items || [];
+function renderWatchlist(all) {
+  _watchlist = all || [];
+  // Forex/crypto watchlist items live on their own tab; keep them out of the India list.
+  fxRenderWatch(_watchlist.filter(isForexItem));
+  const items = _watchlist.filter((w) => !isForexItem(w));
   const box = document.getElementById("watchlistChips");
   const empty = document.getElementById("wlEmpty");
-  if (!_watchlist.length) { box.innerHTML = ""; empty.style.display = ""; return; }
+  if (!items.length) { box.innerHTML = ""; empty.style.display = ""; return; }
   empty.style.display = "none";
   const tagOf = (w) => {
     if (w.security_id) return "";   // specific contract — name already says it all
     const t = { OPTION: "chain", FUTURES: "fut", EQUITY: "eq" }[w.instrument_type] || "";
     return t ? ` <span class="wl-tag">${t}</span>` : "";
   };
-  box.innerHTML = _watchlist.map((w) =>
+  box.innerHTML = items.map((w) =>
     `<span class="wl-chip" data-wl="${w.id}" title="${w.security_id ? w.exchange_segment + ' · id ' + w.security_id : 'opens the ' + w.instrument_type.toLowerCase() + ' picker'}">${w.symbol}${tagOf(w)}<span class="wl-x" data-wlx="${w.id}">×</span></span>`).join("");
   box.querySelectorAll(".wl-chip").forEach((el) => {
     el.onclick = (e) => { if (e.target.classList.contains("wl-x")) return;
@@ -1545,51 +1725,6 @@ document.getElementById("addSymbolBtn").onclick = async () => {
     await loadWatchlist();
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
-// Delta / crypto manual entry + symbol search. Routes through pickContract so it
-// gets the same live-LTP, feed subscription and lot-size handling as the picker.
-function applyDeltaContract(sym, sid, seg) {
-  currentSeg = "FUTURES"; currentUnderlying = sym;
-  pickContract({ symbol: sym, security_id: sid, exchange_segment: seg || "DELTA",
-                 instrument_type: "FUTURES", lot_size: 1 });
-  document.getElementById("manSymbol").value = sym;
-  document.getElementById("manSecId").value = sid;
-  const box = document.getElementById("manResults"); box.style.display = "none"; box.innerHTML = "";
-  document.getElementById("formMsg").textContent = "";
-}
-document.getElementById("manApplyBtn").onclick = () => {
-  const msg = document.getElementById("formMsg");
-  const sym = document.getElementById("manSymbol").value.trim();
-  const sid = document.getElementById("manSecId").value.trim() || sym;
-  const seg = document.getElementById("manSeg").value.trim() || "DELTA";
-  if (!sym && !sid) { msg.textContent = "❌ Enter a symbol or product id."; msg.className = "msg neg"; return; }
-  applyDeltaContract(sym || sid, sid, seg);
-};
-let manTimer = null;
-document.getElementById("manSymbol").addEventListener("input", () => {
-  clearTimeout(manTimer);
-  const box = document.getElementById("manResults");
-  const q = document.getElementById("manSymbol").value.trim();
-  if (q.length < 2) { box.style.display = "none"; box.innerHTML = ""; return; }
-  manTimer = setTimeout(async () => {
-    let rows = [];
-    try { rows = await api.get("/api/delta/search?q=" + encodeURIComponent(q)); } catch {}
-    if (!rows.length) {
-      box.innerHTML = `<div class="muted" style="font-size:11px; padding:6px 8px;">No Delta products match (the product list may still be loading).</div>`;
-    } else {
-      box.innerHTML = rows.map((r, i) => `<div class="man-item" data-i="${i}" style="padding:5px 8px; cursor:pointer;">
-        <b>${r.symbol}</b> <span class="muted" style="font-size:11px;">${r.contract_type || ""} · id ${r.product_id}</span></div>`).join("");
-      box.querySelectorAll(".man-item").forEach((el) => {
-        const r = rows[el.dataset.i];
-        if (r) el.onclick = () => applyDeltaContract(r.symbol, r.symbol, "DELTA");
-      });
-    }
-    box.style.display = "block";
-  }, 250);
-});
-document.addEventListener("click", (e) => {
-  const box = document.getElementById("manResults");
-  if (box && !document.getElementById("manSymbol").contains(e.target) && !box.contains(e.target)) box.style.display = "none";
-});
 document.getElementById("addWatchBtn").onclick = async () => {
   const msg = document.getElementById("formMsg");
   if (!form.security_id.value) { msg.textContent = "❌ Pick a strike / contract first, then add it."; msg.className = "msg neg"; return; }
