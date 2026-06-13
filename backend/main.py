@@ -959,7 +959,9 @@ def modify_trade(trade_id: int, payload: ModifyIn, request: Request, db: Session
     if payload.stop_loss is not None:
         t.stop_loss = float(payload.stop_loss)
         if t.entry_fill_price > 0 and t.stop_loss > 0:
-            t.sl_points = round(abs(t.entry_fill_price - t.stop_loss), 2)
+            # Adaptive precision so crypto/forex sub-unit SL distances aren't lost.
+            nd = 2 if t.entry_fill_price >= 100 else (4 if t.entry_fill_price >= 1 else 8)
+            t.sl_points = round(abs(t.entry_fill_price - t.stop_loss), nd)
         if old_sl != t.stop_loss:
             changes.append(f"SL: Old {old_sl or '-'} -> New {t.stop_loss}")
 
