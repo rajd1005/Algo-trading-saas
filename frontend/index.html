@@ -171,14 +171,17 @@
       <!-- Manual entry — e.g. Delta Exchange crypto: the symbol picker is driven by
            the Indian (Dhan) instrument list, so type the Delta symbol/product id here. -->
       <details id="manualEntry" style="margin-top:8px;">
-        <summary class="muted" style="cursor:pointer; font-size:12px;">⚙️ Manual entry (crypto / Delta — type the symbol directly)</summary>
+        <summary class="muted" style="cursor:pointer; font-size:12px;">⚙️ Delta / crypto symbol search (or manual entry)</summary>
         <div class="row" style="margin-top:6px; align-items:flex-end;">
-          <label>Symbol <input id="manSymbol" placeholder="e.g. BTCUSD" /></label>
+          <label style="position:relative;">Symbol
+            <input id="manSymbol" placeholder="type to search, e.g. BTC" autocomplete="off" />
+            <div id="manResults" style="display:none; position:absolute; top:100%; left:0; right:0; z-index:30; background:var(--panel,#fff); border:1px solid var(--border,#ccc); border-radius:6px; max-height:200px; overflow:auto;"></div>
+          </label>
           <label>Security ID / Product <input id="manSecId" placeholder="Delta symbol or product id" /></label>
           <label style="max-width:140px;">Segment <input id="manSeg" value="DELTA" /></label>
           <button type="button" class="btn btn-sm" id="manApplyBtn">Use this</button>
         </div>
-        <div class="muted" style="font-size:11px; margin-top:4px;">For Delta Exchange, type the symbol (e.g. <code>BTCUSD</code>) or numeric product id. Orders route to your selected Delta trading account.</div>
+        <div class="muted" style="font-size:11px; margin-top:4px;">Start typing to search Delta Exchange products (e.g. <code>BTC</code> → <code>BTCUSD</code>), or type a symbol / numeric product id and click <b>Use this</b>. Orders route to your selected Delta trading account.</div>
       </details>
 
       <!-- these get filled automatically when you pick a contract -->

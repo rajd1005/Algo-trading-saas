@@ -184,6 +184,25 @@ class DeltaMapper:
         sid = str(security_id or "").strip()
         return sid.upper() if sid and not sid.isdigit() else ""
 
+    def search(self, query, limit=25):
+        """Find Delta products whose symbol matches all whitespace-separated terms.
+        Symbol-prefix matches and shorter symbols rank first (e.g. 'BTC' -> BTCUSD)."""
+        q = (query or "").strip().upper()
+        if not q:
+            return []
+        terms = q.split()
+        with self._lock:
+            rows = list(self._by_symbol.values())
+        out = []
+        for r in rows:
+            sym = r.get("symbol", "")
+            if all(t in sym for t in terms):
+                starts = 0 if sym.startswith(terms[0]) else 1
+                out.append((starts, len(sym), sym, r))
+        out.sort(key=lambda x: (x[0], x[1], x[2]))
+        return [{"symbol": r["symbol"], "product_id": r["product_id"],
+                 "contract_type": r.get("contract_type", "")} for _, _, _, r in out[:limit]]
+
 
 mapper = DeltaMapper()
 

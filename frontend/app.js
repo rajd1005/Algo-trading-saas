@@ -1545,25 +1545,51 @@ document.getElementById("addSymbolBtn").onclick = async () => {
     await loadWatchlist();
   } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
-// Manual entry — fill the same hidden inputs the picker uses (for Delta crypto etc.)
+// Delta / crypto manual entry + symbol search. Routes through pickContract so it
+// gets the same live-LTP, feed subscription and lot-size handling as the picker.
+function applyDeltaContract(sym, sid, seg) {
+  currentSeg = "FUTURES"; currentUnderlying = sym;
+  pickContract({ symbol: sym, security_id: sid, exchange_segment: seg || "DELTA",
+                 instrument_type: "FUTURES", lot_size: 1 });
+  document.getElementById("manSymbol").value = sym;
+  document.getElementById("manSecId").value = sid;
+  const box = document.getElementById("manResults"); box.style.display = "none"; box.innerHTML = "";
+  document.getElementById("formMsg").textContent = "";
+}
 document.getElementById("manApplyBtn").onclick = () => {
   const msg = document.getElementById("formMsg");
   const sym = document.getElementById("manSymbol").value.trim();
   const sid = document.getElementById("manSecId").value.trim() || sym;
   const seg = document.getElementById("manSeg").value.trim() || "DELTA";
-  if (!sym || !sid) { msg.textContent = "❌ Enter a symbol and security id."; msg.className = "msg neg"; return; }
-  form.symbol.value = sym;
-  form.security_id.value = sid;
-  form.exchange_segment.value = seg;
-  form.instrument_type.value = "FUTURES";
-  currentSeg = "FUTURES"; currentUnderlying = sym; currentLotSize = 1;
-  updateQty();
-  document.getElementById("selectedSymbol").innerHTML =
-    `✅ <b>${sym}</b> — manual · ${seg} · ID ${sid} · lot 1`;
-  msg.textContent = "";
-  _selContract = { symbol: sym, security_id: sid, exchange_segment: seg, instrument_type: "FUTURES" };
-  pushWatch();                 // stream live ticks for the manually-entered contract
+  if (!sym && !sid) { msg.textContent = "❌ Enter a symbol or product id."; msg.className = "msg neg"; return; }
+  applyDeltaContract(sym || sid, sid, seg);
 };
+let manTimer = null;
+document.getElementById("manSymbol").addEventListener("input", () => {
+  clearTimeout(manTimer);
+  const box = document.getElementById("manResults");
+  const q = document.getElementById("manSymbol").value.trim();
+  if (q.length < 2) { box.style.display = "none"; box.innerHTML = ""; return; }
+  manTimer = setTimeout(async () => {
+    let rows = [];
+    try { rows = await api.get("/api/delta/search?q=" + encodeURIComponent(q)); } catch {}
+    if (!rows.length) {
+      box.innerHTML = `<div class="muted" style="font-size:11px; padding:6px 8px;">No Delta products match (the product list may still be loading).</div>`;
+    } else {
+      box.innerHTML = rows.map((r, i) => `<div class="man-item" data-i="${i}" style="padding:5px 8px; cursor:pointer;">
+        <b>${r.symbol}</b> <span class="muted" style="font-size:11px;">${r.contract_type || ""} · id ${r.product_id}</span></div>`).join("");
+      box.querySelectorAll(".man-item").forEach((el) => {
+        const r = rows[el.dataset.i];
+        if (r) el.onclick = () => applyDeltaContract(r.symbol, r.symbol, "DELTA");
+      });
+    }
+    box.style.display = "block";
+  }, 250);
+});
+document.addEventListener("click", (e) => {
+  const box = document.getElementById("manResults");
+  if (box && !document.getElementById("manSymbol").contains(e.target) && !box.contains(e.target)) box.style.display = "none";
+});
 document.getElementById("addWatchBtn").onclick = async () => {
   const msg = document.getElementById("formMsg");
   if (!form.security_id.value) { msg.textContent = "❌ Pick a strike / contract first, then add it."; msg.className = "msg neg"; return; }
