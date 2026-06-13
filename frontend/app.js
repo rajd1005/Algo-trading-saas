@@ -1281,6 +1281,9 @@ document.getElementById("demoReset").onclick = async () => { await api.post("/ap
 function renderAccounts() {
   const box = document.getElementById("accountsList");
   if (!_accounts.length) { box.innerHTML = `<div class="muted" style="margin-bottom:8px;">No accounts yet — add one below.</div>`; return; }
+  // Only an admin may REMOVE a broker account (anti-abuse: stops a user freeing up a
+  // broker login to move it to another account). Normal users see no delete button.
+  const isAdmin = !!(window._me && window._me.is_admin);
   box.innerHTML = _accounts.map((a) => `
     <div class="acct-row">
       <span class="acct-name">${a.label}</span>
@@ -1288,8 +1291,9 @@ function renderAccounts() {
       <span style="flex:1;"></span>
       <button class="btn btn-sm" data-login-acc="${a.id}" data-broker="${a.broker}">🔐 Login</button>
       <button class="btn btn-sm" data-edit-acc="${a.id}">Edit</button>
-      <button class="btn btn-sm" data-del-acc="${a.id}">✕</button>
+      ${isAdmin ? `<button class="btn btn-sm" data-del-acc="${a.id}">✕</button>` : ""}
     </div>`).join("");
+  if (!isAdmin) box.innerHTML += `<div class="muted" style="font-size:11px; margin-top:4px;">To remove a broker account, contact an admin.</div>`;
   box.querySelectorAll("[data-login-acc]").forEach((b) => b.onclick = () => loginAccount(b.dataset.loginAcc, b.dataset.broker));
   box.querySelectorAll("[data-edit-acc]").forEach((b) => b.onclick = () => editAccount(b.dataset.editAcc));
   box.querySelectorAll("[data-del-acc]").forEach((b) => b.onclick = async () => {
@@ -1389,8 +1393,9 @@ function showAcctForm(broker, acc) {
   document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA" || broker === "ALICE" || broker === "DELTA") ? "" : "none");
   document.querySelectorAll(".angel-f").forEach((e) => e.style.display = broker === "ANGEL" ? "" : "none");
   document.querySelectorAll(".secret-f").forEach((e) => e.style.display = (broker === "ZERODHA" || broker === "DELTA") ? "" : "none");
-  // Delta is key-only (API key + secret) — it has no client/user id.
-  document.getElementById("acctClientId").closest("label").style.display = broker === "DELTA" ? "none" : "";
+  // Client / User ID is required for EVERY broker (so each broker login stays tied
+  // to one user and can't be shared across accounts).
+  document.getElementById("acctClientId").closest("label").style.display = "";
   ["acctClientId", "acctAppId", "acctAppSecret", "acctApiKey", "acctPin", "acctTotp", "acctZSecret"].forEach((i) => document.getElementById(i).value = "");
   document.getElementById("acctClientId").value = acc ? acc.client_id : "";
   if (acc && acc.has_secret) {
@@ -1403,8 +1408,12 @@ function editAccount(id) { const a = _accounts.find((x) => String(x.id) === Stri
 document.getElementById("acctCancelBtn").onclick = () => document.getElementById("acctForm").style.display = "none";
 document.getElementById("acctSaveBtn").onclick = async () => {
   const broker = document.getElementById("acctBroker").value;
-  const payload = { broker, id: document.getElementById("acctId").value || undefined,
-    client_id: document.getElementById("acctClientId").value };
+  const msg = document.getElementById("brokerMsg");
+  const clientId = document.getElementById("acctClientId").value.trim();
+  if (!clientId) {                       // required for every broker (anti-abuse tracking)
+    msg.textContent = "❌ Client / User ID is required for every broker."; msg.className = "msg neg"; return;
+  }
+  const payload = { broker, id: document.getElementById("acctId").value || undefined, client_id: clientId };
   if (broker === "DHAN") {
     payload.app_id = document.getElementById("acctAppId").value;
     payload.app_secret = document.getElementById("acctAppSecret").value;
@@ -1418,10 +1427,12 @@ document.getElementById("acctSaveBtn").onclick = async () => {
     payload.pin = document.getElementById("acctPin").value;
     payload.totp_secret = document.getElementById("acctTotp").value;
   }
-  await api.post("/api/accounts", payload);
-  document.getElementById("acctForm").style.display = "none";
-  document.getElementById("brokerMsg").textContent = "Account saved.";
-  await refreshBroker();
+  try {
+    await api.post("/api/accounts", payload);
+    document.getElementById("acctForm").style.display = "none";
+    msg.textContent = "✅ Account saved."; msg.className = "msg pos";
+    await refreshBroker();
+  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
 };
 
 // message after returning from a broker login redirect
@@ -1869,6 +1880,9 @@ async function loadMe() {
   }
   // admin tab
   if (me.is_admin) document.querySelectorAll(".admin-only").forEach((e) => e.style.display = "");
+  // Identity may resolve after the first broker render — re-render so the admin-only
+  // delete (✕) button reflects the now-known role.
+  if (_accounts && _accounts.length && typeof renderAccounts === "function") renderAccounts();
   // onboarding nudge — lock trading until a broker is connected (non-admins).
   const nudge = document.getElementById("onboardNudge");
   const needBroker = !me.is_admin && !me.broker_connected;
@@ -2062,10 +2076,9 @@ function auApplyBrokerFields() {
   show(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE" || b === "DELTA");
   show(".au-secret", b === "ZERODHA" || b === "DELTA");
   show(".au-ang", b === "ANGEL");
-  // Delta is key-only (API key + secret) — it has no client/user id.
+  // Client / User ID is required for every broker (kept visible for all).
   const cid = document.getElementById("auClient").closest("label");
-  if (cid) cid.style.display = b === "DELTA" ? "none" : "";
-  if (b === "DELTA") document.getElementById("auClient").value = "";
+  if (cid) cid.style.display = "";
 }
 document.getElementById("auBroker").onchange = auApplyBrokerFields;
 function auResetForm() {

@@ -488,14 +488,19 @@ def save_account(payload: dict, request: Request, db: Session = Depends(get_db))
     if a is not None and a.user_id != me.id:
         raise HTTPException(403, "Not your account.")
     client_id = str(payload.get("client_id", "")).strip()
-    if client_id and _broker_in_use_elsewhere(db, broker, client_id, me.id):
+    # Every broker account must carry a Client / User ID so it stays tied to one
+    # user — this is what lets us block the same broker login being shared across
+    # multiple RD Algo accounts (trial/limit abuse).
+    if not client_id:
+        raise HTTPException(400, "Client / User ID is required for every broker so each "
+                                 "broker account stays linked to a single user.")
+    if _broker_in_use_elsewhere(db, broker, client_id, me.id):
         raise HTTPException(400, "This broker Client ID is already linked to another RD Algo "
                                  "account. Each broker account can be used by one user only.")
     if a is None:
         a = Account(broker=broker, user_id=me.id)
         db.add(a)
-    if client_id:
-        a.client_id = client_id
+    a.client_id = client_id
     a.broker = broker
     _set_acc_creds(a, app_id=payload.get("app_id"), app_secret=payload.get("app_secret"),
                    api_key=payload.get("api_key"), api_secret=payload.get("api_secret"),
@@ -509,11 +514,17 @@ def save_account(payload: dict, request: Request, db: Session = Depends(get_db))
 @app.delete("/api/accounts/{account_id}")
 def delete_account(account_id: int, request: Request, db: Session = Depends(get_db)):
     me = current_user(request)
+    # Anti-abuse: a normal user may NOT remove a broker account (which would let them
+    # free up a broker login and move it to another account). Only an admin can — via
+    # the user's Admin inspector — so contact support to remove a broker.
+    if me.role != "SUPER_ADMIN":
+        raise HTTPException(403, "Only an admin can remove a broker account. Please contact "
+                                 "support if you need a broker removed.")
     a = db.get(Account, account_id)
-    if a and a.user_id == me.id:
+    if a:
         for key in ("data_provider", "trade_provider"):
-            if uget(db, me.id, key, "DEMO") == str(account_id):
-                uset(db, me.id, key, "DEMO")
+            if uget(db, a.user_id, key, "DEMO") == str(account_id):
+                uset(db, a.user_id, key, "DEMO")
         db.delete(a)
         db.commit()
     return {"ok": True}
@@ -2796,7 +2807,9 @@ def admin_add_account(uid: int, payload: dict, request: Request, db: Session = D
     if broker not in ALL_BROKERS:
         broker = "DHAN"
     client_id = str(payload.get("client_id", "")).strip()
-    if client_id and _broker_in_use_elsewhere(db, broker, client_id, uid):
+    if not client_id:
+        raise HTTPException(400, "Client / User ID is required for every broker account.")
+    if _broker_in_use_elsewhere(db, broker, client_id, uid):
         raise HTTPException(400, "That broker Client ID is already linked to another user.")
     aid = payload.get("id")
     a = db.get(Account, int(aid)) if aid else None
