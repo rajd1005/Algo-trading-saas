@@ -1019,6 +1019,7 @@ document.getElementById("fxQtyMinus").onclick = () => { const i = document.getEl
 document.getElementById("fxQtyPlus").onclick = () => { const i = document.getElementById("fxQty"); i.value = (parseInt(i.value) || 1) + 1; fxUpdateExample(); };
 document.getElementById("fxQty").addEventListener("input", fxUpdateExample);
 document.getElementById("fxContractValue").addEventListener("change", fxUpdateExample);
+document.getElementById("fxLeverage").addEventListener("change", fxUpdateExample);
 
 // symbol search
 let fxTimer = null;
@@ -1083,10 +1084,12 @@ function fxUpdateExample() {
     box.innerHTML = `<span class="muted">💡 Pick a symbol and wait for the live price to see how much money is needed.</span>`;
     return;
   }
-  const perContract = cv * px, notional = qty * perContract, perPoint = qty * cv;
-  box.innerHTML = `<b>💡 Example</b> — buy <b>${qty}</b> ${FX.sel.symbol} @ $${px}:`
+  const lev = Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1);
+  const perContract = cv * px, notional = qty * perContract, perPoint = qty * cv, margin = notional / lev;
+  box.innerHTML = `<b>💡 Example</b> — buy <b>${qty}</b> ${FX.sel.symbol} @ $${px} at <b>${lev}×</b>:`
     + `<br>• 1 contract = ${cv} (≈ $${perContract.toFixed(2)} notional)`
-    + `<br>• Position value (notional) ≈ <b>$${notional.toFixed(2)}</b> — money needed = notional ÷ your leverage (e.g. 10× ⇒ $${(notional / 10).toFixed(2)})`
+    + `<br>• Position value (notional) ≈ $${notional.toFixed(2)}`
+    + `<br>• <b>Money needed ≈ $${margin.toFixed(2)}</b> (notional ÷ ${lev}× leverage)`
     + `<br>• P&L per point ≈ $${perPoint.toFixed(4)} (SL/Target points × this)`;
 }
 function fxShowSelected(px) {
@@ -1220,6 +1223,7 @@ document.getElementById("fxSubmit").onclick = async () => {
     exchange_segment: FX.sel.exchange_segment, instrument_type: FX.sel.instrument_type,
     side: FX.side, quantity: Math.max(1, parseInt(document.getElementById("fxQty").value) || 1),
     lot_size: 1, entry_type: FX.et,
+    leverage: Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1),
     entry_price: parseFloat(document.getElementById("fxEntryPrice").value) || 0,
     sl_points: parseFloat(document.getElementById("fxSl").value) || 0,
     target_points: parseFloat(document.getElementById("fxTarget").value) || 0,

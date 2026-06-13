@@ -397,7 +397,25 @@ class DeltaBroker:
         avg = float(res.get("average_fill_price") or 0)
         return OrderResult(ok=True, fill_price=avg or current_price, order_id=oid, status=status)
 
+    def set_leverage(self, product_id, leverage):
+        """Set a product's order leverage (Delta is per-product). Best-effort."""
+        try:
+            lev = float(leverage)
+            val = str(int(lev)) if lev.is_integer() else str(lev)
+            r = self._request("POST", f"/v2/products/{int(product_id)}/orders/leverage",
+                              body_dict={"leverage": val})
+            return r.status_code < 300
+        except Exception:
+            return False
+
     def place_entry(self, trade, current_price, qty=None):
+        # Apply the chosen leverage on the product before entering (Delta sets it
+        # per-product, not per-order). Best-effort: a failure won't block the order.
+        lev = getattr(trade, "leverage", 0) or 0
+        if lev and lev > 0:
+            row = mapper.resolve(trade.security_id)
+            if row:
+                self.set_leverage(row["product_id"], lev)
         return self._place(trade, trade.side, current_price, qty)
 
     def place_exit(self, trade, current_price, qty=None):
