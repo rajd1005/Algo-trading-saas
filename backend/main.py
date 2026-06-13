@@ -1042,6 +1042,12 @@ def equities_search(q: str = "", limit: int = 25):
     return instruments.search_equities(q, limit=limit)
 
 
+@app.get("/api/delta/search")
+def delta_search(q: str = "", limit: int = 25):
+    """Search Delta Exchange crypto products by symbol (perps / futures / options)."""
+    return delta.mapper.search(q, limit=limit)
+
+
 @app.get("/api/expiries")
 def expiries(underlying: str, kind: str = "OPTION"):
     return instruments.expiries(underlying, kind.upper())
