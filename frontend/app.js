@@ -1389,6 +1389,8 @@ function showAcctForm(broker, acc) {
   document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA" || broker === "ALICE" || broker === "DELTA") ? "" : "none");
   document.querySelectorAll(".angel-f").forEach((e) => e.style.display = broker === "ANGEL" ? "" : "none");
   document.querySelectorAll(".secret-f").forEach((e) => e.style.display = (broker === "ZERODHA" || broker === "DELTA") ? "" : "none");
+  // Delta is key-only (API key + secret) — it has no client/user id.
+  document.getElementById("acctClientId").closest("label").style.display = broker === "DELTA" ? "none" : "";
   ["acctClientId", "acctAppId", "acctAppSecret", "acctApiKey", "acctPin", "acctTotp", "acctZSecret"].forEach((i) => document.getElementById(i).value = "");
   document.getElementById("acctClientId").value = acc ? acc.client_id : "";
   if (acc && acc.has_secret) {
@@ -2058,6 +2060,10 @@ function auApplyBrokerFields() {
   toggle(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE" || b === "DELTA");
   toggle(".au-secret", b === "ZERODHA" || b === "DELTA");
   toggle(".au-ang", b === "ANGEL");
+  // Delta is key-only (API key + secret) — it has no client/user id.
+  const cid = document.getElementById("auClient").closest("label");
+  if (cid) cid.style.display = b === "DELTA" ? "none" : "";
+  if (b === "DELTA") document.getElementById("auClient").value = "";
 }
 document.getElementById("auBroker").onchange = auApplyBrokerFields;
 function auResetForm() {
