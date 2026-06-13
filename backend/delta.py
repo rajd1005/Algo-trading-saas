@@ -366,19 +366,24 @@ class DeltaBroker:
         return request(self.api_key, self.api_secret, method, path,
                        params=params, body_dict=body_dict, timeout=timeout)
 
-    def _place(self, trade, side, current_price, qty=None):
+    def _place(self, trade, side, current_price, qty=None, reduce_only=False):
         from brokers import OrderResult
         row = mapper.resolve(trade.security_id)
         if not row:
             return OrderResult(ok=False, status="REJECTED",
                                error=f"Delta product not found for '{trade.security_id}'")
-        order_type = "limit_order" if trade.entry_type == "LIMIT" else "market_order"
+        # An exit is always a MARKET close (the entry may have been LIMIT). A close
+        # MUST be reduce_only, else Delta opens a NEW opposite position (and can
+        # reject it for margin) instead of closing the existing one.
+        order_type = "market_order" if reduce_only else ("limit_order" if trade.entry_type == "LIMIT" else "market_order")
         body = {
             "product_id": int(row["product_id"]),
             "size": int(qty if qty else trade.quantity),
             "side": "buy" if side == "BUY" else "sell",
             "order_type": order_type,
         }
+        if reduce_only:
+            body["reduce_only"] = "true"           # Delta expects the string 'true'/'false'
         if order_type == "limit_order":
             body["limit_price"] = str(trade.entry_price)
         try:
@@ -419,7 +424,9 @@ class DeltaBroker:
         return self._place(trade, trade.side, current_price, qty)
 
     def place_exit(self, trade, current_price, qty=None):
-        return self._place(trade, "SELL" if trade.side == "BUY" else "BUY", current_price, qty)
+        # Reduce-only market close of the opposite side.
+        return self._place(trade, "SELL" if trade.side == "BUY" else "BUY", current_price, qty,
+                           reduce_only=True)
 
     def _find_order(self, order_id):
         """Locate one order in the live book, then in recent history."""
