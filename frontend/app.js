@@ -967,7 +967,31 @@ function fxApplyBrokerState(b) {
     const ot = document.querySelector('.tab[data-tab="dashboard"]'); if (ot) ot.click();
   }
   fxRenderBanner(b);
+  if (acc && acc.connected) fxLoadBalances();
+  else { FX.balances = []; const el = document.getElementById("fxBalances"); if (el) el.textContent = ""; }
 }
+
+// Diagnostic: the per-asset balances the broker's margin engine actually sees.
+async function fxLoadBalances() {
+  const el = document.getElementById("fxBalances");
+  if (!el) return;
+  let r; try { r = await api.get("/api/forex/balances"); } catch { return; }
+  FX.balances = (r && r.balances) || [];
+  if (!FX.balances.length) { el.textContent = "💰 Balances: (none reported by the API)"; return; }
+  el.innerHTML = "💰 <b>Balances (from Delta API)</b>: "
+    + FX.balances.map((x) => `${x.asset} ${x.available}`).join(" · ")
+    + ` <span class="muted">— what the margin engine actually uses (may differ from the app wallet).</span>`;
+}
+// Sum of USD-like available balances (rough margin pool for the pre-flight warning).
+function fxAvailUsd() {
+  return (FX.balances || []).filter((x) => ["USD", "USDT", "USDC"].includes((x.asset || "").toUpperCase()))
+    .reduce((s, x) => s + (x.available || 0), 0);
+}
+// Refresh the API balances each time the Forex tab is opened.
+(function () {
+  const t = document.querySelector('.tab[data-tab="forex"]');
+  if (t) t.addEventListener("click", () => { if (FX.account && FX.account.connected) fxLoadBalances(); });
+})();
 
 function fxRenderBanner(b) {
   const banner = document.getElementById("fxProviderBanner");
@@ -1217,6 +1241,17 @@ document.getElementById("fxSubmit").onclick = async () => {
   if (FX.mode === "LIVE" && !FX.onForex) {
     msg.textContent = `❌ Set ${FX.account ? FX.account.label : "your crypto broker"} as the Data + Trading account first (use the banner above), or a LIVE order would route to the wrong broker.`;
     msg.className = "msg neg"; return;
+  }
+  // Pre-flight margin check (LIVE): warn if the API-visible USD balance can't cover the margin.
+  if (FX.mode === "LIVE") {
+    const cv = fxContractVal(), qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1);
+    const lev = Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1);
+    const margin = (cv && FX.lastPx) ? (qty * cv * FX.lastPx) / lev : 0;
+    const avail = fxAvailUsd();
+    if (margin > 0 && avail >= 0 && avail < margin) {
+      if (!confirm(`Estimated margin ≈ $${margin.toFixed(2)} but the API sees only ~$${avail.toFixed(2)} available (USD/USDT). `
+        + `Delta will likely reject this for insufficient margin. Place anyway?`)) { return; }
+    }
   }
   const payload = {
     mode: FX.mode, symbol: FX.sel.symbol, security_id: FX.sel.security_id,

@@ -466,6 +466,24 @@ class DeltaBroker:
         except Exception:
             return False
 
+    def wallet_balances(self):
+        """Full per-asset wallet balances (diagnostic): the margin engine uses these,
+        so this reveals which asset actually has funds vs what the app shows."""
+        try:
+            r = self._request("GET", "/v2/wallet/balances", timeout=6)
+            rows = r.json().get("result", []) if r.status_code == 200 else []
+            out = []
+            for w in rows:
+                asset = w.get("asset_symbol")
+                if not asset and isinstance(w.get("asset"), dict):
+                    asset = w["asset"].get("symbol")
+                out.append({"asset": str(asset or "?"),
+                            "available": float(w.get("available_balance") or 0),
+                            "balance": float(w.get("balance") or 0)})
+            return out
+        except Exception:
+            return []
+
     def fund_limit(self):
         """(ok, available_balance). Prefers the INR/USDT settling wallet."""
         try:
