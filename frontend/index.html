@@ -340,6 +340,10 @@
           </div>
         </div>
         <div class="field">
+          <div class="field-label">Contract value</div>
+          <select id="fxContractValue" style="min-width:150px;"></select>
+        </div>
+        <div class="field">
           <div class="field-label">Entry type</div>
           <div class="btn-group">
             <button type="button" class="opt active" data-fxet="MARKET">MARKET</button>
@@ -350,6 +354,8 @@
           <input id="fxEntryPrice" type="number" step="0.0001" value="0" disabled />
         </label>
       </div>
+
+      <div id="fxExample" class="banner" style="display:none; margin-top:8px;"></div>
 
       <div class="row">
         <label>Stop-loss (points) <input id="fxSl" type="number" step="0.0001" value="0" /></label>
