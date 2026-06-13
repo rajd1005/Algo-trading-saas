@@ -291,8 +291,10 @@ def _close_one(trade_id, reason):
         ok, fill, oid, e = _place(db, st, broker, True, remaining, price)
         exit_side = "SELL" if st.side == "BUY" else "BUY"
         if ok:
+            import delta
             direction = 1 if st.side == "BUY" else -1
-            st.realized_pnl = (st.realized_pnl or 0) + (price - st.entry_fill_price) * direction * remaining
+            pv = delta.point_value(st.exchange_segment, st.security_id)   # contract value (1.0 for equity)
+            st.realized_pnl = (st.realized_pnl or 0) + (price - st.entry_fill_price) * direction * remaining * pv
             st.exited_qty = st.quantity
             st.exit_fill_price = fill
             st.status = "CLOSED"

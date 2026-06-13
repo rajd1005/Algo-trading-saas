@@ -46,17 +46,19 @@ from brokers import PaperBroker, DhanBroker
 from angel import AngelBroker, AngelMarketData
 from zerodha import ZerodhaBroker, ZerodhaMarketData
 from aliceblue import AliceBroker, AliceMarketData
-from delta import DeltaBroker, DeltaMarketData
+from delta import DeltaBroker, DeltaMarketData, point_value as _point_value
 import config
 
 
 def level_price(side, ref, points, is_target):
-    """Convert a points distance into an absolute price, given the entry ref."""
+    """Convert a points distance into an absolute price, given the entry ref.
+    'points' are price units (the user's SL/target distance). Precision adapts to the
+    price magnitude so crypto/forex sub-unit prices aren't flattened to 2 decimals."""
     if points <= 0 or ref <= 0:
         return 0.0
-    if side == "BUY":
-        return round(ref + points, 2) if is_target else round(ref - points, 2)
-    return round(ref - points, 2) if is_target else round(ref + points, 2)
+    raw = (ref + points) if ((side == "BUY") == is_target) else (ref - points)
+    nd = 2 if ref >= 100 else (4 if ref >= 1 else 8)
+    return round(raw, nd)
 
 
 class TradingEngine:
@@ -680,7 +682,8 @@ class TradingEngine:
         if not res.ok:
             self._log(db, f"Exit failed for {t.symbol} ({reason}): {res.error}", "ERROR", t.id)
             return False
-        t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+        pv = _point_value(t.exchange_segment, t.security_id)
+        t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
         t.exited_qty = t.quantity
         t.exit_fill_price = res.fill_price
         t.status = "CLOSED"
@@ -711,6 +714,7 @@ class TradingEngine:
 
     def _handle_open(self, db, t, price, kill, live_broker):
         direction = 1 if t.side == "BUY" else -1
+        pv = _point_value(t.exchange_segment, t.security_id)   # contract value (1.0 for equity)
         remaining = t.quantity - (t.exited_qty or 0)
         if remaining <= 0:
             t.status = "CLOSED"
@@ -783,7 +787,7 @@ class TradingEngine:
                     if not res.ok:
                         self._log(db, f"Target exit failed {t.symbol}: {res.error}", "ERROR", t.id)
                         continue
-                    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * exit_qty
+                    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * exit_qty * pv
                     t.exited_qty += exit_qty
                     t.exit_fill_price = res.fill_price
                     remaining_after = t.quantity - t.exited_qty
@@ -806,7 +810,7 @@ class TradingEngine:
             if reached:
                 res = self._place_confirmed(db, t, broker, is_exit=True, qty=remaining)
                 if res.ok:
-                    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining
+                    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
                     t.exited_qty = t.quantity
                     t.exit_fill_price = res.fill_price
                     t.status = "CLOSED"
@@ -824,7 +828,8 @@ class TradingEngine:
             return
         direction = 1 if t.side == "BUY" else -1
         remaining = t.quantity - (t.exited_qty or 0)
-        unrealized = (price - t.entry_fill_price) * direction * remaining
+        pv = _point_value(t.exchange_segment, t.security_id)   # contract value (1.0 for equity)
+        unrealized = (price - t.entry_fill_price) * direction * remaining * pv
         t.pnl = round((t.realized_pnl or 0) + unrealized, 2)
 
 

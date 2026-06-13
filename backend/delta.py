@@ -206,7 +206,8 @@ class DeltaMapper:
         out.sort(key=lambda x: (x[0], x[1], x[2]))
         # Options are picked via the chain, not free-text search — keep them out.
         return [{"symbol": r["symbol"], "product_id": r["product_id"],
-                 "contract_type": r.get("contract_type", "")}
+                 "contract_type": r.get("contract_type", ""),
+                 "contract_value": r.get("contract_value")}
                 for _, _, _, r in out[:limit]
                 if not str(r.get("contract_type", "")).endswith("options")]
 
@@ -229,7 +230,7 @@ class DeltaMapper:
             return
         otype = "CE" if ctype == "call_options" else "PE"
         opt.setdefault(under, {}).setdefault(expiry, {}).setdefault(strike, {})[otype] = \
-            {"symbol": sym, "product_id": pid}
+            {"symbol": sym, "product_id": pid, "contract_value": p.get("contract_value")}
 
     @staticmethod
     def _opt_slim(o):
@@ -237,7 +238,8 @@ class DeltaMapper:
             return None
         return {"symbol": o["symbol"], "security_id": o["symbol"],
                 "exchange_segment": SEGMENT, "instrument_type": "OPTION",
-                "lot_size": 1, "product_id": o["product_id"]}
+                "lot_size": 1, "product_id": o["product_id"],
+                "contract_value": o.get("contract_value")}
 
     def option_underlyings(self):
         with self._lock:
@@ -259,6 +261,25 @@ class DeltaMapper:
 
 
 mapper = DeltaMapper()
+
+
+def point_value(exchange_segment, security_id):
+    """P&L multiplier per contract for a Delta instrument — its `contract_value`
+    (e.g. 0.001 BTC for BTCUSD). Delta India contracts are linear (USD/USDT-settled),
+    so PnL = ±qty × point_value × (exit − entry) — unlike Indian equity/options where
+    one unit of price move = one rupee (multiplier 1.0).
+
+    Returns 1.0 for non-Delta instruments and as a safe fallback. (Inverse / coin-
+    settled contracts would need 1/price math — not handled; Delta India is linear.)
+    """
+    if exchange_segment != SEGMENT:
+        return 1.0
+    try:
+        r = mapper.resolve(security_id)
+        cv = float(r.get("contract_value")) if r and r.get("contract_value") is not None else 0.0
+        return cv if cv > 0 else 1.0
+    except Exception:
+        return 1.0
 
 
 def normalize_order(o):
