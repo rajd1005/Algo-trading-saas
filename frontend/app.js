@@ -1060,9 +1060,8 @@ function fxShowSelected(px) {
   if (!FX.sel) { el.textContent = "No symbol selected yet."; return; }
   const pxTxt = px === "LOADING" ? '<span class="muted">fetching price…</span>'
     : (px > 0 ? `LTP <b>${px}</b>` : '<span class="muted">price unavailable — set this broker as your Data account</span>');
-  // Show the contract value so the point math is clear: P&L = qty × contract_value × move.
-  const cv = parseFloat(FX.sel.contract_value);
-  const cvTxt = cv > 0 ? ` · <span class="muted">1 contract = ${FX.sel.contract_value}; P&L = qty × ${FX.sel.contract_value} × points</span>` : "";
+  // Point math: 1 contract = $1 per point, so P&L = qty × points.
+  const cvTxt = ` · <span class="muted">1 contract = $1/point · P&L = qty × points</span>`;
   el.innerHTML = `✅ <b>${FX.sel.symbol}</b> — ${FX.broker}${FX.sel.product_id ? " · id " + FX.sel.product_id : ""} — ${pxTxt}${cvTxt}`;
 }
 function fxStartLtp() {
@@ -1448,7 +1447,8 @@ document.getElementById("acctSaveBtn").onclick = async () => {
 
 // ---- modify SL/Targets modal (direct prices) ----
 const modifyModal = document.getElementById("modifyModal");
-let modifyId = null, modLotSize = 1, modRemainingLots = 1;
+let modifyId = null, modLotSize = 1, modRemainingLots = 1, modIsForex = false;
+const modStep = () => (modIsForex ? "any" : "0.05");   // crypto/forex need sub-unit prices
 
 function modDistribute() {
   const rows = [...document.querySelectorAll("#modTargetRows .trow")];
@@ -1468,7 +1468,7 @@ function modAddTargetRow(price = "") {
   }
   const div = document.createElement("div");
   div.className = "trow";
-  div.innerHTML = `<input class="mtp" type="number" step="0.05" placeholder="price" value="${price}" />
+  div.innerHTML = `<input class="mtp" type="number" step="${modStep()}" placeholder="price" value="${price}" />
     <input class="mtl" type="number" readonly title="quantity (auto-distributed)" style="width:80px;" />
     <span class="muted" style="font-size:11px;">qty <span class="mtlots"></span></span>
     <button type="button" class="step trm">×</button>`;
@@ -1483,8 +1483,12 @@ function openModify(id) {
   if (!t) return;
   modifyId = id;
   modLotSize = t.lot_size || 1;
+  modIsForex = (typeof FOREX_SEGMENTS !== "undefined") && FOREX_SEGMENTS.includes(t.exchange_segment);
   const remainingQty = t.quantity - (t.exited_qty || 0);
   modRemainingLots = Math.max(1, Math.floor(remainingQty / modLotSize));
+  // Crypto/forex prices can be sub-unit, so loosen the SL/trail/target step.
+  document.getElementById("modSl").step = modStep();
+  document.getElementById("modTrail").step = modStep();
   document.getElementById("modSl").value = t.stop_loss || 0;
   document.getElementById("modTrail").value = t.trail_sl || 0;
   document.getElementById("modTrailMode").value = t.trail_mode || "CONTINUE";
@@ -1506,8 +1510,11 @@ function openModify(id) {
   setVal("modLockStep", t.lock_step || 0);
   setVal("modLockAmount", t.lock_amount || 0);
   document.getElementById("modMsg").textContent = "";
+  const cur = modIsForex ? "$" : "₹";
+  const unit = modIsForex ? `${remainingQty} contracts` : `${remainingQty} qty (${modRemainingLots} lots, lot size ${modLotSize})`;
   document.getElementById("modifyInfo").innerHTML =
-    `<b>${t.symbol}</b> — entry ₹${t.entry_fill_price} · LTP ₹${t.last_price} · remaining ${remainingQty} qty (${modRemainingLots} lots, lot size ${modLotSize})`;
+    `<b>${t.symbol}</b> — entry ${cur}${t.entry_fill_price} · LTP ${cur}${t.last_price} · remaining ${unit}`
+    + (modIsForex ? ` · <span class="muted">SL/target are prices; P&L = qty × points ($1/contract/point)</span>` : "");
   modifyModal.style.display = "flex";
 }
 document.getElementById("modCancel").onclick = () => { modifyModal.style.display = "none"; };

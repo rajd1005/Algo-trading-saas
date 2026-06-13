@@ -264,22 +264,13 @@ mapper = DeltaMapper()
 
 
 def point_value(exchange_segment, security_id):
-    """P&L multiplier per contract for a Delta instrument — its `contract_value`
-    (e.g. 0.001 BTC for BTCUSD). Delta India contracts are linear (USD/USDT-settled),
-    so PnL = ±qty × point_value × (exit − entry) — unlike Indian equity/options where
-    one unit of price move = one rupee (multiplier 1.0).
-
-    Returns 1.0 for non-Delta instruments and as a safe fallback. (Inverse / coin-
-    settled contracts would need 1/price math — not handled; Delta India is linear.)
+    """P&L multiplier per contract per point. Per the product owner's decision, Delta
+    crypto contracts are valued at **$1 per contract per point** (1 contract = $1) — a
+    flat 1.0 multiplier, so PnL = ±qty × (exit − entry). The exchange's raw
+    `contract_value` (e.g. 0.001 BTC) is intentionally NOT used. Equity/options are
+    also 1.0. Kept as a hook so a per-product multiplier can be reintroduced later.
     """
-    if exchange_segment != SEGMENT:
-        return 1.0
-    try:
-        r = mapper.resolve(security_id)
-        cv = float(r.get("contract_value")) if r and r.get("contract_value") is not None else 0.0
-        return cv if cv > 0 else 1.0
-    except Exception:
-        return 1.0
+    return 1.0
 
 
 def normalize_order(o):
