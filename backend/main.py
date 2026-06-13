@@ -1075,6 +1075,21 @@ def forex_search(q: str = "", limit: int = 25, broker: str = "DELTA"):
     return []
 
 
+@app.get("/api/forex/balances")
+def forex_balances(request: Request, db: Session = Depends(get_db)):
+    """Per-asset wallet balances from the user's connected forex broker — the exact
+    view the broker's margin engine uses (diagnostic for 'insufficient margin')."""
+    me = current_user(request)
+    acc = next((a for a in db.query(Account).filter(Account.user_id == me.id).all()
+                if a.connected and a.broker in FOREX_BROKERS), None)
+    if acc is None:
+        return {"connected": False, "balances": []}
+    b = _broker_from_account(acc)
+    if b is None or not hasattr(b, "wallet_balances"):
+        return {"connected": False, "balances": []}
+    return {"connected": True, "label": acc.label, "balances": b.wallet_balances()}
+
+
 @app.get("/api/forex/underlyings")
 def forex_underlyings(broker: str = "DELTA"):
     """Underlyings that have an options chain on the forex broker (e.g. BTC, ETH)."""
