@@ -151,6 +151,11 @@ class Trade(Base):
     exit_reason = Column(String, default="")       # TARGET / STOPLOSS / MANUAL / KILL
 
     broker_order_id = Column(String, default="")   # id returned by broker (LIVE)
+    # Position-netted brokers (Delta) have no per-order open/closed status, so we
+    # confirm the broker is actually HOLDING this trade's position at least once
+    # before we ever let a 'flat product' reading close it. This stops a freshly
+    # RE-OPENED symbol from being wrongly marked CLOSED off an old/stale position.
+    broker_pos_seen = Column(Integer, default=0)    # 1 once the live position was seen
     broker = Column(String, default="")             # which broker executed it (PAPER/DHAN/ANGEL)
     account_id = Column(Integer, default=0)         # which broker account (0 = Demo/paper)
     user_id = Column(Integer, index=True, default=0)  # tenant owner
