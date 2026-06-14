@@ -328,3 +328,38 @@ class AliceBroker:
             return [normalize_order(o) for o in self._orders()]
         except Exception:
             return []
+
+    def open_positions(self):
+        """(ok, {"<exch>:<token>": signed_net_qty}) for non-flat positions, so a
+        square-off done in Alice's terminal can be detected. ok=False on failure."""
+        try:
+            r = requests.post(f"{API_BASE}/positionAndHoldings/positionBook",
+                              json={"ret": "NET"},
+                              headers=_hdr(self.user_id, self.session_id), timeout=6)
+            if r.status_code != 200:
+                return False, {}
+            d = r.json()
+            if not isinstance(d, list):     # error responses come back as a dict (emsg/stat)
+                return False, {}
+            out = {}
+            for p in d:
+                try:
+                    net = float(p.get("Netqty") or p.get("netqty") or 0)
+                except Exception:
+                    net = 0.0
+                if net == 0:
+                    try:
+                        net = float(p.get("Bqty") or 0) - float(p.get("Sqty") or 0)
+                    except Exception:
+                        net = 0.0
+                tok = str(p.get("Token") or p.get("token") or "")
+                exch = str(p.get("Exchange") or p.get("Exseg") or "")
+                if tok and abs(net) > 0:
+                    out[f"{exch}:{tok}"] = net
+            return True, out
+        except Exception:
+            return False, {}
+
+    def position_key(self, trade):
+        a = self._alice_for(trade)
+        return f"{a['exchange']}:{a['token']}" if a else None

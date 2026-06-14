@@ -547,6 +547,15 @@ class DeltaBroker:
         except Exception:
             return False, {}
 
+    def position_key(self, trade):
+        """The key open_positions() is keyed by for this trade: Delta's product_id.
+        None if not a Delta trade or the product can't be resolved."""
+        if getattr(trade, "exchange_segment", "") != SEGMENT:
+            return None
+        row = mapper.resolve(trade.security_id)
+        pid = row.get("product_id") if row else None
+        return int(pid) if pid is not None else None
+
     def get_orders(self):
         """Recent order book (live + history), normalized to the Dhan-like shape."""
         out = []

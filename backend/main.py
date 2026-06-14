@@ -693,49 +693,56 @@ def _broker_monitor_loop():
                     _sync_external_orders(db, b.get_orders(), acc.broker, acc.id, u.id)
                 except Exception:
                     pass
-                # Delta tracks net POSITIONS per product, not per-order, so we
-                # reconcile each OPEN trade against the position it actually opened
-                # (not just the symbol) — see _reconcile_delta_positions.
-                if hasattr(b, "open_positions"):
-                    try:
-                        _reconcile_delta_positions(db, b, acc.id, u.id)
-                    except Exception:
-                        pass
+                # Brokers net POSITIONS per instrument, not per-order, so reconcile
+                # each OPEN trade against the position it actually opened (keyed by the
+                # broker's instrument id, not the symbol) — see _reconcile_broker_positions.
+                try:
+                    _reconcile_broker_positions(db, b, acc.id, u.id)
+                except Exception:
+                    pass
             db.commit()
             db.close()
         except Exception:
             pass
 
 
-def _reconcile_delta_positions(db, broker, account_id, user_id):
-    """Reconcile OPEN trades against the broker's ACTUAL positions (Delta).
+def _reconcile_broker_positions(db, broker, account_id, user_id):
+    """Reconcile OPEN trades against the broker's ACTUAL positions.
 
-    Delta nets positions per product and exposes no per-order open/closed status, so
-    closing a position is just another order — never a status change on the original.
-    We therefore track each trade against the POSITION it opened, not the symbol:
+    Brokers net positions per instrument and expose no per-order open/closed status —
+    closing a position is just another order, never a status change on the original.
+    So we track each trade against the POSITION it opened, keyed by the broker's own
+    instrument id (broker.position_key) rather than by the symbol:
 
       * While the broker holds a position on the SAME side as the trade, the trade is
         confirmed live (broker_pos_seen) and stays OPEN.
-      * A trade is only marked CLOSED ("squared off in the broker app") once we have
-        seen its position on the broker AND it is now gone.
+      * A trade is only marked CLOSED ("squared off in the broker terminal/app") once
+        we have actually SEEN its position on the broker AND it is now gone.
 
-    This is what fixes re-opening a just-closed symbol: the new trade is a *different*
-    position. We never close it off the old symbol being flat — only once we've
-    actually seen its own position open and then disappear. (Mirrored EXTERNAL orders
-    keep the simple flat-means-closed behaviour, so broker-app closes still clear.)
+    This is what fixes re-opening a just-closed symbol: the new order is a *different*
+    position. We never close it off the old symbol being flat — only once we've seen
+    its own position open and then disappear. (Mirrored EXTERNAL orders keep the
+    simple flat-means-closed behaviour so broker-terminal closes still clear.)
+
+    Works for any broker exposing open_positions() + position_key() — Delta, Dhan,
+    Angel, Zerodha and Alice.
     """
+    if not (hasattr(broker, "open_positions") and hasattr(broker, "position_key")):
+        return
     ok, open_pos = broker.open_positions()
     if not ok:
         return            # couldn't read positions — never assume 'flat'
     open_trades = (db.query(Trade)
                    .filter(Trade.account_id == account_id, Trade.status == "OPEN").all())
     for t in open_trades:
-        if t.exchange_segment != delta.SEGMENT:
-            continue
-        row = delta.mapper.resolve(t.security_id)
-        pid = row.get("product_id") if row else None
-        net = open_pos.get(int(pid)) if pid is not None else None
-        # Covered = broker still holds a position on this product on our side
+        try:
+            key = broker.position_key(t)
+        except Exception:
+            key = None
+        if key is None:
+            continue       # not mappable on this broker yet — leave it OPEN
+        net = open_pos.get(key)
+        # Covered = broker still holds a position on this instrument on our side
         # (a long is covered by a positive net size, a short by a negative one).
         covered = net is not None and ((net > 0) == (t.side == "BUY"))
         if covered:
@@ -744,7 +751,7 @@ def _reconcile_delta_positions(db, broker, account_id, user_id):
             continue
         # Not covered. Don't close a trade we've never confirmed live on the broker —
         # it was likely just placed and its position hasn't registered yet. (EXTERNAL
-        # order-mirrors are exempt: a flat product means the broker-app order is done.)
+        # order-mirrors are exempt: a flat instrument means the terminal order is done.)
         if t.source != "EXTERNAL" and not t.broker_pos_seen:
             continue
         price = t.last_price or t.entry_fill_price
@@ -757,8 +764,8 @@ def _reconcile_delta_positions(db, broker, account_id, user_id):
         t.status = "CLOSED"
         t.exit_reason = "BROKER CLOSE"
         t.pnl = round(t.realized_pnl, 2)
-        db.add(LogEntry(message=f"Closed {t.symbol} — no open position on Delta "
-                                f"(squared off in the broker app). P&L={t.pnl}",
+        db.add(LogEntry(message=f"Closed {t.symbol} — no open position on {broker.name} "
+                                f"(squared off in the broker terminal). P&L={t.pnl}",
                         level="INFO", trade_id=t.id, user_id=user_id))
 
 
