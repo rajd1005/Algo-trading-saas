@@ -818,8 +818,12 @@ def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
         price = float(o.get("price") or 0)
         reason = o.get("omsErrorDescription") or o.get("text") or ""
 
-        existing = db.query(Trade).filter(Trade.broker_order_id == oid,
-                                          Trade.user_id == user_id).first()
+        # Match the broker order to one of OUR trades by either its entry id or the
+        # id of the exit order we placed — so our own square-off is never re-imported
+        # as a brand-new (phantom) trade.
+        existing = db.query(Trade).filter(
+            Trade.user_id == user_id,
+            (Trade.broker_order_id == oid) | (Trade.exit_order_id == oid)).first()
         if existing:
             if existing.source == "EXTERNAL" and existing.status not in ("CLOSED",) \
                     and existing.status != mapped:
@@ -835,6 +839,21 @@ def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
             continue
 
         sec = str(o.get("securityId", ""))
+        # Position-netted brokers (Delta): an order on a product where we already hold
+        # an OPEN system position is part of THAT position's lifecycle (e.g. a square-off
+        # done in the broker app), not a new trade. Don't mirror it — the position
+        # reconcile will close the matching trade. (Delta nets per product, so an order
+        # here can only be reducing/closing what we hold.)
+        if broker == "DELTA":
+            opid = delta.mapper.resolve(sec)
+            opid = opid.get("product_id") if opid else None
+            if opid is not None:
+                held = (db.query(Trade)
+                        .filter(Trade.account_id == account_id, Trade.user_id == user_id,
+                                Trade.status == "OPEN", Trade.source != "EXTERNAL").all())
+                if any((delta.mapper.resolve(h.security_id) or {}).get("product_id") == opid
+                       for h in held):
+                    continue
         sym = o.get("tradingSymbol") or sec
         side = (o.get("transactionType") or "BUY").upper()
         try:
@@ -1079,22 +1098,23 @@ def modify_trade(trade_id: int, payload: ModifyIn, request: Request, db: Session
 
 @app.post("/api/trades/{trade_id}/close", response_model=TradeOut)
 def close_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
-    """Manually exit an OPEN trade at the current price."""
+    """Manually exit an OPEN trade. This places a REAL square-off order on the broker
+    (reduce-only for Delta so it closes the position instead of opening an opposite
+    one) and only marks the trade CLOSED once that order goes through. Previously it
+    just flipped the status, which left LIVE positions open on the broker."""
     me = current_user(request)
     t = _owned_trade(db, trade_id, me.id)
     if t.status != "OPEN":
         raise HTTPException(400, "Only OPEN trades can be closed.")
-    price = t.last_price or t.entry_fill_price
-    direction = 1 if t.side == "BUY" else -1
-    remaining = t.quantity - (t.exited_qty or 0)
-    pv = delta.point_value(t.exchange_segment, t.security_id)   # contract value (1.0 for equity)
-    t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
-    t.exited_qty = t.quantity
-    t.exit_fill_price = price
-    t.status = "CLOSED"
-    t.exit_reason = "MANUAL"
-    t.pnl = round(t.realized_pnl, 2)
-    db.add(LogEntry(message=f"Manual close {t.symbol} x{remaining} @ {price} P&L={t.pnl}", trade_id=t.id, user_id=me.id))
+    broker, _mode, err = replication._broker_for(db, t.account_id)
+    if broker is None:
+        raise HTTPException(400, f"Cannot close {t.symbol} — broker not available: {err}")
+    price = (replication._ltp(db, me.id, t.exchange_segment, t.security_id)
+             or t.last_price or t.entry_fill_price)
+    if not baskets._exit_trade(db, t, broker, price, "MANUAL"):
+        db.commit()       # persist the failure log written by _exit_trade
+        raise HTTPException(502, f"Broker rejected the exit for {t.symbol} — the position "
+                                 f"is still OPEN. See logs for the reason.")
     db.commit()
     db.refresh(t)
     return t

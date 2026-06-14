@@ -254,6 +254,8 @@ def _exit_trade(db, t, broker, price, reason):
         return True
     direction = 1 if t.side == "BUY" else -1
     res = broker.place_exit(t, price, qty=remaining)
+    if res.ok and res.order_id:
+        t.exit_order_id = res.order_id          # so external-sync won't mirror our own exit
     if res.ok and broker.name != "PAPER" and res.order_id:
         st, tp, _, _ = broker.confirm(res.order_id)
         if tp:

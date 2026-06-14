@@ -50,6 +50,7 @@ _MIGRATIONS = {
         "hwm": "REAL DEFAULT 0",
         "broker": "TEXT DEFAULT ''",
         "broker_pos_seen": "INTEGER DEFAULT 0",
+        "exit_order_id": "TEXT DEFAULT ''",
         "account_id": "INTEGER DEFAULT 0",
         "source": "TEXT DEFAULT 'ALGO'",
         "scheduled_time": "TEXT DEFAULT ''",

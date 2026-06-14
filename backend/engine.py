@@ -493,6 +493,8 @@ class TradingEngine:
                       "WARN", t.id)             # ERROR -> retryable
         if not res.ok:
             return res
+        if is_exit and res.order_id:
+            t.exit_order_id = res.order_id      # so external-sync won't mirror our own exit
         if broker.name == "PAPER":
             return res                          # paper/demo: filled at live price
         # Verify with the live broker (Dhan/Angel) what really happened.
