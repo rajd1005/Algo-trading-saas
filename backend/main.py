@@ -689,10 +689,13 @@ def _broker_monitor_loop():
                     uset(db, u.id, "broker_health", "ok")
                 else:
                     uset(db, u.id, "broker_health", "error")
-                try:
-                    _sync_external_orders(db, b.get_orders(), acc.broker, acc.id, u.id)
-                except Exception:
-                    pass
+                # Delta is position-netted: skip order-book mirroring (it only spawns
+                # phantom trades there) — its state comes from the position reconcile.
+                if acc.broker != "DELTA":
+                    try:
+                        _sync_external_orders(db, b.get_orders(), acc.broker, acc.id, u.id)
+                    except Exception:
+                        pass
                 # Brokers net POSITIONS per instrument, not per-order, so reconcile
                 # each OPEN trade against the position it actually opened (keyed by the
                 # broker's instrument id, not the symbol) — see _reconcile_broker_positions.
@@ -805,7 +808,15 @@ _EXT_STATUS_MAP = {
 
 
 def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
-    """Mirror the broker's order book into this tenant's system."""
+    """Mirror the broker's order book into this tenant's system.
+
+    Skipped entirely for position-netted brokers (Delta): there, closing a position
+    is just another order, so mirroring the order book spawns phantom 'trades' for our
+    own square-offs AND for closes done in the broker app — and the order book lags the
+    position feed, so we can't reliably tell a closing order from a new one. Delta state
+    is driven solely by the position reconcile (_reconcile_broker_positions)."""
+    if broker == "DELTA":
+        return
     for o in orders or []:
         oid = str(o.get("orderId", ""))
         if not oid:
@@ -839,21 +850,6 @@ def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
             continue
 
         sec = str(o.get("securityId", ""))
-        # Position-netted brokers (Delta): an order on a product where we already hold
-        # an OPEN system position is part of THAT position's lifecycle (e.g. a square-off
-        # done in the broker app), not a new trade. Don't mirror it — the position
-        # reconcile will close the matching trade. (Delta nets per product, so an order
-        # here can only be reducing/closing what we hold.)
-        if broker == "DELTA":
-            opid = delta.mapper.resolve(sec)
-            opid = opid.get("product_id") if opid else None
-            if opid is not None:
-                held = (db.query(Trade)
-                        .filter(Trade.account_id == account_id, Trade.user_id == user_id,
-                                Trade.status == "OPEN", Trade.source != "EXTERNAL").all())
-                if any((delta.mapper.resolve(h.security_id) or {}).get("product_id") == opid
-                       for h in held):
-                    continue
         sym = o.get("tradingSymbol") or sec
         side = (o.get("transactionType") or "BUY").upper()
         try:
