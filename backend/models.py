@@ -150,7 +150,10 @@ class Trade(Base):
     pnl = Column(Float, default=0.0)
     exit_reason = Column(String, default="")       # TARGET / STOPLOSS / MANUAL / KILL
 
-    broker_order_id = Column(String, default="")   # id returned by broker (LIVE)
+    broker_order_id = Column(String, default="")   # id returned by broker (LIVE) — entry
+    exit_order_id = Column(String, default="")      # broker id of OUR exit order (so the
+    #                                                 external-order sync never mirrors our
+    #                                                 own square-off back as a new trade)
     # Position-netted brokers (Delta) have no per-order open/closed status, so we
     # confirm the broker is actually HOLDING this trade's position at least once
     # before we ever let a 'flat product' reading close it. This stops a freshly
