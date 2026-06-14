@@ -324,3 +324,32 @@ class ZerodhaBroker:
             return [normalize_order(o) for o in self._orders()]
         except Exception:
             return []
+
+    def open_positions(self):
+        """(ok, {"<exch>:<tradingsymbol>": signed_net_qty}) for non-flat net positions,
+        so a square-off done in Kite can be detected. ok=False on a failed read."""
+        try:
+            r = requests.get(f"{API_BASE}/portfolio/positions",
+                             headers=_headers(self.api_key, self.access_token), timeout=6)
+            if r.status_code != 200:
+                return False, {}
+            d = r.json()
+            if d.get("status") != "success":
+                return False, {}
+            out = {}
+            for p in (d.get("data") or {}).get("net") or []:
+                try:
+                    net = float(p.get("quantity") or 0)
+                except Exception:
+                    net = 0.0
+                tsym = str(p.get("tradingsymbol") or "")
+                exch = str(p.get("exchange") or "")
+                if tsym and abs(net) > 0:
+                    out[f"{exch}:{tsym}"] = net
+            return True, out
+        except Exception:
+            return False, {}
+
+    def position_key(self, trade):
+        k = self._kite_for(trade)
+        return f"{k['exchange']}:{k['tradingsymbol']}" if k else None

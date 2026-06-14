@@ -525,8 +525,9 @@ class DeltaBroker:
 
     def open_positions(self):
         """(ok, {product_id: net_size}) for products with a non-zero open position.
-        ok=False if the fetch failed, so callers never treat an error as 'flat' and
-        wrongly close trades."""
+        net_size is SIGNED (long > 0, short < 0) so callers can match a position to
+        the side of the trade. ok=False if the fetch failed, so callers never treat
+        an error as 'flat' and wrongly close trades."""
         try:
             r = self._request("GET", "/v2/positions/margined", timeout=6)
             if r.status_code != 200:
@@ -536,15 +537,24 @@ class DeltaBroker:
             out = {}
             for p in rows or []:
                 try:
-                    size = int(p.get("size") or 0)
+                    size = float(p.get("size") or 0)   # float: never truncate a live size to 0
                 except Exception:
-                    size = 0
+                    size = 0.0
                 pid = p.get("product_id")
-                if pid is not None and size != 0:
+                if pid is not None and abs(size) > 0:
                     out[int(pid)] = size
             return True, out
         except Exception:
             return False, {}
+
+    def position_key(self, trade):
+        """The key open_positions() is keyed by for this trade: Delta's product_id.
+        None if not a Delta trade or the product can't be resolved."""
+        if getattr(trade, "exchange_segment", "") != SEGMENT:
+            return None
+        row = mapper.resolve(trade.security_id)
+        pid = row.get("product_id") if row else None
+        return int(pid) if pid is not None else None
 
     def get_orders(self):
         """Recent order book (live + history), normalized to the Dhan-like shape."""

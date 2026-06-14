@@ -182,6 +182,41 @@ class DhanBroker:
         except Exception:
             return []
 
+    def open_positions(self):
+        """(ok, {"<segment>:<securityId>": signed_net_qty}) for non-flat positions.
+        Lets the engine detect a square-off done in Dhan's own terminal. ok=False on
+        a failed read so we never treat an error as 'flat' and wrongly close trades."""
+        url = f"{config.DHAN_API_BASE}/positions"
+        try:
+            r = requests.get(url, headers=self._headers(), timeout=6)
+            if r.status_code != 200:
+                return False, {}
+            rows = r.json()
+            if not isinstance(rows, list):
+                return False, {}
+            out = {}
+            for p in rows:
+                try:
+                    net = float(p.get("netQty") or 0)
+                except Exception:
+                    net = 0.0
+                if net == 0:        # fall back to buy/sell legs if netQty is absent
+                    try:
+                        net = float(p.get("buyQty") or 0) - float(p.get("sellQty") or 0)
+                    except Exception:
+                        net = 0.0
+                sid = str(p.get("securityId") or "")
+                seg = str(p.get("exchangeSegment") or "")
+                if sid and abs(net) > 0:
+                    out[f"{seg}:{sid}"] = net
+            return True, out
+        except Exception:
+            return False, {}
+
+    def position_key(self, trade):
+        """Dhan trades are already in Dhan space, so key directly off the trade."""
+        return f"{trade.exchange_segment}:{trade.security_id}"
+
     def get_orders(self):
         """Return today's full order book from Dhan (all statuses)."""
         url = f"{config.DHAN_API_BASE}/orders"

@@ -361,6 +361,40 @@ class AngelBroker:
         except Exception:
             return []
 
+    def open_positions(self):
+        """(ok, {"<exch>:<symboltoken>": signed_net_qty}) for non-flat positions, so
+        a square-off done in Angel's terminal can be detected. ok=False on failure."""
+        url = f"{API_BASE}/rest/secure/angelbroking/order/v1/getPosition"
+        try:
+            r = requests.get(url, headers=_auth_headers(self.api_key, self.jwt), timeout=6)
+            if r.status_code != 200:
+                return False, {}
+            d = r.json()
+            if not d.get("status"):
+                return False, {}
+            out = {}
+            for p in d.get("data") or []:
+                try:
+                    net = float(p.get("netqty") or 0)
+                except Exception:
+                    net = 0.0
+                if net == 0:
+                    try:
+                        net = float(p.get("buyqty") or 0) - float(p.get("sellqty") or 0)
+                    except Exception:
+                        net = 0.0
+                tok = str(p.get("symboltoken") or "")
+                exch = str(p.get("exchange") or "")
+                if tok and abs(net) > 0:
+                    out[f"{exch}:{tok}"] = net
+            return True, out
+        except Exception:
+            return False, {}
+
+    def position_key(self, trade):
+        a = self._angel_for(trade)
+        return f"{a['exchange']}:{a['token']}" if a else None
+
 
 def login(client_id, pin, api_key, totp_secret):
     """SmartAPI password+TOTP login. Returns (ok, data_or_error)."""
