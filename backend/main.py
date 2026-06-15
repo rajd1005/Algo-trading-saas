@@ -35,7 +35,6 @@ import emailer
 import angel
 import zerodha
 import aliceblue
-import delta
 import feeds
 import baskets
 import margins
@@ -259,17 +258,7 @@ def _broker_connected(db, uid) -> bool:
     return db.query(Account).filter(Account.user_id == uid, Account.connected == 1).count() > 0
 
 
-ALL_BROKERS = ["DHAN", "ANGEL", "ZERODHA", "ALICE", "DELTA"]
-
-# Broker category drives which trading UI a broker uses:
-#   EQUITY -> the India options/futures/equity picker (Dhan-symbol space)
-#   FOREX  -> the Forex Trade tab (crypto/forex symbols, e.g. Delta)
-# A future forex/crypto broker just needs an entry here to inherit the Forex tab.
-BROKER_CATEGORY = {"DHAN": "EQUITY", "ANGEL": "EQUITY", "ZERODHA": "EQUITY",
-                   "ALICE": "EQUITY", "DELTA": "FOREX"}
-FOREX_BROKERS = [b for b in ALL_BROKERS if BROKER_CATEGORY.get(b) == "FOREX"]
-# exchange_segment values used by forex brokers (so the UI can split watchlists etc.)
-FOREX_SEGMENTS = ["DELTA"]
+ALL_BROKERS = ["DHAN", "ANGEL", "ZERODHA", "ALICE"]
 
 
 def _enabled_brokers(db):
@@ -368,7 +357,7 @@ def get_data_creds(db):
 # ---------- multi-account broker logins ----------
 def _label(broker, client_id):
     name = {"DHAN": "Dhan", "ANGEL": "Angel One", "ZERODHA": "Zerodha",
-            "ALICE": "Alice Blue", "DELTA": "Delta Exchange"}.get(broker, broker)
+            "ALICE": "Alice Blue"}.get(broker, broker)
     return f"{name} · {client_id or '—'}"
 
 
@@ -452,8 +441,6 @@ def _broker_from_account(a):
         return zerodha.ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
     if a.broker == "ALICE" and creds.get("session_id"):
         return aliceblue.AliceBroker(a.client_id, creds["session_id"])
-    if a.broker == "DELTA" and creds.get("api_key") and creds.get("api_secret"):
-        return delta.DeltaBroker(creds["api_key"], creds["api_secret"])
     return None
 
 
@@ -563,17 +550,55 @@ def _claim_legacy_data(db, uid):
     db.commit()
 
 
+def _purge_forex_once():
+    """One-time cleanup after the Forex/Delta broker was removed: delete Delta
+    accounts and trades, drop Delta watchlist / basket-leg rows, and reset any
+    provider / enabled-broker settings that referenced Delta. Flag-gated so it
+    runs exactly once."""
+    db = SessionLocal()
+    try:
+        if get_setting(db, "forex_purged_v1", "") == "yes":
+            return
+        n_tr = (db.query(Trade)
+                .filter((Trade.broker == "DELTA") | (Trade.exchange_segment == "DELTA"))
+                .delete(synchronize_session=False))
+        delta_ids = {str(a.id) for a in db.query(Account).filter(Account.broker == "DELTA").all()}
+        n_acc = db.query(Account).filter(Account.broker == "DELTA").delete(synchronize_session=False)
+        db.query(Watchlist).filter(Watchlist.exchange_segment == "DELTA").delete(synchronize_session=False)
+        db.query(BasketLeg).filter(BasketLeg.exchange_segment == "DELTA").delete(synchronize_session=False)
+        # providers pointing at a now-deleted Delta account -> back to DEMO
+        if delta_ids:
+            for us in db.query(UserSetting).filter(
+                    UserSetting.key.in_(("trade_provider", "data_provider"))).all():
+                if us.value in delta_ids:
+                    us.value = "DEMO"
+        # strip DELTA from the global enabled-brokers list
+        eb = get_setting(db, "enabled_brokers", "")
+        if eb:
+            set_setting(db, "enabled_brokers",
+                        ",".join(b for b in eb.split(",") if b.strip().upper() != "DELTA"))
+        set_setting(db, "forex_purged_v1", "yes")
+        if n_tr or n_acc:
+            db.add(LogEntry(message=f"Forex/Delta broker removed — purged {n_tr} trade(s) "
+                                    f"and {n_acc} account(s).", level="WARN"))
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def _startup():
     init_db()
     db = SessionLocal()
     _seed_globals(db)
     db.close()
+    _purge_forex_once()        # one-time cleanup: the Forex/Delta broker was removed
     instruments.load_async()   # download Dhan's symbol list in the background
     angel.mapper.load_async()  # download Angel One master + build the symbol map
     zerodha.mapper.load_async()  # download Zerodha (Kite) master + symbol map
     aliceblue.mapper.load_async()  # download Alice Blue contract masters + symbol map
-    delta.mapper.load_async()      # download Delta Exchange product list (symbol <-> id)
     engine.start()
     baskets.start()            # basket scheduler + leg/MTM monitor threads
     replication.start()        # copy-trading: master-fill monitor + group scheduler
@@ -598,7 +623,7 @@ def _master_refresh_loop():
             pass
         if time.time() - last_mappers >= 20 * 3600:
             last_mappers = time.time()
-            for m in (angel, zerodha, aliceblue, delta):
+            for m in (angel, zerodha, aliceblue):
                 try:
                     m.mapper.load_async()
                 except Exception:
@@ -721,8 +746,8 @@ def _reconcile_broker_positions(db, broker, account_id, user_id):
     its own position open and then disappear. (Mirrored EXTERNAL orders keep the
     simple flat-means-closed behaviour so broker-terminal closes still clear.)
 
-    Works for any broker exposing open_positions() + position_key() — Delta, Dhan,
-    Angel, Zerodha and Alice.
+    Works for any broker exposing open_positions() + position_key() — Dhan, Angel,
+    Zerodha and Alice.
     """
     if not (hasattr(broker, "open_positions") and hasattr(broker, "position_key")):
         return
@@ -754,7 +779,7 @@ def _reconcile_broker_positions(db, broker, account_id, user_id):
         price = t.last_price or t.entry_fill_price
         direction = 1 if t.side == "BUY" else -1
         remaining = t.quantity - (t.exited_qty or 0)
-        pv = delta.point_value(t.exchange_segment, t.security_id)
+        pv = 1.0   # equity P&L: 1 point = one currency unit per qty
         t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
         t.exited_qty = t.quantity
         t.exit_fill_price = price
@@ -802,7 +827,7 @@ _EXT_STATUS_MAP = {
 
 # Every broker we integrate nets positions per instrument, so order-book mirroring is
 # disabled for all of them — it created phantom trades for square-offs (see below).
-_NETTED_BROKERS = {"DELTA", "DHAN", "ANGEL", "ZERODHA", "ALICE"}
+_NETTED_BROKERS = {"DHAN", "ANGEL", "ZERODHA", "ALICE"}
 
 
 def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
@@ -811,7 +836,7 @@ def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
     Disabled for position-netted brokers: closing a position is just another order, so
     mirroring the order book spawns phantom 'trades' for square-offs — and the order
     book lags the position feed, so a closing order can't be reliably told apart from a
-    new one. EVERY broker this app integrates (Delta/Dhan/Angel/Zerodha/Alice) nets
+    new one. EVERY broker this app integrates (Dhan/Angel/Zerodha/Alice) nets
     positions, so this is a no-op for all of them: trade state comes from the engine
     (entries/exits) and the position reconcile (_reconcile_broker_positions)."""
     if broker in _NETTED_BROKERS:
@@ -907,13 +932,6 @@ def _auto_renew_loop():
                         db.add(LogEntry(message=f"{a.label} session auto-renewed.", level="INFO"))
                     else:
                         db.add(LogEntry(message=f"{a.label} renew failed — log in again.", level="WARN"))
-                elif a.broker == "DELTA" and creds.get("api_key") and creds.get("api_secret"):
-                    # Delta keys don't expire: just re-verify and refresh the timer.
-                    ok, _res = delta.verify(creds["api_key"], creds["api_secret"])
-                    if ok:
-                        a.token_time = dt.datetime.utcnow()
-                    else:
-                        db.add(LogEntry(message=f"{a.label} connection check failed — verify keys/IP.", level="WARN"))
             db.commit()
             db.close()
         except Exception:
@@ -1043,7 +1061,7 @@ def modify_trade(trade_id: int, payload: ModifyIn, request: Request, db: Session
     if payload.stop_loss is not None:
         t.stop_loss = float(payload.stop_loss)
         if t.entry_fill_price > 0 and t.stop_loss > 0:
-            # Adaptive precision so crypto/forex sub-unit SL distances aren't lost.
+            # Adaptive precision so sub-unit SL distances aren't lost.
             nd = 2 if t.entry_fill_price >= 100 else (4 if t.entry_fill_price >= 1 else 8)
             t.sl_points = round(abs(t.entry_fill_price - t.stop_loss), nd)
         if old_sl != t.stop_loss:
@@ -1094,9 +1112,8 @@ def modify_trade(trade_id: int, payload: ModifyIn, request: Request, db: Session
 @app.post("/api/trades/{trade_id}/close", response_model=TradeOut)
 def close_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
     """Manually exit an OPEN trade. This places a REAL square-off order on the broker
-    (reduce-only for Delta so it closes the position instead of opening an opposite
-    one) and only marks the trade CLOSED once that order goes through. Previously it
-    just flipped the status, which left LIVE positions open on the broker."""
+    and only marks the trade CLOSED once that order goes through. Previously it just
+    flipped the status, which left LIVE positions open on the broker."""
     me = current_user(request)
     t = _owned_trade(db, trade_id, me.id)
     if t.status != "OPEN":
@@ -1151,58 +1168,6 @@ def equities_search(q: str = "", limit: int = 25):
     return instruments.search_equities(q, limit=limit)
 
 
-@app.get("/api/forex/search")
-def forex_search(q: str = "", limit: int = 25, broker: str = "DELTA"):
-    """Search a Forex/crypto broker's products by symbol. Dispatches by broker so
-    any future forex broker can plug in here (Phase: Delta Exchange)."""
-    if broker.upper() == "DELTA":
-        return delta.mapper.search(q, limit=limit)
-    return []
-
-
-@app.get("/api/forex/balances")
-def forex_balances(request: Request, db: Session = Depends(get_db)):
-    """Per-asset wallet balances from the user's connected forex broker — the exact
-    view the broker's margin engine uses (diagnostic for 'insufficient margin')."""
-    me = current_user(request)
-    acc = next((a for a in db.query(Account).filter(Account.user_id == me.id).all()
-                if a.connected and a.broker in FOREX_BROKERS), None)
-    if acc is None:
-        return {"connected": False, "balances": []}
-    b = _broker_from_account(acc)
-    if b is None or not hasattr(b, "wallet_balances"):
-        return {"connected": False, "balances": []}
-    return {"connected": True, "label": acc.label, "balances": b.wallet_balances()}
-
-
-@app.get("/api/forex/underlyings")
-def forex_underlyings(broker: str = "DELTA"):
-    """Underlyings that have an options chain on the forex broker (e.g. BTC, ETH)."""
-    if broker.upper() == "DELTA":
-        return delta.mapper.option_underlyings()
-    return []
-
-
-@app.get("/api/forex/expiries")
-def forex_expiries(underlying: str, broker: str = "DELTA"):
-    if broker.upper() == "DELTA":
-        return delta.mapper.option_expiries(underlying)
-    return []
-
-
-@app.get("/api/forex/optionchain")
-def forex_option_chain(underlying: str, expiry: str = "", broker: str = "DELTA"):
-    """Strikes (CALL/PUT contracts) for a forex underlying + expiry — same shape as
-    the India option chain so the front-end can render it the same way."""
-    if broker.upper() != "DELTA":
-        return {"underlying": underlying, "expiry": expiry, "expiries": [], "strikes": []}
-    exps = delta.mapper.option_expiries(underlying)
-    if not expiry and exps:
-        expiry = exps[0]
-    return {"underlying": underlying, "expiry": expiry, "expiries": exps,
-            "strikes": delta.mapper.option_chain(underlying, expiry)}
-
-
 @app.get("/api/expiries")
 def expiries(underlying: str, kind: str = "OPTION"):
     return instruments.expiries(underlying, kind.upper())
@@ -1248,8 +1213,6 @@ def _provider_lot_size(db, uid, security_id, exchange_segment, fallback=0):
         if acc.broker == "ALICE":
             al = aliceblue.mapper.translate(security_id, exchange_segment, meta)
             return _to_int(al and al.get("lot_size")) or dhan_lot
-        if acc.broker == "DELTA":
-            return 1        # Delta sizes orders in whole contracts (no lot multiplier)
     except Exception:
         pass
     return dhan_lot
@@ -1311,11 +1274,6 @@ def ltp(payload: dict, request: Request, db: Session = Depends(get_db)):
         if not (cid and sid) or not by_seg:
             return {"connected": bool(cid and sid), "prices": {}}
         md = aliceblue.AliceMarketData(cid, sid)
-    elif acc.broker == "DELTA":
-        key, sec = creds.get("api_key", ""), creds.get("api_secret", "")
-        if not (key and sec) or not by_seg:
-            return {"connected": bool(key and sec), "prices": {}}
-        md = delta.DeltaMarketData(key, sec)
     else:               # DHAN
         cid, tok = acc.client_id, creds.get("access_token", "")
         if not cid or not tok or not by_seg:
@@ -1397,10 +1355,10 @@ async def stream(request: Request):
                 elif w["acc_id"]:
                     snap = feeds.manager.snapshot_cached(w["acc_id"], w["items"])
                     prices = {sid: px for (seg, sid), px in snap.items()}
-            delta = {k: v for k, v in prices.items() if last.get(k) != v}
-            if delta:
-                last.update(delta)
-                yield "data: " + json.dumps(delta) + "\n\n"
+            diff = {k: v for k, v in prices.items() if last.get(k) != v}
+            if diff:
+                last.update(diff)
+                yield "data: " + json.dumps(diff) + "\n\n"
                 hb = time.time()
             elif time.time() - hb > 15:
                 yield ": hb\n\n"
@@ -1439,7 +1397,6 @@ def instruments_refresh():
     angel.mapper.load_async()    # Angel master (for translation)
     zerodha.mapper.load_async()  # Zerodha master (for translation)
     aliceblue.mapper.load_async()  # Alice Blue masters (for translation)
-    delta.mapper.load_async()      # Delta Exchange product list
     return {"ok": True, "message": "Refreshing symbol lists in the background…"}
 
 
@@ -1554,7 +1511,6 @@ def _build_summary(db, uid, broker="ALL", date=""):
         "angel_map": angel.mapper.status(),
         "zerodha_map": zerodha.mapper.status(),
         "alice_map": aliceblue.mapper.status(),
-        "delta_map": delta.mapper.status(),
         "demo_direction": demo_market.direction,
         "data_provider": data_provider, "trade_provider": trade_provider,
         "data_name": data_name, "broker_name": broker_name, "balance": balance,
@@ -2437,7 +2393,6 @@ def get_broker(request: Request, db: Session = Depends(get_db)):
         "connected": data_conn and trade_conn,
         "demo_allowed": is_admin,
         "enabled_brokers": ALL_BROKERS if is_admin else _enabled_brokers(db),
-        "forex_brokers": FOREX_BROKERS,
         "redirect_url": base + "/api/dhan/callback",
         "postback_url": f"{hook}/dhan",
         "angel_redirect_url": base + "/api/angel/callback",
@@ -2457,7 +2412,7 @@ async def user_webhook(user_uuid: str, broker: str, request: Request, db: Sessio
         return {"ok": False}
     broker = broker.upper()
     bmap = {"DHAN": "DHAN", "ANGEL": "ANGEL", "ZERODHA": "ZERODHA", "ALICEBLUE": "ALICE",
-            "ALICE": "ALICE", "DELTA": "DELTA"}
+            "ALICE": "ALICE"}
     bk = bmap.get(broker)
     if not bk:
         return {"ok": False}
@@ -2465,7 +2420,7 @@ async def user_webhook(user_uuid: str, broker: str, request: Request, db: Sessio
         payload = await request.json()
         orders = payload if isinstance(payload, list) else [payload]
         norm = {"ANGEL": angel.normalize_order, "ZERODHA": zerodha.normalize_order,
-                "ALICE": aliceblue.normalize_order, "DELTA": delta.normalize_order}.get(bk)
+                "ALICE": aliceblue.normalize_order}.get(bk)
         rows = [norm(o) for o in orders] if norm else orders
         _sync_external_orders(db, rows, bk, _account_id_for_broker(db, bk, u.id), u.id)
         db.commit()
@@ -2679,31 +2634,6 @@ def aliceblue_login(payload: dict, request: Request, db: Session = Depends(get_d
     raise HTTPException(400, f"Alice Blue login failed: {res}")
 
 
-# ---------- Delta Exchange (key-based, per account) ----------
-@app.post("/api/delta/login")
-def delta_login(payload: dict, request: Request, db: Session = Depends(get_db)):
-    me = current_user(request)
-    a = _my_account(db, payload.get("account_id", 0), me.id, "DELTA")
-    creds = _acc_creds(a)
-    key, sec = creds.get("api_key", ""), creds.get("api_secret", "")
-    if not key or not sec:
-        raise HTTPException(400, "Enter the Delta API Key and API Secret first.")
-    if _broker_in_use_elsewhere(db, "DELTA", a.client_id, me.id):
-        raise HTTPException(400, "This Delta account is already linked to another user.")
-    ok, res = delta.verify(key, sec)
-    if ok:
-        a.connected = 1
-        a.token_time = dt.datetime.utcnow()
-        a.label = _label("DELTA", a.client_id)
-        db.add(LogEntry(message=f"Logged in to {a.label}.", level="INFO", user_id=me.id))
-        _auto_select_provider(db, me.id, a.id)
-        db.commit()
-        return {"connected": True}
-    db.add(LogEntry(message=f"Delta login failed: {res}", level="ERROR", user_id=me.id))
-    db.commit()
-    raise HTTPException(400, f"Delta login failed: {res}")
-
-
 # ---------- how-to doc (admin-editable rich HTML, shown to all users) ----------
 DEFAULT_HOWTO = (
     "<h3>Dhan</h3><p>Create an app at <b>web.dhan.co</b>, set the Redirect &amp; Postback "
@@ -2715,11 +2645,6 @@ DEFAULT_HOWTO = (
     "account (Client ID, API Key, API Secret), then click <b>Login</b>.</p>"
     "<h3>Alice Blue</h3><p>Enable the <b>ANT API</b>, add the account (User ID, API Key), "
     "then click <b>Login</b> — connects instantly, no redirect.</p>"
-    "<h3>Delta Exchange</h3><p>Create an <b>API key</b> at <b>India Delta Exchange</b> "
-    "(with trading permission, and whitelist this server's IP shown on the Broker tab), "
-    "add the account (API Key, API Secret), then click <b>Login</b> — connects instantly, "
-    "no redirect. Enter the Delta <b>symbol</b> (e.g. <code>BTCUSD</code>) or numeric "
-    "product id as the trade's Security ID.</p>"
 )
 
 
@@ -2960,12 +2885,6 @@ def admin_account_login(uid: int, aid: int, request: Request, db: Session = Depe
         if not ok:
             raise HTTPException(400, f"Alice Blue login failed: {res}")
         _set_acc_creds(a, session_id=res)
-    elif a.broker == "DELTA":
-        if not creds.get("api_key") or not creds.get("api_secret"):
-            raise HTTPException(400, "Fill the Delta API Key and API Secret first.")
-        ok, res = delta.verify(creds["api_key"], creds["api_secret"])
-        if not ok:
-            raise HTTPException(400, f"Delta login failed: {res}")
     elif a.broker == "ZERODHA":
         if not creds.get("api_key"):
             raise HTTPException(400, "Enter the Zerodha API Key & Secret first.")

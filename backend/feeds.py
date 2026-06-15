@@ -5,10 +5,10 @@ broker ACCOUNT (so each tenant streams with its own credentials).
 Design
 ------
 - Every broker pushes ticks over its own WebSocket protocol (Dhan/Angel/Zerodha
-  binary, Alice Blue / Delta JSON). Each client here connects, subscribes by the
-  broker's own token (translated from our Dhan-space security_id via the symbol
-  mappers; Delta subscribes by its crypto symbol), and caches the latest LTP keyed
-  by (segment, security_id) so the rest of the app reads prices uniformly.
+  binary, Alice Blue JSON). Each client here connects, subscribes by the broker's own
+  token (translated from our Dhan-space security_id via the symbol mappers), and
+  caches the latest LTP keyed by (segment, security_id) so the rest of the app reads
+  prices uniformly.
 - A single FeedManager keeps one feed per account, started lazily, subscribed to
   whatever instruments are asked for, and stopped after a few idle minutes.
 - SAFETY NET: this is an *enhancement*. The engine and /api/ltp still fall back to
@@ -33,7 +33,6 @@ except Exception:
 import angel
 import zerodha
 import aliceblue
-import delta
 
 IDLE_STOP_SECS = 300       # stop a feed after 5 min with no reads/subscribes
 
@@ -385,77 +384,8 @@ class AliceFeed(BaseFeed):
                     pass
 
 
-# ============================================================================
-# Delta Exchange (India) — public ticker WebSocket (JSON)
-# ============================================================================
-class DeltaFeed(BaseFeed):
-    """Streams Delta's `v2/ticker` channel. Crypto symbols, so there is no Dhan-token
-    translation — we subscribe by the Delta symbol resolved from our security_id."""
-    broker = "DELTA"
-
-    def _url(self):
-        return "wss://socket.india.delta.exchange"
-
-    def _on_open(self, ws):
-        self.connected = True
-        self.last_error = ""
-        try:                                   # ask Delta to keep the socket alive
-            ws.send(json.dumps({"type": "enable_heartbeat"}))
-        except Exception:
-            pass
-        with self._lock:
-            want = list(self._want)
-            self._subscribed.clear()
-        if want:
-            self._do_subscribe(want)
-
-    def _do_subscribe(self, instruments):
-        symbols = []
-        with self._lock:
-            for seg, sid in instruments:
-                if (seg, sid) in self._subscribed:
-                    continue
-                sym = delta.mapper.symbol_for(sid)
-                if sym:
-                    symbols.append(sym)
-                    self._tok2inst[sym] = (seg, str(sid))   # ticker is keyed by symbol
-                    self._subscribed.add((seg, sid))
-        if symbols:
-            try:
-                self._ws.send(json.dumps({
-                    "type": "subscribe",
-                    "payload": {"channels": [{"name": "v2/ticker", "symbols": symbols}]},
-                }))
-            except Exception as e:
-                self.last_error = str(e)
-
-    def _parse(self, message):
-        try:
-            d = json.loads(message)
-        except Exception:
-            return
-        if d.get("type") != "v2/ticker":
-            return
-        inst = self._tok2inst.get(d.get("symbol", ""))
-        if not inst:
-            return
-        px = d.get("mark_price") or d.get("close") or d.get("spot_price") or 0
-        try:
-            self._store(inst[0], inst[1], float(px))
-        except Exception:
-            pass
-
-    def _store(self, seg, secid, price):
-        # Crypto prices can be sub-cent (small alts), so keep full precision —
-        # the BaseFeed's 2-decimal rounding would distort them.
-        if price and price > 0:
-            with self._lock:
-                self._ltp[(seg, str(secid))] = float(price)
-            self.last_tick = time.time()
-
-
 _FEED_CLASSES = {"DHAN": DhanFeed, "ANGEL": AngelFeed, "ZERODHA": ZerodhaFeed,
-                 "ALICE": AliceFeed, "DELTA": DeltaFeed}
+                 "ALICE": AliceFeed}
 
 
 # ============================================================================

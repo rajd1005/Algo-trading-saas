@@ -18,7 +18,7 @@ class TradeCreate(BaseModel):
     side: str = "BUY"
     quantity: int = 1
     lot_size: int = 1
-    leverage: float = 0.0             # forex/crypto leverage (0 = broker default)
+    leverage: float = 0.0             # legacy field, unused (Forex broker removed)
     entry_type: str = "MARKET"        # MARKET / LIMIT / SCHEDULED / TRIGGER
     entry_price: float = 0.0
     scheduled_time: str = ""          # "HH:MM:SS" IST (entry_type SCHEDULED)
