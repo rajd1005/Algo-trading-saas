@@ -46,14 +46,13 @@ from brokers import PaperBroker, DhanBroker
 from angel import AngelBroker, AngelMarketData
 from zerodha import ZerodhaBroker, ZerodhaMarketData
 from aliceblue import AliceBroker, AliceMarketData
-from delta import DeltaBroker, DeltaMarketData, point_value as _point_value
 import config
 
 
 def level_price(side, ref, points, is_target):
     """Convert a points distance into an absolute price, given the entry ref.
     'points' are price units (the user's SL/target distance). Precision adapts to the
-    price magnitude so crypto/forex sub-unit prices aren't flattened to 2 decimals."""
+    price magnitude so sub-unit prices aren't flattened to 2 decimals."""
     if points <= 0 or ref <= 0:
         return 0.0
     raw = (ref + points) if ((side == "BUY") == is_target) else (ref - points)
@@ -165,8 +164,6 @@ class TradingEngine:
             return ZerodhaBroker(creds.get("api_key", ""), creds["access_token"])
         if acc.broker == "ALICE" and creds.get("session_id"):
             return AliceBroker(acc.client_id, creds["session_id"])
-        if acc.broker == "DELTA" and creds.get("api_key") and creds.get("api_secret"):
-            return DeltaBroker(creds["api_key"], creds["api_secret"])
         return None
 
     def _fetch_prices(self, db, uid, value, instruments, active):
@@ -263,20 +260,6 @@ class TradingEngine:
                     self._set_setting(db, uid, "md_status", "ok:alice")
                 elif md.last_error:
                     self._set_setting(db, uid, "md_status", f"Alice Blue data error: {md.last_error[:160]}")
-            return prices
-        if acc.broker == "DELTA":
-            key, sec = creds.get("api_key", ""), creds.get("api_secret", "")
-            if not key or not sec:
-                if active:
-                    self._set_setting(db, uid, "md_status", "Data (Delta) not connected — connect on the Broker tab.")
-                return {}
-            md = DeltaMarketData(key, sec)
-            prices = md.get_ltp_batch(by_seg)
-            if active:
-                if prices:
-                    self._set_setting(db, uid, "md_status", "ok:delta")
-                elif md.last_error:
-                    self._set_setting(db, uid, "md_status", f"Delta data error: {md.last_error[:160]}")
             return prices
         return {}
 
@@ -684,7 +667,7 @@ class TradingEngine:
         if not res.ok:
             self._log(db, f"Exit failed for {t.symbol} ({reason}): {res.error}", "ERROR", t.id)
             return False
-        pv = _point_value(t.exchange_segment, t.security_id)
+        pv = 1.0
         t.realized_pnl = (t.realized_pnl or 0) + (price - t.entry_fill_price) * direction * remaining * pv
         t.exited_qty = t.quantity
         t.exit_fill_price = res.fill_price
@@ -716,7 +699,7 @@ class TradingEngine:
 
     def _handle_open(self, db, t, price, kill, live_broker):
         direction = 1 if t.side == "BUY" else -1
-        pv = _point_value(t.exchange_segment, t.security_id)   # contract value (1.0 for equity)
+        pv = 1.0   # equity P&L: 1 point = one currency unit per qty
         remaining = t.quantity - (t.exited_qty or 0)
         if remaining <= 0:
             t.status = "CLOSED"
@@ -830,7 +813,7 @@ class TradingEngine:
             return
         direction = 1 if t.side == "BUY" else -1
         remaining = t.quantity - (t.exited_qty or 0)
-        pv = _point_value(t.exchange_segment, t.security_id)   # contract value (1.0 for equity)
+        pv = 1.0   # equity P&L: 1 point = one currency unit per qty
         unrealized = (price - t.entry_fill_price) * direction * remaining * pv
         t.pnl = round((t.realized_pnl or 0) + unrealized, 2)
 

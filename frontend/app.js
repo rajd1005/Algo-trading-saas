@@ -230,11 +230,11 @@ async function refreshSummary() {
   const ss = document.getElementById("symbolsState");
   const ssLabel = document.getElementById("symbolsLabel");
   // Maps for non-Dhan brokers carry a {count, loading}; Dhan uses the instruments store.
-  const brokerMap = { ANGEL: s.angel_map, ZERODHA: s.zerodha_map, ALICE: s.alice_map, DELTA: s.delta_map };
+  const brokerMap = { ANGEL: s.angel_map, ZERODHA: s.zerodha_map, ALICE: s.alice_map };
   const map = brokerMap[dataBroker];
   if (ssLabel) {
     const src = { DEMO: "Demo", DHAN: "Dhan", ANGEL: "Angel One",
-                  ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" }[dataBroker] || "Dhan";
+                  ZERODHA: "Zerodha", ALICE: "Alice Blue" }[dataBroker] || "Dhan";
     ssLabel.textContent = `Symbol list (auto-downloaded from ${src}, refreshes daily):`;
   }
   if (ss) {
@@ -944,386 +944,6 @@ form.onsubmit = async (e) => {
   } catch (err) { msg.textContent = "❌ " + err.message; msg.className = "msg neg"; }
 };
 
-// ====================== FOREX / CRYPTO TRADE (Delta etc.) ======================
-// Self-contained tab: its own symbol search, order form and watchlist. Shown only
-// when a Forex-category broker is connected. Orders use the same /api/trades engine.
-const FOREX_SEGMENTS = ["DELTA"];
-const FOREX_SEGMENT_FOR = { DELTA: "DELTA" };
-const FX = { mode: "TEST", side: "BUY", et: "MARKET", broker: "DELTA", account: null, sel: null, ltpTimer: null };
-const isForexItem = (w) => FOREX_SEGMENTS.includes(w.exchange_segment);
-
-function fxApplyBrokerState(b) {
-  const fb = (b && b.forex_brokers) || ["DELTA"];
-  // Show the Forex tab once a Forex broker has been SET UP (credentials saved),
-  // not only after it connects. Prefer a connected account for trading.
-  const forexAccts = (b && b.accounts || []).filter((a) => fb.includes(a.broker) && (a.connected || a.has_secret));
-  const acc = forexAccts.find((a) => a.connected) || forexAccts[0] || null;
-  FX.account = acc;
-  FX.broker = acc ? acc.broker : "DELTA";
-  const tab = document.querySelector('.tab[data-tab="forex"]');
-  if (tab) tab.style.display = acc ? "" : "none";
-  // If the Forex broker is removed while its tab is open, fall back to Orders.
-  if (!acc && document.body.getAttribute("data-tab") === "forex") {
-    const ot = document.querySelector('.tab[data-tab="dashboard"]'); if (ot) ot.click();
-  }
-  fxRenderBanner(b);
-  if (acc && acc.connected) fxLoadBalances();
-  else { FX.balances = []; const el = document.getElementById("fxBalances"); if (el) el.textContent = ""; }
-}
-
-// Diagnostic: the per-asset balances the broker's margin engine actually sees.
-async function fxLoadBalances() {
-  const el = document.getElementById("fxBalances");
-  if (!el) return;
-  let r; try { r = await api.get("/api/forex/balances"); } catch { return; }
-  FX.balances = (r && r.balances) || [];
-  if (!FX.balances.length) { el.textContent = "💰 Balances: (none reported by the API)"; return; }
-  el.innerHTML = "💰 <b>Balances (from Delta API)</b>: "
-    + FX.balances.map((x) => `${x.asset} ${x.available}`).join(" · ")
-    + ` <span class="muted">— what the margin engine actually uses (may differ from the app wallet).</span>`;
-}
-// Sum of USD-like available balances (rough margin pool for the pre-flight warning).
-function fxAvailUsd() {
-  return (FX.balances || []).filter((x) => ["USD", "USDT", "USDC"].includes((x.asset || "").toUpperCase()))
-    .reduce((s, x) => s + (x.available || 0), 0);
-}
-// Refresh the API balances each time the Forex tab is opened.
-(function () {
-  const t = document.querySelector('.tab[data-tab="forex"]');
-  if (t) t.addEventListener("click", () => { if (FX.account && FX.account.connected) fxLoadBalances(); });
-})();
-
-function fxRenderBanner(b) {
-  const banner = document.getElementById("fxProviderBanner");
-  if (!banner) return;
-  if (!FX.account) { FX.onForex = false; banner.style.display = "none"; return; }
-  const id = String(FX.account.id);
-  banner.style.display = "block";
-  if (!FX.account.connected) {                 // set up but not authenticated yet
-    FX.onForex = false;
-    banner.className = "banner";
-    banner.innerHTML = `⚠️ ${FX.account.label} is not connected yet. Open the ` +
-      `<span class="link" onclick="document.querySelector('.tab[data-tab=&quot;broker&quot;]').click()">Broker</span> tab and click <b>Login</b> to trade crypto.`;
-    return;
-  }
-  const onForex = String(b.trade_provider || "") === id && String(b.data_provider || "") === id;
-  FX.onForex = onForex;
-  if (onForex) {
-    banner.className = "banner ok";
-    banner.textContent = `✅ Crypto prices & orders are routing to ${FX.account.label}.`;
-  } else {
-    banner.className = "banner";
-    banner.innerHTML = `⚠️ Live prices & orders here need ${FX.account.label} set as your Data + Trading account. ` +
-      `<button type="button" class="btn btn-sm" id="fxUseProvider">Use ${FX.account.label}</button>`;
-    const btn = document.getElementById("fxUseProvider");
-    if (btn) btn.onclick = async () => {
-      try {
-        await api.post("/api/providers", { data_provider: id, trade_provider: id });
-        toast("✅ Switched to " + FX.account.label, "pos"); await refreshBroker();
-      } catch (e) { toast("❌ " + e.message, "neg"); }
-    };
-  }
-}
-
-// mode / side / entry-type toggles
-document.querySelectorAll("[data-fxmode]").forEach((b) => b.onclick = () => {
-  document.querySelectorAll("[data-fxmode]").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active"); FX.mode = b.dataset.fxmode;
-});
-document.querySelectorAll("[data-fxside]").forEach((b) => b.onclick = () => {
-  document.querySelectorAll("[data-fxside]").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active"); FX.side = b.dataset.fxside; fxUpdateExample();   // buy vs sell changes option cost
-});
-document.querySelectorAll("[data-fxet]").forEach((b) => b.onclick = () => {
-  document.querySelectorAll("[data-fxet]").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active"); FX.et = b.dataset.fxet;
-  document.getElementById("fxEntryPrice").disabled = FX.et !== "LIMIT";
-});
-document.getElementById("fxQtyMinus").onclick = () => { const i = document.getElementById("fxQty"); i.value = Math.max(1, (parseInt(i.value) || 1) - 1); fxUpdateExample(); };
-document.getElementById("fxQtyPlus").onclick = () => { const i = document.getElementById("fxQty"); i.value = (parseInt(i.value) || 1) + 1; fxUpdateExample(); };
-document.getElementById("fxQty").addEventListener("input", fxUpdateExample);
-document.getElementById("fxContractValue").addEventListener("change", fxUpdateExample);
-document.getElementById("fxLeverage").addEventListener("change", fxUpdateExample);
-
-// symbol search
-let fxTimer = null;
-document.getElementById("fxSearch").addEventListener("input", () => {
-  clearTimeout(fxTimer);
-  const box = document.getElementById("fxResults");
-  const q = document.getElementById("fxSearch").value.trim();
-  if (q.length < 2) { box.classList.remove("show"); box.innerHTML = ""; return; }
-  fxTimer = setTimeout(async () => {
-    let rows = [];
-    try { rows = await api.get(`/api/forex/search?broker=${FX.broker}&q=` + encodeURIComponent(q)); } catch {}
-    if (!rows.length) {
-      box.innerHTML = `<div class="item"><div class="meta">No matches (product list may still be loading).</div></div>`;
-    } else {
-      box.innerHTML = rows.map((r, i) => `<div class="item" data-i="${i}">
-        <div class="sym">${r.symbol}</div>
-        <div class="meta">${r.contract_type || "product"} · id ${r.product_id}</div></div>`).join("");
-      box.querySelectorAll(".item").forEach((el) => { const r = rows[el.dataset.i]; if (r) el.onclick = () => fxPick(r); });
-    }
-    box.classList.add("show");
-  }, 250);
-});
-document.addEventListener("click", (e) => {
-  const box = document.getElementById("fxResults"), inp = document.getElementById("fxSearch");
-  if (box && inp && !inp.contains(e.target) && !box.contains(e.target)) box.classList.remove("show");
-});
-
-function fxSet(sel) {
-  FX.sel = sel;
-  FX.lastPx = 0;
-  document.getElementById("fxSearch").value = sel.symbol;
-  document.getElementById("fxResults").classList.remove("show");
-  fxPopulateCV();
-  fxShowSelected("LOADING");
-  fxUpdateExample();
-  fxStartLtp();
-}
-function fxPick(r) {
-  fxSet({ symbol: r.symbol, security_id: r.symbol, exchange_segment: FOREX_SEGMENT_FOR[FX.broker] || "DELTA",
-          instrument_type: "FUTURES", product_id: r.product_id, contract_value: r.contract_value });
-}
-// Contract value = the instrument's real Delta contract size (e.g. 0.001 BTC).
-function fxPopulateCV() {
-  const sel = document.getElementById("fxContractValue");
-  if (!sel) return;
-  const cv = FX.sel && FX.sel.contract_value;
-  sel.innerHTML = cv ? `<option value="${cv}">${cv} per contract</option>`
-                     : `<option value="">— (size unknown)</option>`;
-}
-function fxContractVal() {
-  return parseFloat(document.getElementById("fxContractValue").value)
-      || (FX.sel && parseFloat(FX.sel.contract_value)) || 0;
-}
-// Estimate the money needed to enter, accounting for the instrument:
-//  - BUYING an option = pay the FULL premium (no leverage) + fees (~15% buffer for
-//    Delta's fee + GST, which is why cheap options can fail on commission).
-//  - Futures/perp (or selling) = margin = notional ÷ leverage.
-const FX_FEE_BUFFER = 1.15;
-function fxEstMoney() {
-  const cv = fxContractVal(), qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1), px = FX.lastPx || 0;
-  const lev = Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1);
-  if (!cv || !px) return { ok: false };
-  const notional = qty * cv * px, perPoint = qty * cv;
-  const isOptionBuy = FX.sel && FX.sel.instrument_type === "OPTION" && FX.side === "BUY";
-  const money = isOptionBuy ? notional * FX_FEE_BUFFER : notional / lev;
-  return { ok: true, notional, perPoint, money, lev, isOptionBuy, premium: notional };
-}
-// Live "how much money to buy" example.
-function fxUpdateExample() {
-  const box = document.getElementById("fxExample");
-  if (!box) return;
-  if (!FX.sel) { box.style.display = "none"; return; }
-  box.style.display = "block"; box.className = "banner";
-  const e = fxEstMoney();
-  if (!e.ok) {
-    box.innerHTML = `<span class="muted">💡 Pick a symbol and wait for the live price to see how much money is needed.</span>`;
-    return;
-  }
-  const qty = Math.max(1, parseInt(document.getElementById("fxQty").value) || 1);
-  if (e.isOptionBuy) {
-    box.innerHTML = `<b>💡 Example</b> — buy <b>${qty}</b> ${FX.sel.symbol} @ premium $${FX.lastPx}:`
-      + `<br>• Premium (paid in FULL) ≈ $${e.premium.toFixed(2)} — buying options has no leverage`
-      + `<br>• <b>Money needed ≈ $${e.money.toFixed(2)}</b> (premium + ~15% for fees & GST)`
-      + `<br>• P&L per point ≈ $${e.perPoint.toFixed(4)} (SL/Target points × this)`;
-  } else {
-    box.innerHTML = `<b>💡 Example</b> — ${qty} ${FX.sel.symbol} @ $${FX.lastPx} at <b>${e.lev}×</b>:`
-      + `<br>• Position value (notional) ≈ $${e.notional.toFixed(2)}`
-      + `<br>• <b>Money needed ≈ $${e.money.toFixed(2)}</b> (notional ÷ ${e.lev}× leverage, + fees)`
-      + `<br>• P&L per point ≈ $${e.perPoint.toFixed(4)} (SL/Target points × this)`;
-  }
-}
-function fxShowSelected(px) {
-  const el = document.getElementById("fxSelected");
-  if (!FX.sel) { el.textContent = "No symbol selected yet."; return; }
-  const pxTxt = px === "LOADING" ? '<span class="muted">fetching price…</span>'
-    : (px > 0 ? `LTP <b>${px}</b>` : '<span class="muted">price unavailable — set this broker as your Data account</span>');
-  const cv = FX.sel.contract_value;
-  const cvTxt = cv ? ` · <span class="muted">1 contract = ${cv}; P&L = qty × ${cv} × points</span>` : "";
-  el.innerHTML = `✅ <b>${FX.sel.symbol}</b> — ${FX.broker}${FX.sel.product_id ? " · id " + FX.sel.product_id : ""} — ${pxTxt}${cvTxt}`;
-}
-function fxStartLtp() {
-  if (FX.ltpTimer) { clearInterval(FX.ltpTimer); FX.ltpTimer = null; }
-  const run = async () => {
-    if (!FX.sel) return;
-    let res; try { res = await api.post("/api/ltp", { items: [{ security_id: FX.sel.security_id, exchange_segment: FX.sel.exchange_segment }] }); } catch { return; }
-    const p = (res.prices || {})[FX.sel.security_id];
-    if (p != null) { FX.lastPx = p; fxShowSelected(p); fxUpdateExample(); }
-  };
-  run(); FX.ltpTimer = setInterval(run, 3000);
-}
-
-// ---- options chain (Delta) ----
-let fxChainData = [], fxChainTimer = null, fxUnderlying = null;
-document.querySelectorAll("[data-fxseg]").forEach((b) => b.onclick = () => {
-  document.querySelectorAll("[data-fxseg]").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active");
-  const opt = b.dataset.fxseg === "OPTION";
-  document.getElementById("fxPerpPicker").style.display = opt ? "none" : "";
-  document.getElementById("fxOptionPicker").style.display = opt ? "" : "none";
-  if (opt) { if (!document.getElementById("fxUlButtons").children.length) fxLoadUnderlyings(); }
-  else if (fxChainTimer) { clearInterval(fxChainTimer); fxChainTimer = null; }
-});
-
-async function fxLoadUnderlyings() {
-  const box = document.getElementById("fxUlButtons");
-  let uls = [];
-  try { uls = await api.get(`/api/forex/underlyings?broker=${FX.broker}`); } catch {}
-  if (!uls.length) {
-    box.innerHTML = `<span class="muted" style="font-size:12px;">No options found yet (the product list may still be loading).</span>`;
-    return;
-  }
-  box.innerHTML = uls.map((u) => `<button type="button" class="seg" data-fxul="${u}">${u}</button>`).join("");
-  box.querySelectorAll("[data-fxul]").forEach((el) => el.onclick = () => fxSelectUnderlying(el.dataset.fxul));
-}
-
-async function fxSelectUnderlying(u) {
-  fxUnderlying = u;
-  document.querySelectorAll("[data-fxul]").forEach((x) => x.classList.toggle("active", x.dataset.fxul === u));
-  let exps = [];
-  try { exps = await api.get(`/api/forex/expiries?broker=${FX.broker}&underlying=` + encodeURIComponent(u)); } catch {}
-  const sel = document.getElementById("fxExpiry");
-  sel.innerHTML = exps.map((e) => `<option>${e}</option>`).join("");
-  if (exps.length) fxLoadChain(u, exps[0]);
-  else { document.getElementById("fxChainWrap").style.display = "none"; }
-}
-document.getElementById("fxExpiry").onchange = () => { if (fxUnderlying) fxLoadChain(fxUnderlying, document.getElementById("fxExpiry").value); };
-
-async function fxLoadChain(underlying, expiry) {
-  let data; try { data = await api.get(`/api/forex/optionchain?broker=${FX.broker}&underlying=${encodeURIComponent(underlying)}&expiry=${encodeURIComponent(expiry)}`); } catch { return; }
-  fxChainData = data.strikes || [];
-  const body = document.getElementById("fxChainBody");
-  body.innerHTML = fxChainData.map((row, i) => {
-    const cell = (c, cls) => c
-      ? `<div class="chain-cell ${cls}" data-c='${JSON.stringify(c)}'><span class="ltp dim" data-ltp="${c.security_id}">tap to pick</span></div>`
-      : `<div class="chain-cell ${cls}"><span class="ltp dim">-</span></div>`;
-    return `<div class="chain-row" data-row="${i}">${cell(row.ce, "ce")}
-      <div class="chain-strike">${row.strike}</div>${cell(row.pe, "pe")}</div>`;
-  }).join("");
-  document.getElementById("fxChainWrap").style.display = fxChainData.length ? "block" : "none";
-  body.querySelectorAll(".chain-cell[data-c]").forEach((el) => {
-    el.onclick = () => {
-      body.querySelectorAll(".chain-cell.sel").forEach((x) => x.classList.remove("sel"));
-      el.classList.add("sel");
-      fxSet(JSON.parse(el.dataset.c));
-    };
-  });
-  fxChainLtp();
-  if (fxChainTimer) clearInterval(fxChainTimer);
-  fxChainTimer = setInterval(fxChainLtp, 5000);
-}
-
-async function fxChainLtp() {
-  if (document.body.getAttribute("data-tab") !== "forex") return;
-  const body = document.getElementById("fxChainBody");
-  const cells = [...body.querySelectorAll(".chain-cell[data-c]")].slice(0, 500);
-  if (!cells.length) return;
-  const items = cells.map((el) => { const c = JSON.parse(el.dataset.c);
-    return { security_id: c.security_id, exchange_segment: c.exchange_segment }; });
-  let res; try { res = await api.post("/api/ltp", { items }); } catch { return; }
-  const prices = res.prices || {};
-  body.querySelectorAll(".ltp[data-ltp]").forEach((sp) => {
-    const p = prices[sp.dataset.ltp]; if (p != null) { sp.textContent = p; sp.classList.remove("dim"); }
-  });
-  fxClassifyChain(prices);
-}
-
-// Mark ATM (closest CALL/PUT premium) + ITM/OTM shading, like the India chain.
-function fxClassifyChain(prices) {
-  let atm = -1, best = Infinity;
-  fxChainData.forEach((row, i) => {
-    if (!row.ce || !row.pe) return;
-    const ce = prices[row.ce.security_id], pe = prices[row.pe.security_id];
-    if (ce == null || pe == null || ce <= 0 || pe <= 0) return;
-    const diff = Math.abs(ce - pe);
-    if (diff < best) { best = diff; atm = i; }
-  });
-  if (atm < 0) return;
-  const atmStrike = fxChainData[atm].strike;
-  const body = document.getElementById("fxChainBody");
-  fxChainData.forEach((row, i) => {
-    const el = body.querySelector(`.chain-row[data-row="${i}"]`); if (!el) return;
-    const ceCell = el.querySelector(".chain-cell.ce"), peCell = el.querySelector(".chain-cell.pe");
-    el.classList.toggle("atm", i === atm);
-    if (ceCell) { ceCell.classList.toggle("itm", row.strike < atmStrike); ceCell.classList.toggle("otm", row.strike > atmStrike); }
-    if (peCell) { peCell.classList.toggle("itm", row.strike > atmStrike); peCell.classList.toggle("otm", row.strike < atmStrike); }
-    const sCell = el.querySelector(".chain-strike");
-    if (sCell) sCell.innerHTML = row.strike + (i === atm ? ' <span class="atm-badge">ATM</span>' : "");
-  });
-}
-
-document.getElementById("fxSubmit").onclick = async () => {
-  const msg = document.getElementById("fxMsg");
-  if (!FX.sel) { msg.textContent = "❌ Search and select a symbol first."; msg.className = "msg neg"; return; }
-  if (FX.mode === "LIVE" && !FX.onForex) {
-    msg.textContent = `❌ Set ${FX.account ? FX.account.label : "your crypto broker"} as the Data + Trading account first (use the banner above), or a LIVE order would route to the wrong broker.`;
-    msg.className = "msg neg"; return;
-  }
-  // Pre-flight check (LIVE): warn if the API-visible USD balance can't cover the
-  // money needed (full premium+fees for option buys, margin for futures).
-  if (FX.mode === "LIVE") {
-    const e = fxEstMoney();
-    const avail = fxAvailUsd();
-    if (e.ok && e.money > 0 && avail < e.money) {
-      const what = e.isOptionBuy ? "premium + fees" : "margin";
-      if (!confirm(`Estimated ${what} ≈ $${e.money.toFixed(2)} but the API sees only ~$${avail.toFixed(2)} available (USD/USDT). `
-        + `Delta will likely reject this (insufficient ${e.isOptionBuy ? "commission/premium" : "margin"}). Place anyway?`)) { return; }
-    }
-  }
-  const payload = {
-    mode: FX.mode, symbol: FX.sel.symbol, security_id: FX.sel.security_id,
-    exchange_segment: FX.sel.exchange_segment, instrument_type: FX.sel.instrument_type,
-    side: FX.side, quantity: Math.max(1, parseInt(document.getElementById("fxQty").value) || 1),
-    lot_size: 1, entry_type: FX.et,
-    leverage: Math.max(1, parseFloat(document.getElementById("fxLeverage").value) || 1),
-    entry_price: parseFloat(document.getElementById("fxEntryPrice").value) || 0,
-    sl_points: parseFloat(document.getElementById("fxSl").value) || 0,
-    target_points: parseFloat(document.getElementById("fxTarget").value) || 0,
-  };
-  try {
-    const t = await api.post("/api/trades", payload);
-    msg.textContent = `✅ Created trade #${t.id} (${t.symbol}).`; msg.className = "msg pos";
-    toast(`✅ Forex trade #${t.id} — ${t.symbol}`, "pos");
-    await refreshAll();
-  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
-};
-
-document.getElementById("fxAddWatch").onclick = async () => {
-  const msg = document.getElementById("fxMsg");
-  if (!FX.sel) { msg.textContent = "❌ Select a symbol first."; msg.className = "msg neg"; return; }
-  try {
-    await api.post("/api/watchlist", { symbol: FX.sel.symbol, security_id: FX.sel.security_id,
-      exchange_segment: FX.sel.exchange_segment, instrument_type: FX.sel.instrument_type,
-      underlying: FX.sel.symbol, lot_size: 1 });
-    toast(`⭐ ${FX.sel.symbol} added to watchlist`, "pos");
-    await loadWatchlist();
-  } catch (e) { msg.textContent = "❌ " + e.message; msg.className = "msg neg"; }
-};
-
-function fxRenderWatch(items) {
-  const box = document.getElementById("fxWatchChips"), empty = document.getElementById("fxWlEmpty");
-  if (!box || !empty) return;
-  if (!items.length) { box.innerHTML = ""; empty.style.display = ""; return; }
-  empty.style.display = "none";
-  box.innerHTML = items.map((w) =>
-    `<span class="wl-chip" data-fxwl="${w.id}" title="${w.exchange_segment} · ${w.security_id}">${w.symbol}<span class="wl-x" data-fxwlx="${w.id}">×</span></span>`).join("");
-  box.querySelectorAll(".wl-chip").forEach((el) => {
-    el.onclick = (e) => { if (e.target.classList.contains("wl-x")) return;
-      const w = items.find((x) => String(x.id) === el.dataset.fxwl); if (w) fxWlLoad(w); };
-  });
-  box.querySelectorAll(".wl-x").forEach((x) => {
-    x.onclick = async (e) => { e.stopPropagation(); await api.del("/api/watchlist/" + x.dataset.fxwlx); await loadWatchlist(); };
-  });
-}
-function fxWlLoad(w) {
-  document.querySelector('.tab[data-tab="forex"]').click();
-  const acc = document.querySelector("#tab-forex .watchlist-acc"); if (acc) acc.open = false;
-  fxSet({ symbol: w.symbol, security_id: w.security_id || w.symbol,
-          exchange_segment: w.exchange_segment || "DELTA", instrument_type: w.instrument_type || "FUTURES", product_id: "" });
-}
-
 // ---- logout ----
 document.getElementById("logoutBtn").onclick = async () => {
   await fetch("/api/auth/logout", { method: "POST" });
@@ -1342,8 +962,8 @@ document.getElementById("killBtn").onclick = async () => {
 
 // ---- broker / providers / accounts ----
 let _accounts = [];
-let _enabledBrokers = ["DHAN", "ANGEL", "ZERODHA", "ALICE", "DELTA"];
-const _BROKER_LABEL = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" };
+let _enabledBrokers = ["DHAN", "ANGEL", "ZERODHA", "ALICE"];
+const _BROKER_LABEL = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
 function buildAcctBrokerOptions() {
   const sel = document.getElementById("newAcctBroker");
   if (!sel) return;
@@ -1408,10 +1028,6 @@ async function loginAccount(id, broker) {
       await api.post("/api/aliceblue/login", { account_id: Number(id) });
       msg.textContent = "✅ Logged in to Alice Blue."; msg.className = "msg pos";
       await refreshBroker();
-    } else if (broker === "DELTA") {
-      await api.post("/api/delta/login", { account_id: Number(id) });
-      msg.textContent = "✅ Connected to Delta Exchange."; msg.className = "msg pos";
-      await refreshBroker();
     } else {
       await api.post("/api/angel/login", { account_id: Number(id) });
       msg.textContent = "✅ Logged in to Angel One."; msg.className = "msg pos";
@@ -1433,7 +1049,7 @@ function buildPnlFilter() {
 async function refreshBroker() {
   const b = await api.get("/api/broker");
   _accounts = b.accounts || [];
-  _enabledBrokers = b.enabled_brokers || ["DHAN", "ANGEL", "ZERODHA", "ALICE", "DELTA"];
+  _enabledBrokers = b.enabled_brokers || ["DHAN", "ANGEL", "ZERODHA", "ALICE"];
   buildAcctBrokerOptions();
   fillProviderSelect("dataProvider", b.data_provider || "");
   fillProviderSelect("tradeProvider", b.trade_provider || "");
@@ -1458,7 +1074,6 @@ async function refreshBroker() {
   const dot = (ok) => (ok ? "🟢" : "🔴");
   st.innerHTML = `${dot(b.data_connected)} Data: ${provLabel(b.data_provider)} &nbsp;|&nbsp; ${dot(b.trade_connected)} Trading: ${provLabel(b.trade_provider)}`;
   st.className = "pill " + (b.data_connected && b.trade_connected ? "pill-ok" : "pill-off");
-  fxApplyBrokerState(b);     // show/hide the Forex tab + its provider banner
 }
 
 // provider dropdowns (Demo is all-or-nothing)
@@ -1477,16 +1092,16 @@ async function refreshBroker() {
 });
 
 // add / edit account form
-const BROKER_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" };
+const BROKER_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
 function showAcctForm(broker, acc) {
   document.getElementById("acctForm").style.display = "block";
   document.getElementById("acctBroker").value = broker;
   document.getElementById("acctId").value = acc ? acc.id : "";
   document.getElementById("acctFormTitle").textContent = (acc ? "Edit " : "New ") + (BROKER_NAME[broker] || broker) + " account";
   document.querySelectorAll(".dhan-f").forEach((e) => e.style.display = broker === "DHAN" ? "" : "none");
-  document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA" || broker === "ALICE" || broker === "DELTA") ? "" : "none");
+  document.querySelectorAll(".api-f").forEach((e) => e.style.display = (broker === "ANGEL" || broker === "ZERODHA" || broker === "ALICE") ? "" : "none");
   document.querySelectorAll(".angel-f").forEach((e) => e.style.display = broker === "ANGEL" ? "" : "none");
-  document.querySelectorAll(".secret-f").forEach((e) => e.style.display = (broker === "ZERODHA" || broker === "DELTA") ? "" : "none");
+  document.querySelectorAll(".secret-f").forEach((e) => e.style.display = (broker === "ZERODHA") ? "" : "none");
   // Client / User ID is required for EVERY broker (so each broker login stays tied
   // to one user and can't be shared across accounts).
   document.getElementById("acctClientId").closest("label").style.display = "";
@@ -1511,7 +1126,7 @@ document.getElementById("acctSaveBtn").onclick = async () => {
   if (broker === "DHAN") {
     payload.app_id = document.getElementById("acctAppId").value;
     payload.app_secret = document.getElementById("acctAppSecret").value;
-  } else if (broker === "ZERODHA" || broker === "DELTA") {
+  } else if (broker === "ZERODHA") {
     payload.api_key = document.getElementById("acctApiKey").value;
     payload.api_secret = document.getElementById("acctZSecret").value;
   } else if (broker === "ALICE") {
@@ -1539,8 +1154,8 @@ document.getElementById("acctSaveBtn").onclick = async () => {
 
 // ---- modify SL/Targets modal (direct prices) ----
 const modifyModal = document.getElementById("modifyModal");
-let modifyId = null, modLotSize = 1, modRemainingLots = 1, modIsForex = false;
-const modStep = () => (modIsForex ? "any" : "0.05");   // crypto/forex need sub-unit prices
+let modifyId = null, modLotSize = 1, modRemainingLots = 1;
+const modStep = () => "0.05";
 
 function modDistribute() {
   const rows = [...document.querySelectorAll("#modTargetRows .trow")];
@@ -1575,10 +1190,8 @@ function openModify(id) {
   if (!t) return;
   modifyId = id;
   modLotSize = t.lot_size || 1;
-  modIsForex = (typeof FOREX_SEGMENTS !== "undefined") && FOREX_SEGMENTS.includes(t.exchange_segment);
   const remainingQty = t.quantity - (t.exited_qty || 0);
   modRemainingLots = Math.max(1, Math.floor(remainingQty / modLotSize));
-  // Crypto/forex prices can be sub-unit, so loosen the SL/trail/target step.
   document.getElementById("modSl").step = modStep();
   document.getElementById("modTrail").step = modStep();
   document.getElementById("modSl").value = t.stop_loss || 0;
@@ -1602,11 +1215,9 @@ function openModify(id) {
   setVal("modLockStep", t.lock_step || 0);
   setVal("modLockAmount", t.lock_amount || 0);
   document.getElementById("modMsg").textContent = "";
-  const cur = modIsForex ? "$" : "₹";
-  const unit = modIsForex ? `${remainingQty} contracts` : `${remainingQty} qty (${modRemainingLots} lots, lot size ${modLotSize})`;
+  const unit = `${remainingQty} qty (${modRemainingLots} lots, lot size ${modLotSize})`;
   document.getElementById("modifyInfo").innerHTML =
-    `<b>${t.symbol}</b> — entry ${cur}${t.entry_fill_price} · LTP ${cur}${t.last_price} · remaining ${unit}`
-    + (modIsForex ? ` · <span class="muted">SL/target are prices; P&L = qty × points ($1/contract/point)</span>` : "");
+    `<b>${t.symbol}</b> — entry ₹${t.entry_fill_price} · LTP ₹${t.last_price} · remaining ${unit}`;
   modifyModal.style.display = "flex";
 }
 document.getElementById("modCancel").onclick = () => { modifyModal.style.display = "none"; };
@@ -1892,9 +1503,7 @@ async function loadWatchlist() {
 }
 function renderWatchlist(all) {
   _watchlist = all || [];
-  // Forex/crypto watchlist items live on their own tab; keep them out of the India list.
-  fxRenderWatch(_watchlist.filter(isForexItem));
-  const items = _watchlist.filter((w) => !isForexItem(w));
+  const items = _watchlist;
   const box = document.getElementById("watchlistChips");
   const empty = document.getElementById("wlEmpty");
   if (!items.length) { box.innerHTML = ""; empty.style.display = ""; return; }
@@ -2121,7 +1730,7 @@ document.getElementById("adCreateUser").onclick = async () => {
 
 // ---- remote inspector (full broker control on behalf of a user) ----
 let _auId = null, _auUuid = "", _auTimer = null;
-const AU_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue", DELTA: "Delta Exchange" };
+const AU_NAME = { DHAN: "Dhan", ANGEL: "Angel One", ZERODHA: "Zerodha", ALICE: "Alice Blue" };
 async function adminInspect(uid, email, uuid) {
   _auId = uid; _auUuid = uuid || "";
   document.getElementById("auTitle").textContent = "🛠️ " + email;
@@ -2175,8 +1784,8 @@ function auApplyBrokerFields() {
   // the `.au-f` / `.au-f.show` classes, so class-toggling can't hide these fields.
   const show = (sel, on) => document.querySelectorAll(sel).forEach((e) => e.style.display = on ? "" : "none");
   show(".au-dhan", b === "DHAN");
-  show(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE" || b === "DELTA");
-  show(".au-secret", b === "ZERODHA" || b === "DELTA");
+  show(".au-api", b === "ANGEL" || b === "ZERODHA" || b === "ALICE");
+  show(".au-secret", b === "ZERODHA");
   show(".au-ang", b === "ANGEL");
   // Client / User ID is required for every broker (kept visible for all).
   const cid = document.getElementById("auClient").closest("label");

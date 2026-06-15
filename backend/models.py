@@ -106,7 +106,7 @@ class Trade(Base):
     side = Column(String, default="BUY")           # BUY (long) or SELL (short)
     quantity = Column(Integer, default=1)
     lot_size = Column(Integer, default=1)           # contract lot size (for lots math)
-    leverage = Column(Float, default=0.0)           # forex/crypto leverage (0 = broker default)
+    leverage = Column(Float, default=0.0)           # legacy field, unused (Forex broker removed)
 
     # --- Entry / Exit rules ---
     entry_type = Column(String, default="MARKET")  # MARKET / LIMIT / SCHEDULED / TRIGGER
@@ -154,9 +154,9 @@ class Trade(Base):
     exit_order_id = Column(String, default="")      # broker id of OUR exit order (so the
     #                                                 external-order sync never mirrors our
     #                                                 own square-off back as a new trade)
-    # Position-netted brokers (Delta) have no per-order open/closed status, so we
-    # confirm the broker is actually HOLDING this trade's position at least once
-    # before we ever let a 'flat product' reading close it. This stops a freshly
+    # Brokers net positions per instrument and expose no per-order open/closed status,
+    # so we confirm the broker is actually HOLDING this trade's position at least once
+    # before we ever let a 'flat instrument' reading close it. This stops a freshly
     # RE-OPENED symbol from being wrongly marked CLOSED off an old/stale position.
     broker_pos_seen = Column(Integer, default=0)    # 1 once the live position was seen
     broker = Column(String, default="")             # which broker executed it (PAPER/DHAN/ANGEL)

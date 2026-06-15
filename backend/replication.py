@@ -117,8 +117,6 @@ def _lot_for_account(db, account_id, security_id, exchange_segment, dhan_lot):
     acc = db.get(Account, account_id)
     if acc is None or acc.broker == "DHAN":
         return dhan_lot
-    if acc.broker == "DELTA":
-        return 1        # Delta sizes orders in whole contracts (no lot multiplier)
     from instruments import store
     meta = store.get_meta(security_id) or {}
     try:
@@ -291,9 +289,8 @@ def _close_one(trade_id, reason):
         ok, fill, oid, e = _place(db, st, broker, True, remaining, price)
         exit_side = "SELL" if st.side == "BUY" else "BUY"
         if ok:
-            import delta
             direction = 1 if st.side == "BUY" else -1
-            pv = delta.point_value(st.exchange_segment, st.security_id)   # contract value (1.0 for equity)
+            pv = 1.0   # equity P&L: 1 point = one currency unit per qty
             st.realized_pnl = (st.realized_pnl or 0) + (price - st.entry_fill_price) * direction * remaining * pv
             st.exited_qty = st.quantity
             st.exit_fill_price = fill
