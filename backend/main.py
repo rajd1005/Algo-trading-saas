@@ -1118,7 +1118,9 @@ def close_trade(trade_id: int, request: Request, db: Session = Depends(get_db)):
     t = _owned_trade(db, trade_id, me.id)
     if t.status != "OPEN":
         raise HTTPException(400, "Only OPEN trades can be closed.")
-    broker, _mode, err = replication._broker_for(db, t.account_id)
+    # Paper/TEST trades must never hit the real broker — route them to the paper
+    # broker (account 0) no matter which account they were booked against.
+    broker, _mode, err = replication._broker_for(db, 0 if t.mode == "TEST" else t.account_id)
     if broker is None:
         raise HTTPException(400, f"Cannot close {t.symbol} — broker not available: {err}")
     price = (replication._ltp(db, me.id, t.exchange_segment, t.security_id)

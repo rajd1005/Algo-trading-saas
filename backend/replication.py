@@ -278,7 +278,7 @@ def _close_one(trade_id, reason):
         st = db.get(Trade, trade_id)
         if not st or st.status != "OPEN":
             return
-        broker, mode, err = _broker_for(db, st.account_id)
+        broker, mode, err = _broker_for(db, 0 if st.mode == "TEST" else st.account_id)
         if broker is None:
             _log(db, st.user_id, f"Group square-off: {err} — could not close {st.symbol}.", "ERROR", st.id)
             db.commit()
