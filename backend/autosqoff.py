@@ -65,7 +65,7 @@ def _squareoff_user(db, uid, sq, today):
     for t in pends:
         try:
             if t.broker_order_id and t.account_id:
-                broker, _mode, _err = replication._broker_for(db, t.account_id)
+                broker, _mode, _err = replication._broker_for(db, 0 if t.mode == "TEST" else t.account_id)
                 if broker is not None and hasattr(broker, "cancel_order"):
                     broker.cancel_order(t.broker_order_id)
         except Exception:
@@ -78,7 +78,7 @@ def _squareoff_user(db, uid, sq, today):
     closed = 0
     for t in opens:
         try:
-            broker, _mode, err = replication._broker_for(db, t.account_id)
+            broker, _mode, err = replication._broker_for(db, 0 if t.mode == "TEST" else t.account_id)
             if broker is None:
                 _log(db, uid, f"Auto square-off: {err} — could not close {t.symbol}.", "ERROR", t.id)
                 continue
