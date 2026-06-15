@@ -689,16 +689,10 @@ def _broker_monitor_loop():
                     uset(db, u.id, "broker_health", "ok")
                 else:
                     uset(db, u.id, "broker_health", "error")
-                # Delta is position-netted: skip order-book mirroring (it only spawns
-                # phantom trades there) — its state comes from the position reconcile.
-                if acc.broker != "DELTA":
-                    try:
-                        _sync_external_orders(db, b.get_orders(), acc.broker, acc.id, u.id)
-                    except Exception:
-                        pass
-                # Brokers net POSITIONS per instrument, not per-order, so reconcile
-                # each OPEN trade against the position it actually opened (keyed by the
-                # broker's instrument id, not the symbol) — see _reconcile_broker_positions.
+                # Order-book mirroring is intentionally NOT done: every broker we
+                # integrate nets positions per instrument, so mirroring the order book
+                # spawned phantom 'trades' for square-offs. Trade state comes from the
+                # engine (entries/exits) + the position reconcile below.
                 try:
                     _reconcile_broker_positions(db, b, acc.id, u.id)
                 except Exception:
@@ -806,16 +800,21 @@ _EXT_STATUS_MAP = {
     "REJECTED": "REJECTED", "CANCELLED": "CANCELLED", "EXPIRED": "CANCELLED",
 }
 
+# Every broker we integrate nets positions per instrument, so order-book mirroring is
+# disabled for all of them — it created phantom trades for square-offs (see below).
+_NETTED_BROKERS = {"DELTA", "DHAN", "ANGEL", "ZERODHA", "ALICE"}
+
 
 def _sync_external_orders(db, orders, broker="DHAN", account_id=0, user_id=0):
     """Mirror the broker's order book into this tenant's system.
 
-    Skipped entirely for position-netted brokers (Delta): there, closing a position
-    is just another order, so mirroring the order book spawns phantom 'trades' for our
-    own square-offs AND for closes done in the broker app — and the order book lags the
-    position feed, so we can't reliably tell a closing order from a new one. Delta state
-    is driven solely by the position reconcile (_reconcile_broker_positions)."""
-    if broker == "DELTA":
+    Disabled for position-netted brokers: closing a position is just another order, so
+    mirroring the order book spawns phantom 'trades' for square-offs — and the order
+    book lags the position feed, so a closing order can't be reliably told apart from a
+    new one. EVERY broker this app integrates (Delta/Dhan/Angel/Zerodha/Alice) nets
+    positions, so this is a no-op for all of them: trade state comes from the engine
+    (entries/exits) and the position reconcile (_reconcile_broker_positions)."""
+    if broker in _NETTED_BROKERS:
         return
     for o in orders or []:
         oid = str(o.get("orderId", ""))
